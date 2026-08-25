@@ -13,8 +13,8 @@ use super::mmio::*;
 use crate::EventManager;
 use crate::device_manager::DevicePersistError;
 use crate::device_manager::acpi::ACPIDeviceError;
-use crate::devices::acpi::vmclock::{VmClock, VmClockState};
-use crate::devices::acpi::vmgenid::{VMGenIDState, VmGenId};
+use crate::devices::acpi::vmclock::{VmClock, VmClockRestoreNotification, VmClockState};
+use crate::devices::acpi::vmgenid::{VMGenIDState, VmGenId, VmGenIdRestoreNotification};
 #[cfg(target_arch = "aarch64")]
 use crate::devices::legacy::RTCDevice;
 use crate::devices::virtio::balloon::Balloon;
@@ -188,7 +188,7 @@ pub struct MMIOPlatformDevicesState {
 
 impl<'a> Persist<'a> for ACPIDeviceManager {
     type State = ACPIDeviceManagerState;
-    type ConstructorArgs = &'a KvmVm;
+    type ConstructorArgs = ACPIDeviceRestoreArgs<'a>;
     type Error = ACPIDeviceError;
 
     fn save(&self) -> Self::State {
@@ -198,7 +198,8 @@ impl<'a> Persist<'a> for ACPIDeviceManager {
         }
     }
 
-    fn restore(vm: Self::ConstructorArgs, state: &Self::State) -> Result<Self, Self::Error> {
+    fn restore(args: Self::ConstructorArgs, state: &Self::State) -> Result<Self, Self::Error> {
+        let vm = args.vm;
         let mut acpi_devices = ACPIDeviceManager::new(
             VmGenId::restore((), &state.vmgenid)?,
             VmClock::restore((), &state.vmclock)?,
@@ -207,13 +208,20 @@ impl<'a> Persist<'a> for ACPIDeviceManager {
         acpi_devices.replay_gsi_allocations(vm)?;
 
         acpi_devices.activate_vmgenid(vm)?;
-        acpi_devices.do_post_restore_vmgenid()?;
+        acpi_devices.do_post_restore_vmgenid(args.vmgenid_notification)?;
 
         acpi_devices.activate_vmclock(vm)?;
-        acpi_devices.do_post_restore_vmclock(vm.guest_memory())?;
+        acpi_devices.do_post_restore_vmclock(vm.guest_memory(), args.vmclock_notification)?;
 
         Ok(acpi_devices)
     }
+}
+
+#[derive(Debug)]
+pub struct ACPIDeviceRestoreArgs<'a> {
+    pub vm: &'a KvmVm,
+    pub vmgenid_notification: VmGenIdRestoreNotification,
+    pub vmclock_notification: VmClockRestoreNotification,
 }
 
 impl<'a> Persist<'a> for MMIOPlatformDevices {

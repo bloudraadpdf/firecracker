@@ -55,6 +55,16 @@ pub enum VmClockError {
     NotifyGuest(std::io::Error),
 }
 
+/// Selects how VMClock publishes its post-restore generation update.
+#[derive(Debug, Default, Clone, Copy, Deserialize, PartialEq, Eq)]
+pub enum VmClockRestoreNotification {
+    /// Raise the VMClock interrupt after the update.
+    #[default]
+    Interrupt,
+    /// Publish the update without an interrupt.
+    Disabled,
+}
+
 /// VMclock device
 ///
 /// This device emulates the VMclock device which allows passing information to the guest related
@@ -118,8 +128,12 @@ impl VmClock {
         Ok(())
     }
 
-    /// Bump the VM generation counter and notify guest after snapshot restore
-    pub fn do_post_restore(&mut self, mem: &GuestMemoryMmap) -> Result<(), VmClockError> {
+    /// Bump the VM generation counter after snapshot restore.
+    pub fn do_post_restore(
+        &mut self,
+        mem: &GuestMemoryMmap,
+        notification: VmClockRestoreNotification,
+    ) -> Result<(), VmClockError> {
         write_vmclock_field!(self, mem, seq_count, self.inner.seq_count | 1);
 
         // This fence ensures guest sees all previous writes. It is matched to a
@@ -145,10 +159,12 @@ impl VmClock {
         fence(Ordering::Release);
 
         write_vmclock_field!(self, mem, seq_count, self.inner.seq_count.wrapping_add(1));
-        self.interrupt_evt
-            .trigger()
-            .map_err(VmClockError::NotifyGuest)?;
-        debug!("vmclock: notifying guest about VMClock updates");
+        if notification == VmClockRestoreNotification::Interrupt {
+            self.interrupt_evt
+                .trigger()
+                .map_err(VmClockError::NotifyGuest)?;
+            debug!("vmclock: notifying guest about VMClock updates");
+        }
         Ok(())
     }
 }
@@ -227,7 +243,7 @@ mod tests {
 
     use crate::arch;
     use crate::devices::acpi::generated::vmclock_abi::vmclock_abi;
-    use crate::devices::acpi::vmclock::{VMCLOCK_SIZE, VmClock};
+    use crate::devices::acpi::vmclock::{VMCLOCK_SIZE, VmClock, VmClockRestoreNotification};
     use crate::snapshot::Persist;
     use crate::test_utils::single_region_mem;
     use crate::utils::u64_to_usize;
@@ -271,7 +287,9 @@ mod tests {
 
         let state = vmclock.save();
         let mut vmclock_new = VmClock::restore((), &state).unwrap();
-        vmclock_new.do_post_restore(&mem).unwrap();
+        vmclock_new
+            .do_post_restore(&mem, VmClockRestoreNotification::Interrupt)
+            .unwrap();
 
         let guest_data_new: vmclock_abi = mem.read_obj(VMCLOCK_TEST_GUEST_ADDR).unwrap();
         assert_ne!(guest_data_new, vmclock.inner);
@@ -283,6 +301,31 @@ mod tests {
         assert_eq!(
             vmclock.inner.vm_generation_counter + 1,
             vmclock_new.inner.vm_generation_counter
+        );
+    }
+
+    #[test]
+    fn test_device_restore_without_notification() {
+        let vmclock = default_vmclock();
+        let mem = single_region_mem(
+            u64_to_usize(arch::SYSTEM_MEM_START) + u64_to_usize(arch::SYSTEM_MEM_SIZE),
+        );
+        vmclock.activate(&mem).unwrap();
+
+        let state = vmclock.save();
+        let mut restored = VmClock::restore((), &state).unwrap();
+        restored
+            .do_post_restore(&mem, VmClockRestoreNotification::Disabled)
+            .unwrap();
+
+        assert_eq!(
+            restored.interrupt_evt.read().unwrap_err().raw_os_error(),
+            Some(libc::EAGAIN)
+        );
+        let guest_data: vmclock_abi = mem.read_obj(VMCLOCK_TEST_GUEST_ADDR).unwrap();
+        assert_eq!(
+            guest_data.vm_generation_counter,
+            vmclock.inner.vm_generation_counter + 1
         );
     }
 }

@@ -433,6 +433,8 @@ pub fn build_microvm_from_snapshot(
     seccomp_filters: &BpfThreadMap,
     vm_resources: &mut VmResources,
     clock_realtime: bool,
+    vmgenid_notification: crate::devices::acpi::vmgenid::VmGenIdRestoreNotification,
+    vmclock_notification: crate::devices::acpi::vmclock::VmClockRestoreNotification,
 ) -> Result<Arc<Mutex<Vmm>>, BuildMicrovmFromSnapshotError> {
     // Build Vmm.
     debug!("event_start: build microvm from snapshot");
@@ -463,7 +465,6 @@ pub fn build_microvm_from_snapshot(
             }
         }
     }
-
     // Restore vcpus kvm state.
     for (vcpu, state) in vcpus.iter_mut().zip(microvm_state.vcpu_states.iter()) {
         vcpu.kvm_vcpu
@@ -471,7 +472,6 @@ pub fn build_microvm_from_snapshot(
             .map_err(VcpuError::VcpuResponse)
             .map_err(BuildMicrovmFromSnapshotError::RestoreVcpus)?;
     }
-
     #[cfg(target_arch = "aarch64")]
     {
         if clock_realtime {
@@ -485,7 +485,6 @@ pub fn build_microvm_from_snapshot(
     // Restore kvm vm state.
     #[cfg(target_arch = "x86_64")]
     vm.restore_state(&microvm_state.vm_state, clock_realtime)?;
-
     // Restore the boot source config paths.
     vm_resources.boot_source.config = microvm_state.vm_info.boot_source;
 
@@ -493,7 +492,6 @@ pub fn build_microvm_from_snapshot(
 
     let kvm_vm = Arc::new(vm);
     let vm = Vm::Kvm(kvm_vm.clone());
-
     // Restore devices states.
     // Restoring VMGenID injects an interrupt in the guest to notify it about the new generation
     // ID. As a result, we need to restore DeviceManager after restoring the KVM state, otherwise
@@ -505,6 +503,8 @@ pub fn build_microvm_from_snapshot(
         vm_resources,
         instance_id: &instance_info.id,
         vcpus_exit_evt: kvm_vm.vcpus_exit_evt(),
+        vmgenid_notification,
+        vmclock_notification,
     };
     #[allow(unused_mut)]
     let mut device_manager =
@@ -518,7 +518,6 @@ pub fn build_microvm_from_snapshot(
         vm,
         device_manager,
     };
-
     // Move vcpus to their own threads and start their state machine in the 'Paused' state.
     kvm_vm.start_vcpus(
         vcpus,
@@ -527,7 +526,6 @@ pub fn build_microvm_from_snapshot(
             .ok_or(BuildMicrovmFromSnapshotError::MissingVcpuSeccompFilters)?
             .clone(),
     )?;
-
     let vmm = Arc::new(Mutex::new(vmm));
     vmm.lock().unwrap().instance_info.state = VmState::Paused;
     event_manager.add_subscriber(vmm.clone());

@@ -423,7 +423,6 @@ pub fn restore_from_snapshot(
             .uds_path
             .clone_from(&vsock_override.uds_path);
     }
-
     let track_dirty_pages = params.track_dirty_pages;
 
     let vcpu_count = microvm_state
@@ -488,6 +487,8 @@ pub fn restore_from_snapshot(
         seccomp_filters,
         vm_resources,
         params.clock_realtime,
+        params.vmgenid_restore_notification,
+        params.vmclock_restore_notification,
     )
     .map_err(RestoreFromSnapshotError::Build)
 }

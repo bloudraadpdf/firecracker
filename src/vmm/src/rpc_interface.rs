@@ -1337,6 +1337,8 @@ mod tests {
                 vsock_override: None,
                 clock_realtime: false,
                 huge_pages: SnapshotLoadHugePageConfig::Snapshot,
+                vmclock_restore_notification: Default::default(),
+                vmgenid_restore_notification: Default::default(),
             },
         )));
         check_unsupported(runtime_request(VmmAction::SetEntropyDevice(

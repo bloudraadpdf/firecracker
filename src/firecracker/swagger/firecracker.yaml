@@ -1754,6 +1754,25 @@ definitions:
           memory-mapping behavior. Explicit hugetlbfs (`2M`) pages require a UFFD
           memory backend. With UFFD, the effectiveness of transparent huge pages
           may be limited.
+      vmclock_restore_notification:
+        type: string
+        enum:
+          - Interrupt
+          - Disabled
+        description:
+          Selects how VMClock publishes its post-restore generation update.
+          Interrupt is the default. Disabled advances the generation without
+          raising the VMClock interrupt; guests must observe the mapped ABI.
+      vmgenid_restore_notification:
+        type: string
+        enum:
+          - Interrupt
+          - Disabled
+        description:
+          Selects whether VMGenID raises its post-restore guest notification.
+          Interrupt is the default. Disabled still writes a new generation ID
+          but does not raise the interrupt; guests must explicitly process the
+          changed ID before consuming randomness or publishing readiness.
 
 
   TokenBucket:

@@ -456,6 +456,21 @@ hugetlbfs pages require the `Uffd` backend, so combining `2M` with `File`
 returns an error. With `Uffd`, the effectiveness of transparent huge pages may
 be limited.
 
+The `vmclock_restore_notification` field selects how Firecracker publishes the
+VMClock generation update. `Interrupt` is the default. `Disabled` advances the
+generation and completes the VMClock seqlock update without raising its
+interrupt. Use `Disabled` only when the guest observes the read-only mapped
+VMClock ABI. A guest that blocks on the VMClock device notification needs
+`Interrupt`.
+
+The `vmgenid_restore_notification` field selects whether Firecracker raises the
+VMGenID guest notification after writing the restored VM's fresh generation ID.
+`Interrupt` is the default. `Disabled` still writes the new 128-bit ID into the
+guest mapping, but does not raise its interrupt. Use `Disabled` only when the
+guest explicitly asks its VMGenID driver to process the changed ID before it
+consumes randomness or publishes readiness. Merely observing the changed ID is
+not sufficient: the guest must retain its normal VM-fork CSPRNG reseed path.
+
 When relying on the OS to handle page faults, the command below is also
 accepted. Note that `mem_file_path` field is currently under the deprecation
 policy. `mem_file_path` and `mem_backend` are mutually exclusive, therefore
@@ -504,6 +519,11 @@ to the new Firecracker process as they were to the original one.
     KVM dirty page tracking.
   - If `resume_vm` is set, the vm is automatically resumed if load is
     successful.
+  - The VMClock generation advances. Its interrupt follows the selected
+    `vmclock_restore_notification` mode.
+  - VMGenID receives a fresh generation ID. Its interrupt follows the selected
+    `vmgenid_restore_notification` mode; disabling it does not make the guest's
+    VM-fork CSPRNG reseed optional.
 - _on failure_: A specific error is reported and then the current Firecracker
   process is ended (as it might be in an invalid state).
 
