@@ -942,7 +942,7 @@ mod tests {
             LocalListener::new(format!("{}_{}", self.muxer.host_sock_path, port))
         }
 
-        fn local_connect(&mut self, peer_port: u32) -> (UnixStream, u32) {
+        fn local_request(&mut self, peer_port: u32) -> (UnixStream, u32) {
             let (init_local_lsn_count, init_conn_lsn_count) = self.count_epoll_listeners();
 
             let mut stream = UnixStream::connect(self.muxer.host_sock_path.clone()).unwrap();
@@ -984,6 +984,12 @@ mod tests {
             assert_eq!(self.rx_pkt.hdr.op(), uapi::VSOCK_OP_REQUEST);
             assert_eq!(self.rx_pkt.hdr.dst_port(), peer_port);
             assert_eq!(self.rx_pkt.hdr.src_port(), local_port);
+
+            (stream, local_port)
+        }
+
+        fn local_connect(&mut self, peer_port: u32) -> (UnixStream, u32) {
+            let (mut stream, local_port) = self.local_request(peer_port);
 
             self.init_tx_pkt(local_port, peer_port, uapi::VSOCK_OP_RESPONSE);
             self.send();
@@ -1320,14 +1326,13 @@ mod tests {
             local_port = local_port_;
         }
         // Local var `_stream` was now dropped, thus closing the local stream. After the muxer gets
-        // notified via EPOLLIN, it should attempt to gracefully shutdown the connection, issuing a
-        // VSOCK_OP_SHUTDOWN with both no-more-send and no-more-recv indications set.
+        // notified via EPOLLIN, it should report that the host will send no more data.
         ctx.notify_muxer();
         assert!(ctx.muxer.has_pending_rx());
         ctx.recv();
         assert_eq!(ctx.rx_pkt.hdr.op(), uapi::VSOCK_OP_SHUTDOWN);
         assert_ne!(ctx.rx_pkt.hdr.flags() & uapi::VSOCK_FLAGS_SHUTDOWN_SEND, 0);
-        assert_ne!(ctx.rx_pkt.hdr.flags() & uapi::VSOCK_FLAGS_SHUTDOWN_RCV, 0);
+        assert_eq!(ctx.rx_pkt.hdr.flags() & uapi::VSOCK_FLAGS_SHUTDOWN_RCV, 0);
         assert_eq!(ctx.rx_pkt.hdr.src_port(), local_port);
         assert_eq!(ctx.rx_pkt.hdr.dst_port(), peer_port);
 
@@ -1386,6 +1391,39 @@ mod tests {
         // The muxer should also drop / close the local Unix socket for this connection.
         let mut buf = vec![0u8; 16];
         assert_eq!(stream.read(buf.as_mut_slice()).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_peer_half_close() {
+        let peer_port = 1025;
+        let local_port = 1026;
+        let mut ctx = MuxerTestContext::new("peer_half_close");
+
+        let mut listener = ctx.create_local_listener(local_port);
+        ctx.init_tx_pkt(local_port, peer_port, uapi::VSOCK_OP_REQUEST);
+        ctx.send();
+        let mut stream = listener.accept();
+        ctx.recv();
+        assert_eq!(ctx.rx_pkt.hdr.op(), uapi::VSOCK_OP_RESPONSE);
+
+        let request = [1, 2, 3, 4];
+        ctx.init_data_tx_pkt(local_port, peer_port, &request);
+        ctx.send();
+        ctx.init_tx_pkt(local_port, peer_port, uapi::VSOCK_OP_SHUTDOWN)
+            .hdr
+            .set_flag(uapi::VSOCK_FLAGS_SHUTDOWN_SEND);
+        ctx.send();
+
+        let mut received = Vec::new();
+        stream.read_to_end(&mut received).unwrap();
+        assert_eq!(received, request);
+
+        let response = [5, 6, 7, 8];
+        stream.write_all(&response).unwrap();
+        ctx.notify_muxer();
+        ctx.recv();
+        assert_eq!(ctx.rx_pkt.hdr.op(), uapi::VSOCK_OP_RW);
+        assert_eq!(test_utils::read_packet_data(&ctx.tx_pkt, 4), response);
     }
 
     #[test]
@@ -1458,7 +1496,9 @@ mod tests {
         let local_port = 1026;
         let peer_port_first = 1025;
         let peer_port_last = peer_port_first + defs::MUXER_KILLQ_SIZE;
-        let mut listener = ctx.create_local_listener(local_port);
+        let _listener = ctx.create_local_listener(local_port);
+        let mut streams = Vec::new();
+        let mut expiring_local_ports = Vec::new();
 
         // Save metrics relevant for this test.
         let conns_added = METRICS.conns_added.count();
@@ -1467,21 +1507,9 @@ mod tests {
         let killq_resync = METRICS.killq_resync.count();
 
         for peer_port in peer_port_first..=peer_port_last {
-            ctx.init_tx_pkt(local_port, peer_port, uapi::VSOCK_OP_REQUEST);
-            ctx.send();
-            ctx.notify_muxer();
-            ctx.recv();
-            assert_eq!(ctx.rx_pkt.hdr.op(), uapi::VSOCK_OP_RESPONSE);
-            assert_eq!(ctx.rx_pkt.hdr.src_port(), local_port);
-            assert_eq!(ctx.rx_pkt.hdr.dst_port(), peer_port);
-            {
-                let _stream = listener.accept();
-            }
-            ctx.notify_muxer();
-            ctx.recv();
-            assert_eq!(ctx.rx_pkt.hdr.op(), uapi::VSOCK_OP_SHUTDOWN);
-            assert_eq!(ctx.rx_pkt.hdr.src_port(), local_port);
-            assert_eq!(ctx.rx_pkt.hdr.dst_port(), peer_port);
+            let (stream, expiring_local_port) = ctx.local_request(peer_port);
+            streams.push(stream);
+            expiring_local_ports.push(expiring_local_port);
             // The kill queue should be synchronized, up until the `defs::MUXER_KILLQ_SIZE`th
             // connection we schedule for termination.
             assert_eq!(
@@ -1524,10 +1552,13 @@ mod tests {
         assert!(ctx.muxer.has_pending_rx());
         // There should be `defs::MUXER_KILLQ_SIZE` RSTs in the RX queue, from terminating the
         // dying connections in the recent killq sweep.
-        for _p in peer_port_first..peer_port_last {
+        for expected_local_port in expiring_local_ports
+            .iter()
+            .take(defs::MUXER_KILLQ_SIZE as usize)
+        {
             ctx.recv();
             assert_eq!(ctx.rx_pkt.hdr.op(), uapi::VSOCK_OP_RST);
-            assert_eq!(ctx.rx_pkt.hdr.src_port(), local_port);
+            assert_eq!(ctx.rx_pkt.hdr.src_port(), *expected_local_port);
         }
 
         // The connections should have been removed here.

@@ -29,6 +29,19 @@
                 "syscall": "write"
             },
             {
+                "syscall": "shutdown",
+                "comment": "Used to propagate a guest vsock send shutdown to its Unix stream",
+                "args": [
+                    {
+                        "index": 1,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 1,
+                        "comment": "SHUT_WR"
+                    }
+                ]
+            },
+            {
                 "syscall": "mincore"
             },
             {
