@@ -3,8 +3,8 @@
 
 #[cfg(all(feature = "fuzzing", not(debug_assertions)))]
 compile_error!(
-    "The `fuzzing` feature must not be used in release builds. \
-     Build with the dev profile instead: `cargo build --features fuzzing`"
+    "The `fuzzing` feature must not be used in release builds. Build with the dev profile \
+     instead: `cargo build --features fuzzing`"
 );
 
 mod api_server;
@@ -58,6 +58,8 @@ const MMDS_CONTENT_ARG: &str = "metadata";
 
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 enum MainError {
+    /// Failed to disable core dumps: {0}
+    DisableCoreDumps(#[source] io::Error),
     /// Failed to set the logger: {0}
     SetLogger(vmm::logger::LoggerInitError),
     /// Failed to register signal handlers: {0}
@@ -119,6 +121,11 @@ fn main() -> ExitCode {
 }
 
 fn main_exec() -> Result<(), MainError> {
+    // SAFETY: PR_SET_DUMPABLE takes an integer flag, not a pointer. Zero disables dumps.
+    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0_u64, 0_u64, 0_u64, 0_u64) } < 0 {
+        return Err(MainError::DisableCoreDumps(io::Error::last_os_error()));
+    }
+
     // Initialize the logger.
     LOGGER.init().map_err(MainError::SetLogger)?;
 
