@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use event_manager::{EventOps, Events, MutEventSubscriber, SubscriberOps};
+use utils::api_listener::{ApiListenerError, ApiListenerFd, check_api_listener};
 use vmm::logger::{ProcessTimeReporter, error_unrestricted, info_unrestricted, warn_unrestricted};
 use vmm::rpc_interface::{
     ApiRequest, ApiResponse, BuildMicrovmFromRequestsError, PrebootApiController,
@@ -29,6 +30,8 @@ pub enum ApiServerError {
     MicroVMStoppedWithError(FcExitCode),
     /// Failed to open the API socket at: {0}. Check that it is not already used.
     FailedToBindSocket(String),
+    /// Invalid API socket: {0}
+    ApiListener(ApiListenerError),
     /// Failed to bind and run the HTTP server: {0}
     FailedToBindAndRunHttpServer(ServerError),
     /// Failed to build MicroVM from Json: {0}
@@ -37,6 +40,20 @@ pub enum ApiServerError {
     MissingSeccompFilter,
     /// Failed to install vmm seccomp filter: {0}
     SeccompFilter(vmm::seccomp::InstallationError),
+}
+
+#[derive(Debug)]
+pub(crate) enum ApiSocket {
+    Path(PathBuf),
+    Descriptor(ApiListenerFd),
+}
+
+fn inherited_server(fd: ApiListenerFd) -> Result<HttpServer, ApiServerError> {
+    check_api_listener(fd).map_err(ApiServerError::ApiListener)?;
+    // SAFETY: `fd` is a listening socket that `main` parsed once from the command line. No other
+    // object in this process owns it, so the server becomes its sole owner.
+    unsafe { HttpServer::new_from_fd(fd.raw()) }
+        .map_err(ApiServerError::FailedToBindAndRunHttpServer)
 }
 
 #[derive(Debug)]
@@ -153,7 +170,7 @@ impl MutEventSubscriber for ApiServerAdapter {
 pub(crate) fn run_with_api(
     seccomp_filters: &mut BpfThreadMap,
     config_json: Option<String>,
-    bind_path: PathBuf,
+    api_socket: ApiSocket,
     instance_info: InstanceInfo,
     process_time_reporter: ProcessTimeReporter,
     boot_timer_enabled: bool,
@@ -180,17 +197,20 @@ pub(crate) fn run_with_api(
         .remove("api")
         .expect("Missing seccomp filter for API thread.");
 
-    let mut server = match HttpServer::new(&bind_path) {
-        Ok(s) => s,
-        Err(ServerError::IOError(inner)) if inner.kind() == std::io::ErrorKind::AddrInUse => {
-            let sock_path = bind_path.display().to_string();
-            return Err(ApiServerError::FailedToBindSocket(sock_path));
-        }
-        Err(err) => {
-            return Err(ApiServerError::FailedToBindAndRunHttpServer(err));
-        }
+    let mut server = match &api_socket {
+        ApiSocket::Path(bind_path) => match HttpServer::new(bind_path) {
+            Ok(s) => s,
+            Err(ServerError::IOError(inner)) if inner.kind() == std::io::ErrorKind::AddrInUse => {
+                let sock_path = bind_path.display().to_string();
+                return Err(ApiServerError::FailedToBindSocket(sock_path));
+            }
+            Err(err) => {
+                return Err(ApiServerError::FailedToBindAndRunHttpServer(err));
+            }
+        },
+        ApiSocket::Descriptor(fd) => inherited_server(*fd)?,
     };
-    info_unrestricted!("Listening on API socket ({bind_path:?}).");
+    info_unrestricted!("Listening on API socket ({api_socket:?}).");
 
     let api_kill_switch_clone = api_kill_switch
         .try_clone()
@@ -271,4 +291,49 @@ pub(crate) fn run_with_api(
     api_thread.join().expect("Api thread should join");
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Read, Write};
+    use std::os::fd::IntoRawFd;
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::net::{SocketAddr, UnixListener, UnixStream};
+
+    use vmm::rpc_interface::VmmData;
+    use vmm::seccomp::get_empty_filters;
+
+    use super::*;
+
+    #[test]
+    fn test_client_connected_before_start_is_served() {
+        let name = format!("api-sock-fd-{}", std::process::id());
+        let address = SocketAddr::from_abstract_name(name).unwrap();
+        let listener = UnixListener::bind_addr(&address).unwrap();
+        let mut client = UnixStream::connect_addr(&address).unwrap();
+        let server = inherited_server(listener.into_raw_fd().to_string().parse().unwrap()).unwrap();
+
+        let to_vmm_fd = EventFd::new(libc::EFD_NONBLOCK).unwrap();
+        let (to_vmm, _from_api) = channel();
+        let (to_api, from_vmm) = channel();
+        let seccomp_filters = get_empty_filters();
+        thread::spawn(move || {
+            ApiServer::new(to_vmm, from_vmm, to_vmm_fd).run(
+                server,
+                ProcessTimeReporter::new(Some(1), Some(1), Some(1)),
+                seccomp_filters.get("api").unwrap(),
+                vmm::HTTP_MAX_PAYLOAD_SIZE,
+            )
+        });
+        to_api
+            .send(Box::new(Ok(VmmData::InstanceInformation(
+                InstanceInfo::default(),
+            ))))
+            .unwrap();
+
+        client.write_all(b"GET / HTTP/1.1\r\n\r\n").unwrap();
+        let mut status = [0; 15];
+        client.read_exact(&mut status).unwrap();
+        assert_eq!(&status, b"HTTP/1.1 200 \r\n");
+    }
 }

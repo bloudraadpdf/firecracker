@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::{env as p_env, fs, io};
 
 use env::PROC_MOUNTS;
+use utils::api_listener::{ApiListenerError, ApiListenerFd, check_api_listener};
 use utils::arg_parser::{ArgParser, Argument, UtilsArgParserError as ParsingError};
 use utils::time::{ClockType, get_time_us};
 use utils::validators;
@@ -142,8 +143,8 @@ pub enum JailerError {
     Uid(String),
     #[error("Failed to unmount the old jail root: {0}")]
     UmountOldRoot(io::Error),
-    #[error("Unexpected value for the socket listener fd: {0}")]
-    UnexpectedListenerFd(i32),
+    #[error("Unexpected API socket listener: {0}")]
+    UnexpectedListenerFd(ApiListenerError),
     #[error("Failed to unshare into new mount namespace: {0}")]
     UnshareNewNs(io::Error),
     #[error("Failed to unset the O_CLOEXEC flag on the socket fd: {0}")]
@@ -226,6 +227,10 @@ pub fn build_arg_parser() -> ArgParser<'static> {
                 .takes_value(true)
                 .help("Parent cgroup in which the cgroup of this microvm will be placed."),
         )
+        .arg(Argument::new("api-sock-fd").takes_value(true).help(
+            "Inherited descriptor of a listening unix domain stream socket. The jailer keeps it \
+             open and passes it to Firecracker for the API.",
+        ))
         .arg(
             Argument::new("version")
                 .takes_value(false)
@@ -254,14 +259,13 @@ pub fn readln_special<T: AsRef<Path> + Debug>(file_path: &T) -> Result<String, J
     Ok(line)
 }
 
-fn close_fds_by_close_range() -> Result<(), JailerError> {
-    // First try using the close_range syscall to close all open FDs in the range of 3..UINT_MAX
+fn close_range(first: libc::c_uint, last: libc::c_uint) -> Result<(), JailerError> {
     // SAFETY: if the syscall is not available then ENOSYS will be returned
     SyscallReturnCode(unsafe {
         libc::syscall(
             libc::SYS_close_range,
-            3,
-            libc::c_uint::MAX,
+            first,
+            last,
             libc::CLOSE_RANGE_UNSHARE,
         )
     })
@@ -269,17 +273,28 @@ fn close_fds_by_close_range() -> Result<(), JailerError> {
     .map_err(JailerError::CloseRange)
 }
 
-// Closes all FDs other than 0 (STDIN), 1 (STDOUT) and 2 (STDERR)
-fn close_inherited_fds() -> Result<(), JailerError> {
+fn close_fds_by_close_range(keep: Option<ApiListenerFd>) -> Result<(), JailerError> {
+    // First try using the close_range syscall to close all open FDs in the range of 3..UINT_MAX
+    let Some(keep) = keep.map(|fd| fd.raw().cast_unsigned()) else {
+        return close_range(3, libc::c_uint::MAX);
+    };
+    if keep > 3 {
+        close_range(3, keep - 1)?;
+    }
+    close_range(keep + 1, libc::c_uint::MAX)
+}
+
+// Closes all FDs other than 0 (STDIN), 1 (STDOUT), 2 (STDERR) and the API socket
+fn close_inherited_fds(keep: Option<ApiListenerFd>) -> Result<(), JailerError> {
     // We use the close_range syscall which is available on kernels > 5.9.
-    close_fds_by_close_range()?;
+    close_fds_by_close_range(keep)?;
     Ok(())
 }
 
-fn sanitize_process() -> Result<(), JailerError> {
+fn sanitize_process(keep: Option<ApiListenerFd>) -> Result<(), JailerError> {
     // First thing to do is make sure we don't keep any inherited FDs
-    // other that IN, OUT and ERR.
-    close_inherited_fds()?;
+    // other that IN, OUT, ERR and the API socket.
+    close_inherited_fds(keep)?;
 
     // Cleanup environment variables.
     clean_env_vars();
@@ -323,14 +338,18 @@ fn main() -> Result<(), JailerError> {
 }
 
 fn main_exec() -> Result<(), JailerError> {
-    sanitize_process()
-        .unwrap_or_else(|err| panic!("Failed to sanitize the Jailer process: {}", err));
-
     let mut arg_parser = build_arg_parser();
     arg_parser
         .parse_from_cmdline()
         .map_err(JailerError::ArgumentParsing)?;
     let arguments = arg_parser.arguments();
+    let api_sock_fd = env::api_sock_fd(arguments)?;
+
+    sanitize_process(api_sock_fd)
+        .unwrap_or_else(|err| panic!("Failed to sanitize the Jailer process: {}", err));
+    if let Some(fd) = api_sock_fd {
+        check_api_listener(fd).map_err(JailerError::UnexpectedListenerFd)?;
+    }
 
     if arguments.flag_present("help") {
         println!("Jailer v{}\n", JAILER_VERSION);
@@ -371,7 +390,10 @@ mod tests {
 
     use super::*;
 
-    fn run_close_fds_test(test_fn: fn() -> Result<(), JailerError>) {
+    fn run_close_fds_test(
+        test_fn: fn(Option<ApiListenerFd>) -> Result<(), JailerError>,
+        keep: Option<usize>,
+    ) {
         let n = 100;
 
         let tmp_dir_path = format!(
@@ -386,11 +408,11 @@ mod tests {
             fds.push(maybe_file.unwrap().into_raw_fd());
         }
 
-        test_fn().unwrap();
+        test_fn(keep.map(|index| fds[index].to_string().parse().unwrap())).unwrap();
 
-        for fd in fds {
-            let is_fd_opened = unsafe { libc::fcntl(fd, libc::F_GETFD) } == 0;
-            assert!(!is_fd_opened);
+        for (index, fd) in fds.into_iter().enumerate() {
+            let is_fd_opened = unsafe { libc::fcntl(fd, libc::F_GETFD) } >= 0;
+            assert_eq!(is_fd_opened, keep == Some(index));
         }
 
         fs::remove_dir_all(tmp_dir_path).unwrap();
@@ -413,13 +435,15 @@ mod tests {
 
         // Skip this test if we're running on a too old kernel
         if major > 5 || (major == 5 && minor >= 9) {
-            run_close_fds_test(close_fds_by_close_range);
+            run_close_fds_test(close_fds_by_close_range, None);
+            run_close_fds_test(close_fds_by_close_range, Some(50));
         }
     }
 
     #[test]
     fn test_sanitize_process() {
-        run_close_fds_test(sanitize_process);
+        run_close_fds_test(sanitize_process, None);
+        run_close_fds_test(sanitize_process, Some(0));
     }
 
     #[test]

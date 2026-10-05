@@ -11,6 +11,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio, exit, id};
 
+use utils::api_listener::ApiListenerFd;
 use utils::arg_parser::UtilsArgParserError::MissingValue;
 use utils::time::{ClockType, get_time_us};
 use utils::{arg_parser, validators};
@@ -131,6 +132,17 @@ pub struct Env {
     cgroup_conf: Option<CgroupConfiguration>,
     resource_limits: ResourceLimits,
     uffd_dev_minor: Option<u32>,
+    api_sock_fd: Option<ApiListenerFd>,
+}
+
+pub fn api_sock_fd(
+    arguments: &arg_parser::Arguments,
+) -> Result<Option<ApiListenerFd>, JailerError> {
+    arguments
+        .single_value("api-sock-fd")
+        .map(|fd| fd.parse())
+        .transpose()
+        .map_err(JailerError::UnexpectedListenerFd)
 }
 
 /// Creates a new file owned by the given uid/gid at `dst` and writes `line`
@@ -276,6 +288,8 @@ impl Env {
 
         let uffd_dev_minor = Self::get_userfaultfd_minor_dev_number().ok();
 
+        let api_sock_fd = api_sock_fd(arguments)?;
+
         Ok(Env {
             id: id.to_owned(),
             chroot_dir,
@@ -292,6 +306,7 @@ impl Env {
             cgroup_conf,
             resource_limits,
             uffd_dev_minor,
+            api_sock_fd,
         })
     }
 
@@ -564,6 +579,11 @@ impl Env {
             .stderr(Stdio::inherit())
             .uid(self.uid())
             .gid(self.gid())
+            .args(
+                self.api_sock_fd
+                    .iter()
+                    .flat_map(|fd| ["--api-sock-fd".to_owned(), fd.raw().to_string()]),
+            )
             .args(&self.extra_args)
             .exec()
     }
@@ -1038,6 +1058,30 @@ mod tests {
         // actually attempt to create the folder structure (the same goes for netns).
     }
 
+    fn create_env_with_api_sock_fd(mock_proc_mounts: &Path, fd: &str) -> Result<Env, JailerError> {
+        let arg_parser = build_arg_parser();
+        let mut args = arg_parser.arguments().clone();
+        let pseudo_exec_file_path = get_pseudo_exec_file_path();
+        let mut arg_vec = make_args(&ArgVals::new(pseudo_exec_file_path.as_str()));
+        arg_vec.extend(["--api-sock-fd".to_owned(), fd.to_owned()]);
+        args.parse(&arg_vec).unwrap();
+        Env::new(&args, 0, 0, mock_proc_mounts.to_str().unwrap())
+    }
+
+    #[test]
+    fn test_api_sock_fd() {
+        let mut mock_cgroups = MockCgroupFs::new().unwrap();
+        mock_cgroups.add_v1_mounts().unwrap();
+
+        let env = create_env_with_api_sock_fd(&mock_cgroups.proc_mounts_path, "3").unwrap();
+        assert_eq!(env.api_sock_fd, Some("3".parse().unwrap()));
+        assert_eq!(create_env(&mock_cgroups.proc_mounts_path).api_sock_fd, None);
+        assert!(matches!(
+            create_env_with_api_sock_fd(&mock_cgroups.proc_mounts_path, "2"),
+            Err(JailerError::UnexpectedListenerFd(_))
+        ));
+    }
+
     #[test]
     fn test_dup2() {
         // Open /dev/kvm since it should be available anyway.
@@ -1094,9 +1138,7 @@ mod tests {
         let bad_string = String::from_utf8(bad_string_bytes).unwrap();
         assert_eq!(
             format!("{}", env.setup_jailed_folder(bad_string).err().unwrap()),
-            format!(
-                "Failed to create directory \\0foo\\0: file name contained an unexpected NUL byte"
-            )
+            "Failed to create directory \\0foo\\0: file name contained an unexpected NUL byte"
         );
 
         // Error case: inaccessible path - can't be triggered with unit tests running as root.

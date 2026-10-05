@@ -26,6 +26,7 @@ jailer --id <id> \
        [--resource-limit <resource=value>] \
        [--daemonize] \
        [--new-pid-ns] \
+       [--api-sock-fd <api_sock_fd>] \
        [--...extra arguments for Firecracker]
 ```
 
@@ -98,6 +99,12 @@ Here is an example on how to set multiple resource limits using this argument:
   `CLONE_NEWPID` flag. As a result, the jailer and the process running the exec
   file have different PIDs. The PID of the child process is stored in the jail
   root directory inside `<exec_file_name>.pid`.
+- `--api-sock-fd` names an inherited descriptor above 2. This descriptor must
+  be a listening `AF_UNIX` stream socket without close-on-exec. The jailer
+  keeps it open, checks it and passes `--api-sock-fd <api_sock_fd>` to
+  Firecracker. Firecracker serves its API on this socket and does not bind a
+  path. Do not pass `--api-sock` or `--no-api` to Firecracker with it. A client
+  can connect when the caller has called `listen()`, before Firecracker starts.
 - The jailer adheres to the "end of command options" convention, meaning all
   parameters specified after `--` are forwarded to Firecracker. For example,
   this can be paired with the `--config-file` Firecracker argument to specify a
@@ -112,7 +119,9 @@ After starting, the Jailer goes through the following operations:
 
 - Validate **all provided paths** and the VM ID.
 - Close all open file descriptors based on `/proc/<jailer-pid>/fd` except input,
-  output and error.
+  output, error and the `--api-sock-fd` descriptor.
+- If `--api-sock-fd` is present, check that its descriptor is a listening
+  `AF_UNIX` stream socket.
 - Cleanup all environment variables received from the parent process.
 - Create the `<chroot_base>/<exec_file_name>/<id>/root` folder, which will be
   henceforth referred to as `<chroot_dir>`. Nothing is done if the path already
@@ -154,8 +163,9 @@ After starting, the Jailer goes through the following operations:
 - Drop privileges via setting the provided `uid` and `gid`.
 - Exec into
   `<exec_file_name> --id=<id> --start-time-us=<opaque> --start-time-cpu-us=<opaque>`
-  (and also forward any extra arguments provided to the jailer after `--`, as
-  mentioned in the **Jailer Usage** section), where:
+  (with `--api-sock-fd=<api_sock_fd>` if present, and also forward any extra
+  arguments provided to the jailer after `--`, as mentioned in the **Jailer
+  Usage** section), where:
   - `<id>`: (`string`) - The `<id>` argument provided to jailer.
   - `<opaque>`: (`number`) time calculated by the jailer that it spent doing its
     work.
