@@ -1,4 +1,4 @@
-// Copyright 2026 Bloudraad.
+// Copyright 2026 Bloudraad Ltd
 // SPDX-License-Identifier: Apache-2.0
 
 //! Inherited API listening socket descriptor.
