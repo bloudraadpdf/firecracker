@@ -395,6 +395,10 @@ impl Env {
             }
         };
 
+        // The child's exec closes its close-on-exec copy of the write end. The read end then
+        // reports end of file, so the jailer exits only after the child runs the exec file.
+        let (mut exec_done, exec_signal) = io::pipe().map_err(JailerError::ExecWait)?;
+
         // Duplicate the current process. The child process will belong to the previously created
         // PID namespace. The current process will not be moved into the newly created namespace,
         // but its first child will assume the role of init(1) in the new namespace.
@@ -410,6 +414,8 @@ impl Env {
                 Err(JailerError::Exec(self.exec_command(chroot_exec_file)))
             }
             child_pid => {
+                drop(exec_signal);
+                io::copy(&mut exec_done, &mut io::sink()).map_err(JailerError::ExecWait)?;
                 // Save the PID of the process running the exec file provided
                 // inside <chroot_exec_file>.pid file.
                 self.save_exec_file_pid(child_pid, chroot_exec_file)?;
