@@ -126,9 +126,10 @@ After starting, the Jailer goes through the following operations:
 - Create the `<chroot_base>/<exec_file_name>/<id>/root` folder, which will be
   henceforth referred to as `<chroot_dir>`. Nothing is done if the path already
   exists (it should not, since `<id>` is supposed to be unique).
-- Copy the file specified with `--exec-file` to `<chroot_dir>/<exec_file_name>`.
-  This ensures the new process will not share memory with any other Firecracker
-  process.
+- Copy the file specified with `--exec-file` into a new memory file
+  (`memfd_create()` with `MFD_EXEC`) and seal it against writes and size
+  changes. This ensures the new process will not share memory with any other
+  Firecracker process. The jail holds no copy of the executable.
 - Set resource bounds for current process and its children through
   `--resource-limit` argument, by calling `setrlimit()` system call with the
   specific resource argument. If no limits are provided, the jailer bounds
@@ -159,9 +160,9 @@ After starting, the Jailer goes through the following operations:
   spawn a new process within a new PID namespace. The new process will assume
   the role of init(1) in the new namespace. The parent will store child's PID
   inside `<exec_file_name>.pid`, while the child drops privileges and `exec()`s
-  into the `<exec_file_name>`, as described below.
+  the sealed memory file, as described below.
 - Drop privileges via setting the provided `uid` and `gid`.
-- Exec into
+- Exec the sealed memory file with `fexecve()` as
   `<exec_file_name> --id=<id> --start-time-us=<opaque> --start-time-cpu-us=<opaque>`
   (with `--api-sock-fd=<api_sock_fd>` if present, and also forward any extra
   arguments provided to the jailer after `--`, as mentioned in the **Jailer
@@ -193,8 +194,7 @@ After opening the file descriptors mentioned in the previous section, the jailer
 will create the following resources (and all their prerequisites, such as the
 path which contains them):
 
-- `/srv/jailer/firecracker/551e7604-e35c-42b3-b825-416853441234/root/firecracker`
-  (copied from `/usr/bin/firecracker`)
+- `/srv/jailer/firecracker/551e7604-e35c-42b3-b825-416853441234/root`
 
 We are going to refer to
 `/srv/jailer/firecracker/551e7604-e35c-42b3-b825-416853441234/root` as
@@ -325,6 +325,8 @@ Note: default value for `<api-sock>` is `/run/firecracker.socket`.
 
 ## Caveats
 
+- The jailer runs Firecracker from a memory file. This needs Linux 6.3 or later
+  for `MFD_EXEC`, and the `vm.memfd_noexec` sysctl must be 0 or 1.
 - If all the cgroup controllers are bunched up on a single mount point using the
   "all" option, our current program logic will complain it cannot detect
   individual controller mount points.

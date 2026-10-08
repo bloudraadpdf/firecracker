@@ -1,15 +1,17 @@
 // Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::ffi::{CStr, CString, OsString};
+use std::convert::Infallible;
+use std::ffi::{CStr, CString};
 use std::fs::{self, File, OpenOptions, Permissions, canonicalize, read_to_string};
-use std::io;
 use std::io::Write;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt, fchown};
-use std::os::unix::io::AsRawFd;
-use std::os::unix::process::CommandExt;
+use std::mem::MaybeUninit;
+use std::os::unix::ffi::OsStringExt;
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio, exit, id};
+use std::process::{exit, id};
+use std::{io, iter, ptr};
 
 use utils::api_listener::ApiListenerFd;
 use utils::arg_parser::UtilsArgParserError::MissingValue;
@@ -120,6 +122,7 @@ pub struct Env {
     id: String,
     chroot_dir: PathBuf,
     exec_file_path: PathBuf,
+    exec_file_name: String,
     uid: u32,
     gid: u32,
     netns: Option<String>,
@@ -154,6 +157,8 @@ fn create_owned_file_with_data(
     uid: u32,
     gid: u32,
 ) -> Result<(), JailerError> {
+    use std::os::unix::fs::{OpenOptionsExt, fchown};
+
     let mut file = OpenOptions::new()
         .write(true)
         // `create_new` maps to `O_CREAT | O_EXCL`: fail if `dst` already exists.
@@ -294,6 +299,7 @@ impl Env {
             id: id.to_owned(),
             chroot_dir,
             exec_file_path,
+            exec_file_name,
             uid,
             gid,
             netns,
@@ -362,7 +368,11 @@ impl Env {
         Ok(())
     }
 
-    fn exec_into_new_pid_ns(&mut self, chroot_exec_file: PathBuf) -> Result<(), JailerError> {
+    fn exec_into_new_pid_ns(
+        &mut self,
+        exec_file: &File,
+        pid_file: PathBuf,
+    ) -> Result<(), JailerError> {
         // https://man7.org/linux/man-pages/man7/pid_namespaces.7.html
         // > a process in an ancestor namespace can send signals to the "init" process of a child
         // > PID namespace only if the "init" process has established a handler for that signal.
@@ -411,30 +421,21 @@ impl Env {
                         .into_empty_result()
                         .map_err(JailerError::SetSid)?;
                 }
-                Err(JailerError::Exec(self.exec_command(chroot_exec_file)))
+                Err(JailerError::Exec(self.exec_command(exec_file)))
             }
             child_pid => {
                 drop(exec_signal);
                 io::copy(&mut exec_done, &mut io::sink()).map_err(JailerError::ExecWait)?;
                 // Save the PID of the process running the exec file provided
-                // inside <chroot_exec_file>.pid file.
-                self.save_exec_file_pid(child_pid, chroot_exec_file)?;
+                // inside <exec_file_name>.pid file.
+                self.save_exec_file_pid(child_pid, pid_file)?;
                 // SAFETY: This is safe because 0 is valid input to exit.
                 unsafe { libc::exit(0) }
             }
         }
     }
 
-    fn save_exec_file_pid(
-        &mut self,
-        pid: i32,
-        chroot_exec_file: PathBuf,
-    ) -> Result<(), JailerError> {
-        let chroot_exec_file_str = chroot_exec_file
-            .to_str()
-            .ok_or_else(|| JailerError::ExtractFileName(chroot_exec_file.clone()))?;
-        let pid_file_path =
-            PathBuf::from(format!("{}{}", chroot_exec_file_str, PID_FILE_EXTENSION));
+    fn save_exec_file_pid(&mut self, pid: i32, pid_file_path: PathBuf) -> Result<(), JailerError> {
         let mut pid_file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -508,56 +509,38 @@ impl Env {
             .map_err(|err| JailerError::ChangeFileOwner(folder_path.to_owned(), err))
     }
 
-    fn copy_exec_to_chroot(&mut self) -> Result<OsString, JailerError> {
-        let exec_file_name = self
-            .exec_file_path
-            .file_name()
-            .ok_or_else(|| JailerError::ExtractFileName(self.exec_file_path.clone()))?;
-        let jailer_exec_file_path = self.chroot_dir.join(exec_file_name);
-
-        // We do a copy instead of a hard-link for 2 reasons
-        // 1. hard-linking is not possible if the file is in another device
-        // 2. while hardlinking would save up disk space and also memory by sharing parts of the
-        //    Firecracker binary (like the executable .text section), this latter part is not
-        //    desirable in Firecracker's threat model. Copying prevents 2 Firecracker processes from
-        //    sharing memory.
-        let mut src_file = OpenOptions::new()
-            .read(true)
-            .open(&self.exec_file_path)
+    fn exec_memfd(&self) -> Result<File, JailerError> {
+        // Each VM runs a private copy of the exec file. 2 Firecracker processes then share no
+        // memory, as Firecracker's threat model requires. A sealed memory file keeps the copy
+        // out of the jail and off the disk.
+        let mut src_file = File::open(&self.exec_file_path)
             .map_err(|err| JailerError::Open(self.exec_file_path.clone(), err))?;
-        let src_file_metadata = src_file
-            .metadata()
-            .map_err(|err| JailerError::Metadata(self.exec_file_path.clone(), err))?;
-        let src_file_mode = src_file_metadata.mode();
-        let mut dst_file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            // Don't allow symlinks
-            .custom_flags(libc::O_NOFOLLOW)
-            .mode(src_file_mode)
-            .open(&jailer_exec_file_path)
-            .map_err(|err| JailerError::Open(jailer_exec_file_path.clone(), err))?;
-        let dst_file_metadata = dst_file
-            .metadata()
-            .map_err(|err| JailerError::Metadata(jailer_exec_file_path.clone(), err))?;
-        if 1 < dst_file_metadata.nlink() {
-            return Err(JailerError::HardLink(jailer_exec_file_path.clone()));
-        }
-
-        // Mark destination file as owned by the specified uid/gid
-        fchown(&dst_file, Some(self.uid()), Some(self.gid()))
-            .map_err(|err| JailerError::ChangeFileOwner(jailer_exec_file_path.clone(), err))?;
-
-        // Ignore the output since it is not interesting in this case
-        _ = std::io::copy(&mut src_file, &mut dst_file).map_err(|err| {
-            JailerError::Copy(
-                self.exec_file_path.clone(),
-                jailer_exec_file_path.clone(),
-                err,
+        let name =
+            CString::new(self.exec_file_name.as_str()).map_err(JailerError::CStringParsing)?;
+        // SAFETY: `name` is a NUL-terminated string that outlives the call.
+        let fd = SyscallReturnCode(unsafe {
+            libc::memfd_create(
+                name.as_ptr(),
+                libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING | libc::MFD_EXEC,
             )
-        })?;
-
-        Ok(exec_file_name.to_owned())
+        })
+        .into_result()
+        .map_err(JailerError::MemfdCreate)?;
+        // SAFETY: `memfd_create` returned a new descriptor that nothing else owns.
+        let mut exec_file = unsafe { File::from_raw_fd(fd) };
+        io::copy(&mut src_file, &mut exec_file)
+            .map_err(|err| JailerError::Copy(self.exec_file_path.clone(), err))?;
+        // SAFETY: `F_ADD_SEALS` takes an integer seal set.
+        SyscallReturnCode(unsafe {
+            libc::fcntl(
+                fd,
+                libc::F_ADD_SEALS,
+                libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE,
+            )
+        })
+        .into_empty_result()
+        .map_err(JailerError::MemfdSeal)?;
+        Ok(exec_file)
     }
 
     fn join_netns(path: &str) -> Result<(), JailerError> {
@@ -571,27 +554,70 @@ impl Env {
             .map_err(JailerError::SetNetNs)
     }
 
-    fn exec_command(&self, chroot_exec_file: PathBuf) -> io::Error {
-        Command::new(chroot_exec_file)
-            .args(["--id", &self.id])
-            .args(["--start-time-us", &self.start_time_us.to_string()])
-            .args([
-                "--start-time-cpu-us",
-                &get_time_us(ClockType::ProcessCpu).to_string(),
-            ])
-            .args(["--parent-cpu-time-us", &self.jailer_cpu_time_us.to_string()])
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .uid(self.uid())
-            .gid(self.gid())
-            .args(
-                self.api_sock_fd
-                    .iter()
-                    .flat_map(|fd| ["--api-sock-fd".to_owned(), fd.raw().to_string()]),
-            )
-            .args(&self.extra_args)
-            .exec()
+    fn exec_command(&self, exec_file: &File) -> io::Error {
+        let Err(err) = self.fexecve(exec_file);
+        err
+    }
+
+    fn exec_args(&self) -> Vec<String> {
+        let mut args = vec![
+            self.exec_file_name.clone(),
+            "--id".to_owned(),
+            self.id.clone(),
+            "--start-time-us".to_owned(),
+            self.start_time_us.to_string(),
+            "--start-time-cpu-us".to_owned(),
+            get_time_us(ClockType::ProcessCpu).to_string(),
+            "--parent-cpu-time-us".to_owned(),
+            self.jailer_cpu_time_us.to_string(),
+        ];
+        if let Some(fd) = &self.api_sock_fd {
+            args.extend(["--api-sock-fd".to_owned(), fd.raw().to_string()]);
+        }
+        args.extend(self.extra_args.iter().cloned());
+        args
+    }
+
+    /// Drops privileges and resets the signal state as `std::process::Command::exec` does, then
+    /// runs `exec_file`. `Command` cannot run a file descriptor.
+    fn fexecve(&self, exec_file: &File) -> io::Result<Infallible> {
+        let args = self
+            .exec_args()
+            .into_iter()
+            .map(CString::new)
+            .collect::<Result<Vec<_>, _>>()?;
+        let vars = std::env::vars_os()
+            .map(|(key, value)| {
+                let mut var = key.into_vec();
+                var.push(b'=');
+                var.extend(value.into_vec());
+                CString::new(var)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let argv = null_terminated(&args);
+        let envp = null_terminated(&vars);
+        // SAFETY: `setgid` takes an integer group ID.
+        SyscallReturnCode(unsafe { libc::setgid(self.gid()) }).into_empty_result()?;
+        // SAFETY: An empty group list reads no memory.
+        SyscallReturnCode(unsafe { libc::setgroups(0, ptr::null()) }).into_empty_result()?;
+        // SAFETY: `setuid` takes an integer user ID.
+        SyscallReturnCode(unsafe { libc::setuid(self.uid()) }).into_empty_result()?;
+        let mut mask = MaybeUninit::<libc::sigset_t>::uninit();
+        // SAFETY: `mask` is valid for writes.
+        SyscallReturnCode(unsafe { libc::sigemptyset(mask.as_mut_ptr()) }).into_empty_result()?;
+        // SAFETY: `sigemptyset` initialised `mask`.
+        match unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, mask.as_ptr(), ptr::null_mut()) } {
+            0 => {}
+            err => return Err(io::Error::from_raw_os_error(err)),
+        }
+        // SAFETY: `SIG_DFL` installs no handler.
+        if unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) } == libc::SIG_ERR {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `argv` and `envp` are null-terminated arrays of NUL-terminated strings that
+        // outlive the call.
+        unsafe { libc::fexecve(exec_file.as_raw_fd(), argv.as_ptr(), envp.as_ptr()) };
+        Err(io::Error::last_os_error())
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -670,8 +696,8 @@ impl Env {
     }
 
     pub fn run(mut self) -> Result<(), JailerError> {
-        let exec_file_name = self.copy_exec_to_chroot()?;
-        let chroot_exec_file = PathBuf::from("/").join(exec_file_name);
+        let exec_file = self.exec_memfd()?;
+        let pid_file = PathBuf::from(format!("/{}{}", self.exec_file_name, PID_FILE_EXTENSION));
 
         // Join the specified network namespace, if applicable.
         if let Some(ref path) = self.netns {
@@ -795,12 +821,20 @@ impl Env {
 
         // If specified, exec the provided binary into a new PID namespace.
         if self.new_pid_ns {
-            self.exec_into_new_pid_ns(chroot_exec_file)
+            self.exec_into_new_pid_ns(&exec_file, pid_file)
         } else {
-            self.save_exec_file_pid(id().try_into().unwrap(), chroot_exec_file.clone())?;
-            Err(JailerError::Exec(self.exec_command(chroot_exec_file)))
+            self.save_exec_file_pid(id().try_into().unwrap(), pid_file)?;
+            Err(JailerError::Exec(self.exec_command(&exec_file)))
         }
     }
+}
+
+fn null_terminated(strings: &[CString]) -> Vec<*const libc::c_char> {
+    strings
+        .iter()
+        .map(|string| string.as_ptr())
+        .chain(iter::once(ptr::null()))
+        .collect()
 }
 
 #[cfg(test)]
@@ -1254,7 +1288,7 @@ mod tests {
     }
 
     #[test]
-    fn test_copy_exec_to_chroot() {
+    fn test_exec_file_stays_outside_the_jail() {
         // Create a standard environment.
         let arg_parser = build_arg_parser();
         let mut args = arg_parser.arguments().clone();
@@ -1286,25 +1320,21 @@ mod tests {
         let exec_file_name = Path::new(&some_arg_vals.exec_file).file_name().unwrap();
         fs::write(some_arg_vals.exec_file, "some_content").unwrap();
         args.parse(&make_args(&some_arg_vals)).unwrap();
-        let mut env =
-            Env::new(&args, 0, 0, mock_cgroups.proc_mounts_path.to_str().unwrap()).unwrap();
+        let env = Env::new(&args, 0, 0, mock_cgroups.proc_mounts_path.to_str().unwrap()).unwrap();
 
         // Create the required chroot dir hierarchy.
         fs::create_dir_all(env.chroot_dir()).expect("Could not create dir hierarchy.");
 
+        let exec_file = env.exec_memfd().unwrap();
+        assert!(!env.chroot_dir.join(exec_file_name).exists());
         assert_eq!(
-            env.copy_exec_to_chroot().unwrap(),
-            exec_file_name.to_os_string()
+            fs::read(format!("/proc/self/fd/{}", exec_file.as_raw_fd())).unwrap(),
+            b"some_content"
         );
-        let dest_path = env.chroot_dir.join(exec_file_name);
-        // Check that `fs::copy()` copied src content and permission bits to destination.
-        let metadata_src = fs::metadata(&env.exec_file_path).unwrap();
-        let metadata_dest = fs::metadata(&dest_path).unwrap();
-        let content_src = fs::read(&env.exec_file_path).unwrap();
-        let content_dest = fs::read(&dest_path).unwrap();
-        assert_eq!(content_src, content_dest);
-        assert_eq!(content_dest, b"some_content");
-        assert_eq!(metadata_src.permissions(), metadata_dest.permissions());
+        assert_eq!(
+            unsafe { libc::fcntl(exec_file.as_raw_fd(), libc::F_GET_SEALS) },
+            libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE
+        );
 
         // Clean up the environment.
         fs::remove_dir_all(env.chroot_dir()).expect("Could not remove dir hierarchy.");
@@ -1503,7 +1533,6 @@ mod tests {
 
     #[test]
     fn test_save_exec_file_pid() {
-        let exec_file_name = "file";
         let pid_file_name = "file.pid";
         let pid = 1;
 
@@ -1511,7 +1540,7 @@ mod tests {
         mock_cgroups.add_v1_mounts().unwrap();
 
         let mut env = create_env(&mock_cgroups.proc_mounts_path);
-        env.save_exec_file_pid(pid, PathBuf::from(exec_file_name))
+        env.save_exec_file_pid(pid, PathBuf::from(pid_file_name))
             .unwrap();
 
         let stored_pid = fs::read_to_string(pid_file_name);

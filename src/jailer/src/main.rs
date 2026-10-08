@@ -63,8 +63,8 @@ pub enum JailerError {
     CloseDevNullFd(io::Error),
     #[error("Failed to call close range syscall: {0}")]
     CloseRange(io::Error),
-    #[error("{}", format!("Failed to copy {:?} to {:?}: {}", .0, .1, .2).replace('\"', ""))]
-    Copy(PathBuf, PathBuf, io::Error),
+    #[error("{}", format!("Failed to copy {:?} to a memory file: {}", .0, .1).replace('\"', ""))]
+    Copy(PathBuf, io::Error),
     #[error("{}", format!("Failed to create directory {:?}: {}", .0, .1).replace('\"', ""))]
     CreateDir(PathBuf, io::Error),
     #[error("Encountered interior \\0 while parsing a string")]
@@ -93,12 +93,12 @@ pub enum JailerError {
     GetSid(io::Error),
     #[error("Invalid gid: {0}")]
     Gid(String),
-    #[error("Detected hard link at: {0}")]
-    HardLink(PathBuf),
     #[error("Invalid instance ID: {0}")]
     InvalidInstanceId(validators::ValidatorError),
-    #[error("Cannot get metadata for a file: {0}: {1}")]
-    Metadata(PathBuf, io::Error),
+    #[error("Failed to create a memory file for the exec file: {0}")]
+    MemfdCreate(io::Error),
+    #[error("Failed to seal the exec memory file: {0}")]
+    MemfdSeal(io::Error),
     #[error("{}", format!("File {:?} doesn't have a parent", .0).replace('\"', ""))]
     MissingParent(PathBuf),
     #[error("Failed to create the jail root directory before pivoting root: {0}")]
