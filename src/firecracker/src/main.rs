@@ -13,8 +13,10 @@ mod generated;
 mod metrics;
 mod seccomp;
 
+use std::ffi::CString;
 use std::fs::{self, File};
-use std::path::PathBuf;
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
@@ -61,6 +63,8 @@ const MMDS_CONTENT_ARG: &str = "metadata";
 enum MainError {
     /// Failed to disable core dumps: {0}
     DisableCoreDumps(#[source] io::Error),
+    /// Failed to set the process name: {0}
+    SetProcessName(#[source] io::Error),
     /// Failed to set the logger: {0}
     SetLogger(vmm::logger::LoggerInitError),
     /// Failed to register signal handlers: {0}
@@ -123,11 +127,30 @@ fn main() -> ExitCode {
     }
 }
 
+/// Names the process after the file name in `argv[0]`. An exec from a memory file otherwise
+/// takes the name of that file.
+fn set_process_name() -> Result<(), MainError> {
+    let Some(name) = std::env::args_os().next().and_then(|arg| {
+        Path::new(&arg)
+            .file_name()
+            .map(|name| name.as_bytes().to_vec())
+    }) else {
+        return Ok(());
+    };
+    let name = CString::new(name).map_err(|err| MainError::SetProcessName(err.into()))?;
+    // SAFETY: PR_SET_NAME reads a NUL-terminated string that outlives the call.
+    if unsafe { libc::prctl(libc::PR_SET_NAME, name.as_ptr()) } < 0 {
+        return Err(MainError::SetProcessName(io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
 fn main_exec() -> Result<(), MainError> {
     // SAFETY: PR_SET_DUMPABLE takes an integer flag, not a pointer. Zero disables dumps.
     if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0_u64, 0_u64, 0_u64, 0_u64) } < 0 {
         return Err(MainError::DisableCoreDumps(io::Error::last_os_error()));
     }
+    set_process_name()?;
 
     // Initialize the logger.
     LOGGER.init().map_err(MainError::SetLogger)?;
@@ -704,4 +727,18 @@ fn run_without_api(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_set_process_name() {
+        set_process_name().unwrap();
+        let arg = std::env::args_os().next().unwrap();
+        let name = Path::new(&arg).file_name().unwrap().as_bytes();
+        let comm = fs::read("/proc/thread-self/comm").unwrap();
+        assert_eq!(comm, [&name[..name.len().min(15)], b"\n"].concat());
+    }
 }
