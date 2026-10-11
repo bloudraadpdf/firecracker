@@ -445,11 +445,12 @@ pub fn build_microvm_from_snapshot(
     // Build custom CPU config if a custom template is provided.
     let mut vm = KvmVm::new(kvm).map_err(StartMicrovmError::KvmVm)?;
 
-    let mut vcpus = vm
-        .create_vcpus(vm_resources.machine_config.vcpu_count)
+    // On x86_64, IRQ-chip setup queues SRCU cleanup that can delay memory registration.
+    vm.restore_memory_regions(guest_memory, &microvm_state.vm_state.memory)
         .map_err(StartMicrovmError::KvmVm)?;
 
-    vm.restore_memory_regions(guest_memory, &microvm_state.vm_state.memory)
+    let mut vcpus = vm
+        .create_vcpus(vm_resources.machine_config.vcpu_count)
         .map_err(StartMicrovmError::KvmVm)?;
 
     #[cfg(target_arch = "x86_64")]
