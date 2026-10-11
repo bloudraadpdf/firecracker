@@ -60,12 +60,7 @@ const DEV_URANDOM_MINOR: u32 = 9;
 const DEV_UFFD_PATH: &CStr = c"/dev/userfaultfd";
 const DEV_UFFD_MAJOR: u32 = 10;
 
-// Relevant folders inside the jail that we create or/and for which we change ownership.
-// We need /dev in order to be able to create /dev/kvm and /dev/net/tun device.
-// We need /run for the default location of the api socket.
-// Since libc::chown is not recursive, we cannot specify only /dev/net as we want
-// to walk through the entire folder hierarchy.
-const FOLDER_HIERARCHY: [&str; 4] = ["/", "/dev", "/dev/net", "/run"];
+const FOLDER_HIERARCHY: [&str; 3] = ["/", "/dev", "/run"];
 const FOLDER_PERMISSIONS: u32 = 0o700;
 
 // When running with `--new-pid-ns` flag, the PID of the process running the exec_file differs
@@ -126,6 +121,7 @@ pub struct Env {
     uid: u32,
     gid: u32,
     netns: Option<String>,
+    tun_enabled: bool,
     daemonize: bool,
     new_pid_ns: bool,
     start_time_us: u64,
@@ -303,6 +299,7 @@ impl Env {
             uid,
             gid,
             netns,
+            tun_enabled: !arguments.flag_present("no-tun"),
             daemonize,
             new_pid_ns,
             start_time_us,
@@ -735,15 +732,10 @@ impl Env {
             .iter()
             .try_for_each(|f| self.setup_jailed_folder(f))?;
 
-        // Here we are creating the /dev/kvm and /dev/net/tun devices inside the jailer.
-        // Following commands can be translated into bash like this:
-        // $: mkdir -p $chroot_dir/dev/net
-        // $: dev_net_tun_path={$chroot_dir}/"tun"
-        // $: mknod $dev_net_tun_path c 10 200
-        // www.kernel.org/doc/Documentation/networking/tuntap.txt specifies 10 and 200 as the major
-        // and minor for the /dev/net/tun device.
-        self.mknod_and_own_dev(DEV_NET_TUN, DEV_NET_TUN_MAJOR, DEV_NET_TUN_MINOR)?;
-        // Do the same for /dev/kvm with (major, minor) = (10, 232).
+        if self.tun_enabled {
+            self.setup_jailed_folder("/dev/net")?;
+            self.mknod_and_own_dev(DEV_NET_TUN, DEV_NET_TUN_MAJOR, DEV_NET_TUN_MINOR)?;
+        }
         self.mknod_and_own_dev(DEV_KVM, DEV_KVM_MAJOR, DEV_KVM_MINOR)?;
         // And for /dev/urandom with (major, minor) = (1, 9).
         // If the device is not accessible on the host, output a warning to inform user that MMDS
@@ -981,6 +973,7 @@ mod tests {
         assert_eq!(format!("{}", good_env.uid()), good_arg_vals.uid);
 
         assert_eq!(good_env.netns, good_arg_vals.netns.map(String::from));
+        assert!(good_env.tun_enabled);
         assert!(good_env.daemonize);
         assert!(good_env.new_pid_ns);
 
@@ -993,10 +986,13 @@ mod tests {
 
         let arg_parser = build_arg_parser();
         args = arg_parser.arguments().clone();
-        args.parse(&make_args(&another_good_arg_vals)).unwrap();
+        let mut no_tun_args = make_args(&another_good_arg_vals);
+        no_tun_args.push("--no-tun".to_string());
+        args.parse(&no_tun_args).unwrap();
         let another_good_env =
             Env::new(&args, 0, 0, mock_cgroups.proc_mounts_path.to_str().unwrap())
                 .expect("This another new environment should be created successfully.");
+        assert!(!another_good_env.tun_enabled);
         assert!(!another_good_env.daemonize);
         assert!(!another_good_env.new_pid_ns);
 

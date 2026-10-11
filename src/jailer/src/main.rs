@@ -196,6 +196,11 @@ pub fn build_arg_parser() -> ArgParser<'static> {
                 .takes_value(true)
                 .help("Path to the network namespace this microVM should join."),
         )
+        .arg(
+            Argument::new("no-tun")
+                .takes_value(false)
+                .help("Do not create /dev/net/tun in the jail."),
+        )
         .arg(Argument::new("daemonize").takes_value(false).help(
             "Daemonize the jailer before exec, by invoking setsid(), and redirecting the standard \
              I/O file descriptors to /dev/null.",
