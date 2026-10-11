@@ -666,6 +666,11 @@ recreate state.
 Moreover, VMClock allows processes to call poll() on the VMClock device and get
 notified about changes through an event loop.
 
+The Tokoloshe fork assigns VMClock its own interrupt resource. The matching
+guest kernel handles that interrupt directly for both ACPI and device-tree
+guests. ACPI GED only handles VMGenID. The VMM and guest kernel must use this
+contract together; rebuild snapshots when changing the interrupt routing.
+
 For reference, the C code used in our tests is available
 [here](https://github.com/firecracker-microvm/firecracker/blob/main/tests/host_tools/vmclock.c).
 

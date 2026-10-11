@@ -224,12 +224,15 @@ impl Aml for VmClock {
                 ),
                 &aml::Name::new(
                     "_CRS".try_into()?,
-                    &aml::ResourceTemplate::new(vec![&aml::AddressSpace::new_memory(
-                        aml::AddressSpaceCacheable::Cacheable,
-                        false,
-                        self.guest_address.0,
-                        self.guest_address.0 + VMCLOCK_SIZE as u64 - 1,
-                    )?]),
+                    &aml::ResourceTemplate::new(vec![
+                        &aml::AddressSpace::new_memory(
+                            aml::AddressSpaceCacheable::Cacheable,
+                            false,
+                            self.guest_address.0,
+                            self.guest_address.0 + VMCLOCK_SIZE as u64 - 1,
+                        )?,
+                        &aml::Interrupt::new(true, true, false, false, self.gsi),
+                    ]),
                 )?,
             ],
         )
