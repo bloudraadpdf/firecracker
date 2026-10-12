@@ -15,6 +15,7 @@ use vmm_sys_util::syscall::SyscallReturnCode;
 
 use crate::env::Env;
 
+mod bind_mount;
 mod cgroup;
 mod chroot;
 mod env;
@@ -107,8 +108,12 @@ pub enum JailerError {
     MknodDev(io::Error, String),
     #[error("Failed to bind mount the jail root directory: {0}")]
     MountBind(io::Error),
-    #[error("Failed to change the propagation type to slave: {0}")]
-    MountPropagationSlave(io::Error),
+    #[error("Failed to change mount propagation: {0}")]
+    MountPropagation(io::Error),
+    #[error("Invalid bind mount; expected a destination name and absolute source: {0}")]
+    BindMountArgument(String),
+    #[error("Failed to mount {0}: {1}")]
+    BindMount(PathBuf, io::Error),
     #[error("{}", format!("{:?} is not a file", .0).replace('\"', ""))]
     NotAFile(PathBuf),
     #[error("{}", format!("{:?} is not a directory", .0).replace('\"', ""))]
@@ -234,6 +239,12 @@ pub fn build_arg_parser() -> ArgParser<'static> {
                 .takes_value(true)
                 .help("Parent cgroup in which the cgroup of this microvm will be placed."),
         )
+        .arg(Argument::new("bind-ro").takes_value(true).allow_multiple(true).help(
+            "Read-only directory bind: destination-name=/absolute/source. Restricts suid, devices and execution.",
+        ))
+        .arg(Argument::new("bind-rw").takes_value(true).allow_multiple(true).help(
+            "Writable directory bind: destination-name=/absolute/source. Restricts suid, devices and execution.",
+        ))
         .arg(Argument::new("api-sock-fd").takes_value(true).help(
             "Inherited descriptor of a listening unix domain stream socket. The jailer keeps it \
              open and passes it to Firecracker for the API.",

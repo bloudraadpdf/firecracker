@@ -9,6 +9,7 @@ use std::ptr::null;
 use vmm_sys_util::syscall::SyscallReturnCode;
 
 use super::{JailerError, to_cstring};
+use crate::bind_mount::BindMount;
 
 const OLD_ROOT_DIR: &CStr = c"old_root";
 const ROOT_DIR: &CStr = c"/";
@@ -16,7 +17,7 @@ const CURRENT_DIR: &CStr = c".";
 
 // This uses switching to a new mount namespace + pivot_root(), together with the regular chroot,
 // to provide a hardened jail (at least compared to only relying on chroot).
-pub fn chroot(path: &Path) -> Result<(), JailerError> {
+pub fn chroot(path: &Path, binds: &[BindMount]) -> Result<(), JailerError> {
     // We unshare into a new mount namespace.
     // SAFETY: The call is safe because we're invoking a C library
     // function with valid parameters.
@@ -24,20 +25,27 @@ pub fn chroot(path: &Path) -> Result<(), JailerError> {
         .into_empty_result()
         .map_err(JailerError::UnshareNewNs)?;
 
-    // Recursively change the propagation type of all the mounts in this namespace to SLAVE, so
-    // we can call pivot_root.
+    // Bind mounts must neither propagate to nor receive mounts from the host.
     // SAFETY: Safe because we provide valid parameters.
     SyscallReturnCode(unsafe {
         libc::mount(
             null(),
             ROOT_DIR.as_ptr(),
             null(),
-            libc::MS_SLAVE | libc::MS_REC,
+            (if binds.is_empty() {
+                libc::MS_SLAVE
+            } else {
+                libc::MS_PRIVATE
+            }) | libc::MS_REC,
             null(),
         )
     })
     .into_empty_result()
-    .map_err(JailerError::MountPropagationSlave)?;
+    .map_err(JailerError::MountPropagation)?;
+
+    for bind in binds {
+        bind.mount(path)?;
+    }
 
     // We need a CString for the following mount call.
     let chroot_dir = to_cstring(path)?;

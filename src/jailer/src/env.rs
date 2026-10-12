@@ -20,6 +20,7 @@ use utils::{arg_parser, validators};
 use vmm_sys_util::syscall::SyscallReturnCode;
 
 use crate::JailerError;
+use crate::bind_mount::BindMount;
 use crate::cgroup::{CgroupConfiguration, CgroupConfigurationBuilder};
 use crate::chroot::chroot;
 use crate::resource_limits::{FSIZE_ARG, NO_FILE_ARG, ResourceLimits};
@@ -129,6 +130,7 @@ pub struct Env {
     jailer_cpu_time_us: u64,
     extra_args: Vec<String>,
     cgroup_conf: Option<CgroupConfiguration>,
+    bind_mounts: Vec<BindMount>,
     resource_limits: ResourceLimits,
     uffd_dev_minor: Option<u32>,
     api_sock_fd: Option<ApiListenerFd>,
@@ -307,6 +309,7 @@ impl Env {
             jailer_cpu_time_us: 0,
             extra_args: arguments.extra_args(),
             cgroup_conf,
+            bind_mounts: BindMount::from_arguments(arguments)?,
             resource_limits,
             uffd_dev_minor,
             api_sock_fd,
@@ -775,7 +778,7 @@ impl Env {
         self.copy_midr_el1_info()?;
 
         // Jail self.
-        chroot(self.chroot_dir())?;
+        chroot(self.chroot_dir(), &self.bind_mounts)?;
 
         // This will not only create necessary directories, but will also change ownership
         // for all of them.
