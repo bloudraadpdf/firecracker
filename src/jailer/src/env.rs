@@ -76,33 +76,6 @@ fn dup2(old_fd: libc::c_int, new_fd: libc::c_int) -> Result<(), JailerError> {
         .map_err(JailerError::Dup2)
 }
 
-// This is a wrapper for the clone system call. When we want to create a new process in a new
-// pid namespace, we will call clone with a NULL stack pointer. We can do this because we will
-// not use the CLONE_VM flag, this will result with the original stack replicated, in a similar
-// manner to the fork syscall. The libc wrapper prevents use of a NULL stack pointer, so we will
-// call the syscall directly.
-fn clone(child_stack: *mut libc::c_void, flags: libc::c_int) -> Result<libc::c_int, JailerError> {
-    SyscallReturnCode(
-        // SAFETY: This is safe because we are using a library function with valid parameters.
-        libc::c_int::try_from(unsafe {
-            // Note: the order of arguments in the raw syscall differs between platforms.
-            // On x86-64, for example, the parameters passed are `flags`, `stack`, `parent_tid`,
-            // `child_tid`, and `tls`. But on On x86-32, and several other common architectures
-            // (including score, ARM, ARM 64) the order of the last two arguments is reversed,
-            // and instead we must pass `flags`, `stack`, `parent_tid`, `tls`, and `child_tid`.
-            // This difference in architecture currently doesn't matter because the last 2
-            // arguments are all 0 but if this were to change we should add an attribute such as
-            // #[cfg(target_arch = "x86_64")] or #[cfg(target_arch = "aarch64")] for each different
-            // call.
-            libc::syscall(libc::SYS_clone, flags, child_stack, 0, 0, 0)
-        })
-        // Unwrap is needed because PIDs are 32-bit.
-        .unwrap(),
-    )
-    .into_result()
-    .map_err(JailerError::Clone)
-}
-
 #[derive(Debug, thiserror::Error)]
 enum UserfaultfdParseError {
     #[error("Could not read /proc/misc: {0}")]
@@ -134,6 +107,21 @@ pub struct Env {
     resource_limits: ResourceLimits,
     uffd_dev_minor: Option<u32>,
     api_sock_fd: Option<ApiListenerFd>,
+    bootstrap: Option<std::os::unix::net::UnixDatagram>,
+    mount_ns_fd: Option<i32>,
+    control_fd: Option<i32>,
+    control_port: Option<u32>,
+    serial_out_fd: Option<i32>,
+}
+
+pub fn launch_fd(
+    arguments: &arg_parser::Arguments,
+    name: &'static str,
+) -> Result<Option<i32>, JailerError> {
+    arguments
+        .single_value(name)
+        .map(|value| utils::inherited::number(value).map_err(JailerError::Launch))
+        .transpose()
 }
 
 pub fn api_sock_fd(
@@ -291,7 +279,26 @@ impl Env {
 
         let uffd_dev_minor = Self::get_userfaultfd_minor_dev_number().ok();
 
+        let bind_mounts = BindMount::from_arguments(arguments)?;
         let api_sock_fd = api_sock_fd(arguments)?;
+        let bootstrap = launch_fd(arguments, "bootstrap-fd")?
+            .map(crate::bootstrap::channel)
+            .transpose()?;
+        let mount_ns_fd = launch_fd(arguments, "mount-ns-fd")?;
+        let control_fd = launch_fd(arguments, "control-fd")?;
+        let serial_out_fd = launch_fd(arguments, "serial-out-fd")?;
+        let control_port = arguments
+            .single_value("control-port")
+            .map(|value| value.parse::<u32>())
+            .transpose()
+            .map_err(|_| JailerError::Launch(io::ErrorKind::InvalidInput.into()))?;
+        if control_fd.is_some() != control_port.is_some()
+            || control_port == Some(0)
+            || (bootstrap.is_some() && (!new_pid_ns || daemonize))
+            || (mount_ns_fd.is_some() && !bind_mounts.is_empty())
+        {
+            return Err(JailerError::Launch(io::ErrorKind::InvalidInput.into()));
+        }
 
         Ok(Env {
             id: id.to_owned(),
@@ -309,10 +316,15 @@ impl Env {
             jailer_cpu_time_us: 0,
             extra_args: arguments.extra_args(),
             cgroup_conf,
-            bind_mounts: BindMount::from_arguments(arguments)?,
+            bind_mounts,
             resource_limits,
             uffd_dev_minor,
             api_sock_fd,
+            bootstrap,
+            mount_ns_fd,
+            control_fd,
+            control_port,
+            serial_out_fd,
         })
     }
 
@@ -372,6 +384,7 @@ impl Env {
         &mut self,
         exec_file: &File,
         pid_file: PathBuf,
+        namespace: &File,
     ) -> Result<(), JailerError> {
         // https://man7.org/linux/man-pages/man7/pid_namespaces.7.html
         // > a process in an ancestor namespace can send signals to the "init" process of a child
@@ -412,7 +425,7 @@ impl Env {
         // Duplicate the current process. The child process will belong to the previously created
         // PID namespace. The current process will not be moved into the newly created namespace,
         // but its first child will assume the role of init(1) in the new namespace.
-        let pid = clone(std::ptr::null_mut(), libc::CLONE_NEWPID)?;
+        let (pid, pidfd) = crate::bootstrap::clone_vmm()?;
         match pid {
             0 => {
                 if is_session_leader {
@@ -428,7 +441,16 @@ impl Env {
                 io::copy(&mut exec_done, &mut io::sink()).map_err(JailerError::ExecWait)?;
                 // Save the PID of the process running the exec file provided
                 // inside <exec_file_name>.pid file.
-                self.save_exec_file_pid(child_pid, pid_file)?;
+                if let Some(channel) = &self.bootstrap {
+                    crate::bootstrap::publish(
+                        channel,
+                        child_pid,
+                        pidfd.as_ref().unwrap(),
+                        namespace,
+                    )?;
+                } else {
+                    self.save_exec_file_pid(child_pid, pid_file)?;
+                }
                 // SAFETY: This is safe because 0 is valid input to exit.
                 unsafe { libc::exit(0) }
             }
@@ -625,6 +647,18 @@ impl Env {
         if let Some(fd) = &self.api_sock_fd {
             args.extend(["--api-sock-fd".to_owned(), fd.raw().to_string()]);
         }
+        for (name, value) in [
+            ("control-fd", self.control_fd.map(|fd| fd.to_string())),
+            (
+                "control-port",
+                self.control_port.map(|port| port.to_string()),
+            ),
+            ("serial-out-fd", self.serial_out_fd.map(|fd| fd.to_string())),
+        ] {
+            if let Some(value) = value {
+                args.extend([format!("--{name}"), value]);
+            }
+        }
         args.extend(self.extra_args.iter().cloned());
         args
     }
@@ -778,7 +812,10 @@ impl Env {
         self.copy_midr_el1_info()?;
 
         // Jail self.
-        chroot(self.chroot_dir(), &self.bind_mounts)?;
+        let namespace = match self.mount_ns_fd.take() {
+            Some(fd) => crate::bootstrap::join(fd, self.chroot_dir())?,
+            None => chroot(self.chroot_dir(), &self.bind_mounts)?,
+        };
 
         // This will not only create necessary directories, but will also change ownership
         // for all of them.
@@ -867,7 +904,7 @@ impl Env {
 
         // If specified, exec the provided binary into a new PID namespace.
         if self.new_pid_ns {
-            self.exec_into_new_pid_ns(&exec_file, pid_file)
+            self.exec_into_new_pid_ns(&exec_file, pid_file, &namespace)
         } else {
             self.save_exec_file_pid(id().try_into().unwrap(), pid_file)?;
             Err(JailerError::Exec(self.exec_command(&exec_file)))

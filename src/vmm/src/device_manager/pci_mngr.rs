@@ -587,7 +587,9 @@ impl<'a> Persist<'a> for PciDevices {
             let ctor_args = VsockUdsConstructorArgs {
                 cid: vsock_state.device_state.frontend.cid,
             };
-            let backend = VsockUnixBackend::restore(ctor_args, &vsock_state.device_state.backend)?;
+            let mut backend =
+                VsockUnixBackend::restore(ctor_args, &vsock_state.device_state.backend)?;
+            backend.set_initial_control(constructor_args.vm_resources.vsock.initial_control.take());
             let device = Arc::new(Mutex::new(Vsock::restore(
                 VsockConstructorArgs {
                     mem: mem.clone(),

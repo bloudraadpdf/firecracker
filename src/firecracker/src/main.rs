@@ -10,6 +10,7 @@ compile_error!(
 mod api_server;
 mod api_server_adapter;
 mod generated;
+mod launch_io;
 mod metrics;
 mod seccomp;
 
@@ -73,6 +74,8 @@ enum MainError {
     ParseArguments(#[from] utils::arg_parser::UtilsArgParserError),
     /// Arguments parsing error: {0}
     ApiSockFd(ApiListenerError),
+    /// Invalid inherited runtime endpoint: {0}
+    LaunchIo(io::Error),
     /// When printing Snapshot Data format: {0}
     PrintSnapshotDataFormat(#[from] SnapshotVersionError),
     /// Invalid value for logger level: {0}.Possible values: [Error, Warning, Info, Debug]
@@ -189,6 +192,21 @@ fn main_exec() -> Result<(), MainError> {
 
     let mut arg_parser =
         ArgParser::new()
+            .arg(
+                Argument::new("control-fd")
+                    .takes_value(true)
+                    .help("Initial guest control stream descriptor."),
+            )
+            .arg(
+                Argument::new("control-port")
+                    .takes_value(true)
+                    .help("Port for the initial guest control stream."),
+            )
+            .arg(
+                Argument::new("serial-out-fd")
+                    .takes_value(true)
+                    .help("Nonblocking serial output pipe descriptor."),
+            )
             .arg(
                 Argument::new("api-sock")
                     .takes_value(true)
@@ -460,9 +478,23 @@ fn main_exec() -> Result<(), MainError> {
         })
         .unwrap_or_else(|| api_payload_limit);
 
+    let inherited_api = arguments
+        .single_value("api-sock-fd")
+        .map(|fd| {
+            fd.parse::<utils::api_listener::ApiListenerFd>()
+                .map_err(MainError::ApiSockFd)
+        })
+        .transpose()?;
+    let launch_io = launch_io::parse(arguments, inherited_api.map(|fd| fd.raw()))
+        .map_err(MainError::LaunchIo)?;
+    if (!api_enabled || vmm_config_json.is_some())
+        && (launch_io.control.is_some() || launch_io.serial.is_some())
+    {
+        return Err(MainError::LaunchIo(io::ErrorKind::InvalidInput.into()));
+    }
     if api_enabled {
-        let api_socket = match arguments.single_value("api-sock-fd") {
-            Some(fd) => ApiSocket::Descriptor(fd.parse().map_err(MainError::ApiSockFd)?),
+        let api_socket = match inherited_api {
+            Some(fd) => ApiSocket::Descriptor(fd),
             None => ApiSocket::Path(
                 arguments
                     .single_value("api-sock")
@@ -500,6 +532,7 @@ fn main_exec() -> Result<(), MainError> {
             api_payload_limit,
             mmds_size_limit,
             metadata_json.as_deref(),
+            launch_io,
         )
         .map_err(MainError::RunWithApi)
     } else {

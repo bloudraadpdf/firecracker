@@ -178,6 +178,7 @@ pub(crate) fn run_with_api(
     api_payload_limit: usize,
     mmds_size_limit: usize,
     metadata_json: Option<&str>,
+    launch_io: vmm::resources::LaunchIo,
 ) -> Result<(), ApiServerError> {
     // FD to notify of API events. This is a blocking eventfd by design.
     // It is used in the config/pre-boot loop which is a simple blocking loop
@@ -263,6 +264,7 @@ pub(crate) fn run_with_api(
             pci_enabled,
             mmds_size_limit,
             metadata_json,
+            launch_io,
         )
         .map_err(ApiServerError::BuildMicroVmError),
     };

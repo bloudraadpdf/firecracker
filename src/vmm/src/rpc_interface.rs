@@ -373,13 +373,19 @@ impl<'a> PrebootApiController<'a> {
         pci_enabled: bool,
         mmds_size_limit: usize,
         metadata_json: Option<&str>,
+        launch_io: crate::resources::LaunchIo,
     ) -> Result<Arc<Mutex<Vmm>>, BuildMicrovmFromRequestsError> {
         let mut vm_resources = VmResources {
+            serial_output: launch_io
+                .serial
+                .map(crate::devices::legacy::serial::SerialOutput::Descriptor),
             boot_timer: boot_timer_enabled,
             mmds_size_limit,
             pci_enabled,
             ..Default::default()
         };
+
+        vm_resources.vsock.initial_control = launch_io.control;
 
         // Init the data store from file, if present.
         if let Some(data) = metadata_json {
@@ -448,7 +454,9 @@ impl<'a> PrebootApiController<'a> {
                 .map(|()| VmmData::Empty)
                 .map_err(VmmActionError::Metrics),
             ConfigureSerial(serial_cfg) => {
-                self.vm_resources.serial_out_path = serial_cfg.serial_out_path;
+                self.vm_resources.serial_output = serial_cfg
+                    .serial_out_path
+                    .map(crate::devices::legacy::serial::SerialOutput::Path);
                 self.vm_resources.serial_rate_limiter_cfg = serial_cfg.rate_limiter;
                 Ok(VmmData::Empty)
             }

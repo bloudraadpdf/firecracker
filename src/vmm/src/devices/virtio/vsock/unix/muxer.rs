@@ -97,6 +97,8 @@ pub struct VsockMuxer {
     killq: MuxerKillQ,
     /// The Unix socket, through which host-initiated connections are accepted.
     host_sock: UnixListener,
+    initial_control: Option<super::InitialControl>,
+    control_port: Option<u32>,
     /// The file system path of the host-side Unix socket. This is used to figure out the path
     /// to Unix sockets listening on specific ports. I.e. `"<this path>_<port number>"`.
     pub(crate) host_sock_path: String,
@@ -339,6 +341,8 @@ impl VsockMuxer {
         let muxer = Self {
             cid,
             host_sock,
+            initial_control: None,
+            control_port: None,
             host_sock_path,
             epoll: Epoll::new().map_err(VsockUnixBackendError::EpollFdCreate)?,
             rxq: MuxerRxQ::new(),
@@ -350,6 +354,11 @@ impl VsockMuxer {
         };
 
         Ok(muxer)
+    }
+
+    pub fn set_initial_control(&mut self, control: Option<super::InitialControl>) {
+        self.control_port = control.as_ref().map(|control| control.port);
+        self.initial_control = control;
     }
 
     /// Return the file system path of the host-side Unix socket.
@@ -637,7 +646,20 @@ impl VsockMuxer {
     fn handle_peer_request_pkt(&mut self, pkt: &VsockPacketTx) {
         let port_path = format!("{}_{}", self.host_sock_path, pkt.hdr.dst_port());
 
-        UnixStream::connect(port_path)
+        let port = pkt.hdr.dst_port();
+        let stream = if self.control_port == Some(port) {
+            if self.conn_map.keys().any(|key| key.local_port == port) {
+                self.enq_rst(port, pkt.hdr.src_port());
+                return;
+            }
+            match self.initial_control.take() {
+                Some(control) => Ok(control.stream),
+                None => UnixStream::connect(port_path),
+            }
+        } else {
+            UnixStream::connect(port_path)
+        };
+        stream
             .and_then(|stream| stream.set_nonblocking(true).map(|_| stream))
             .map_err(VsockUnixBackendError::UnixConnect)
             .and_then(|stream| {
@@ -1027,6 +1049,49 @@ mod tests {
         fn drop(&mut self) {
             std::fs::remove_file(&self.path).unwrap();
         }
+    }
+
+    #[test]
+    fn initial_control_has_no_path_and_allows_recovery_after_close() {
+        let mut ctx = MuxerTestContext::new("initial_control");
+        let (mut host, child) = UnixStream::pair().unwrap();
+        let port = 5252;
+        let peer = 9000;
+        ctx.muxer
+            .set_initial_control(Some(super::super::InitialControl {
+                port,
+                stream: child,
+            }));
+        assert!(!std::path::Path::new(&format!("{}_{}", ctx.muxer.host_sock_path, port)).exists());
+        ctx.init_tx_pkt(port, peer, uapi::VSOCK_OP_REQUEST);
+        ctx.send();
+        ctx.recv();
+        assert_eq!(ctx.rx_pkt.hdr.op(), uapi::VSOCK_OP_RESPONSE);
+        let key = ConnMapKey {
+            local_port: port,
+            peer_port: peer,
+        };
+        assert!(ctx.muxer.conn_map.contains_key(&key));
+        ctx.init_tx_pkt(port, peer + 1, uapi::VSOCK_OP_REQUEST);
+        ctx.send();
+        ctx.recv();
+        assert_eq!(ctx.rx_pkt.hdr.op(), uapi::VSOCK_OP_RST);
+        host.write_all(b"owned").unwrap();
+        ctx.notify_muxer();
+        ctx.recv();
+        assert_eq!(ctx.rx_pkt.hdr.op(), uapi::VSOCK_OP_RW);
+        assert_eq!(ctx.rx_pkt.hdr.len(), 5);
+        // A reset closes the old stream before the recovery pathname can be used.
+        ctx.init_tx_pkt(port, peer, uapi::VSOCK_OP_RST);
+        ctx.send();
+        assert!(!ctx.muxer.conn_map.contains_key(&key));
+        let mut recovered = ctx.create_local_listener(port);
+        ctx.init_tx_pkt(port, peer + 1, uapi::VSOCK_OP_REQUEST);
+        ctx.send();
+        ctx.recv();
+        assert_eq!(ctx.rx_pkt.hdr.op(), uapi::VSOCK_OP_RESPONSE);
+        let _stream = recovered.accept();
+        assert!(ctx.muxer.initial_control.is_none());
     }
 
     #[test]

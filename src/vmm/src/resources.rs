@@ -102,6 +102,15 @@ pub struct VmmConfig {
     pub memory_hotplug: Option<MemoryHotplugConfig>,
 }
 
+/// Owned private IPC supplied by the launcher, outside snapshot state.
+#[derive(Debug, Default)]
+pub struct LaunchIo {
+    /// Initial guest control stream, consumed by the vsock backend.
+    pub control: Option<crate::devices::virtio::vsock::InitialControl>,
+    /// Nonblocking serial output pipe.
+    pub serial: Option<std::fs::File>,
+}
+
 /// A data structure that encapsulates the device configurations
 /// held in the Vmm.
 #[derive(Debug, Default)]
@@ -135,7 +144,7 @@ pub struct VmResources {
     /// Whether or not to use PCIe transport for VirtIO devices.
     pub pci_enabled: bool,
     /// Where serial console output should be written to
-    pub serial_out_path: Option<PathBuf>,
+    pub serial_output: Option<crate::devices::legacy::serial::SerialOutput>,
     /// Optional rate limiter config for serial output.
     pub serial_rate_limiter_cfg: Option<TokenBucketConfig>,
 }
@@ -231,7 +240,9 @@ impl VmResources {
         }
 
         if let Some(serial_cfg) = vmm_config.serial_config {
-            resources.serial_out_path = serial_cfg.serial_out_path;
+            resources.serial_output = serial_cfg
+                .serial_out_path
+                .map(crate::devices::legacy::serial::SerialOutput::Path);
             resources.serial_rate_limiter_cfg = serial_cfg.rate_limiter;
         }
 
@@ -665,7 +676,7 @@ mod tests {
             entropy: Default::default(),
             pmem: Default::default(),
             pci_enabled: false,
-            serial_out_path: None,
+            serial_output: None,
             serial_rate_limiter_cfg: None,
             memory_hotplug: Default::default(),
         }

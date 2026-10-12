@@ -205,7 +205,7 @@ pub fn build_microvm_for_boot(
         event_manager,
         kvm_vm.vcpus_exit_evt(),
         &kvm_vm,
-        vm_resources.serial_out_path.as_ref(),
+        vm_resources.serial_output.as_ref(),
         vm_resources.serial_rate_limiter(),
         vm_resources.pci_enabled,
     )?;
@@ -294,7 +294,7 @@ pub fn build_microvm_for_boot(
         &kvm_vm,
         event_manager,
         &mut boot_cmdline,
-        vm_resources.serial_out_path.as_ref(),
+        vm_resources.serial_output.as_ref(),
         vm_resources.serial_rate_limiter(),
     )?;
 
@@ -979,7 +979,7 @@ pub(crate) mod tests {
         vsock_config: VsockDeviceConfig,
     ) {
         let vsock_dev_id = VSOCK_DEV_ID.to_owned();
-        let vsock = VsockBuilder::create_unixsock_vsock(vsock_config).unwrap();
+        let vsock = VsockBuilder::create_unixsock_vsock(vsock_config, None).unwrap();
         let vsock = Arc::new(Mutex::new(vsock));
 
         attach_unixsock_vsock_device(

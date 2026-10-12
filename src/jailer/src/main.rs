@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::{env as p_env, fs, io};
 
 use env::PROC_MOUNTS;
-use utils::api_listener::{ApiListenerError, ApiListenerFd, check_api_listener};
+use utils::api_listener::{ApiListenerError, check_api_listener};
 use utils::arg_parser::{ArgParser, Argument, UtilsArgParserError as ParsingError};
 use utils::time::{ClockType, get_time_us};
 use utils::validators;
@@ -16,6 +16,7 @@ use vmm_sys_util::syscall::SyscallReturnCode;
 use crate::env::Env;
 
 mod bind_mount;
+mod bootstrap;
 mod cgroup;
 mod chroot;
 mod env;
@@ -25,6 +26,8 @@ const JAILER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, thiserror::Error)]
 pub enum JailerError {
+    #[error("Invalid launch descriptor or bootstrap hand-off: {0}")]
+    Launch(io::Error),
     #[error("Failed to parse arguments: {0}")]
     ArgumentParsing(ParsingError),
     #[error("{}", format!("Failed to canonicalize path {:?}: {}", .0, .1).replace('\"', ""))]
@@ -102,8 +105,6 @@ pub enum JailerError {
     MemfdSeal(io::Error),
     #[error("{}", format!("File {:?} doesn't have a parent", .0).replace('\"', ""))]
     MissingParent(PathBuf),
-    #[error("Failed to create the jail root directory before pivoting root: {0}")]
-    MkdirOldRoot(io::Error),
     #[error("Failed to create {1} via mknod inside the jail: {0}")]
     MknodDev(io::Error, String),
     #[error("Failed to bind mount the jail root directory: {0}")]
@@ -136,8 +137,6 @@ pub enum JailerError {
     ResLimitFormat(String),
     #[error("Invalid limit value for resource: {0}: {1}")]
     ResLimitValue(String, String),
-    #[error("Failed to remove old jail root directory: {0}")]
-    RmOldRootDir(io::Error),
     #[error("Failed to change current directory: {0}")]
     SetCurrentDir(io::Error),
     #[error("Failed to join network namespace: netns: {0}")]
@@ -245,6 +244,11 @@ pub fn build_arg_parser() -> ArgParser<'static> {
         .arg(Argument::new("bind-rw").takes_value(true).allow_multiple(true).help(
             "Writable directory bind: destination-name=/absolute/source. Restricts suid, devices and execution.",
         ))
+        .arg(Argument::new("bootstrap-fd").takes_value(true).help("Private Unix datagram socket for pidfd and mount namespace hand-off."))
+        .arg(Argument::new("mount-ns-fd").takes_value(true).help("Owned mount namespace of this retained jail."))
+        .arg(Argument::new("control-fd").takes_value(true).help("Initial guest control stream descriptor."))
+        .arg(Argument::new("control-port").takes_value(true).help("Guest-initiated port for the initial control stream."))
+        .arg(Argument::new("serial-out-fd").takes_value(true).help("Nonblocking serial output pipe descriptor."))
         .arg(Argument::new("api-sock-fd").takes_value(true).help(
             "Inherited descriptor of a listening unix domain stream socket. The jailer keeps it \
              open and passes it to Firecracker for the API.",
@@ -291,30 +295,26 @@ fn close_range(first: libc::c_uint, last: libc::c_uint) -> Result<(), JailerErro
     .map_err(JailerError::CloseRange)
 }
 
-fn close_fds_by_close_range(keep: Option<ApiListenerFd>) -> Result<(), JailerError> {
-    // First try using the close_range syscall to close all open FDs in the range of 3..UINT_MAX
-    let Some(keep) = keep.map(|fd| fd.raw().cast_unsigned()) else {
-        return close_range(3, libc::c_uint::MAX);
-    };
-    if keep > 3 {
-        close_range(3, keep - 1)?;
+fn close_fds_by_close_range(keep: &[i32]) -> Result<(), JailerError> {
+    let mut keep = keep.to_vec();
+    keep.sort_unstable();
+    let mut first = 3;
+    for fd in keep {
+        let fd = u32::try_from(fd)
+            .map_err(|_| JailerError::Launch(io::ErrorKind::InvalidInput.into()))?;
+        if fd < first {
+            return Err(JailerError::Launch(io::ErrorKind::InvalidInput.into()));
+        }
+        if first < fd {
+            close_range(first, fd - 1)?;
+        }
+        first = fd + 1;
     }
-    close_range(keep + 1, libc::c_uint::MAX)
+    close_range(first, libc::c_uint::MAX)
 }
 
-// Closes all FDs other than 0 (STDIN), 1 (STDOUT), 2 (STDERR) and the API socket
-fn close_inherited_fds(keep: Option<ApiListenerFd>) -> Result<(), JailerError> {
-    // We use the close_range syscall which is available on kernels > 5.9.
+fn sanitize_process(keep: &[i32]) -> Result<(), JailerError> {
     close_fds_by_close_range(keep)?;
-    Ok(())
-}
-
-fn sanitize_process(keep: Option<ApiListenerFd>) -> Result<(), JailerError> {
-    // First thing to do is make sure we don't keep any inherited FDs
-    // other that IN, OUT, ERR and the API socket.
-    close_inherited_fds(keep)?;
-
-    // Cleanup environment variables.
     clean_env_vars();
     Ok(())
 }
@@ -363,7 +363,13 @@ fn main_exec() -> Result<(), JailerError> {
     let arguments = arg_parser.arguments();
     let api_sock_fd = env::api_sock_fd(arguments)?;
 
-    sanitize_process(api_sock_fd)
+    let mut keep = api_sock_fd.iter().map(|fd| fd.raw()).collect::<Vec<_>>();
+    for name in ["bootstrap-fd", "mount-ns-fd", "control-fd", "serial-out-fd"] {
+        if let Some(fd) = env::launch_fd(arguments, name)? {
+            keep.push(fd);
+        }
+    }
+    sanitize_process(&keep)
         .unwrap_or_else(|err| panic!("Failed to sanitize the Jailer process: {}", err));
     if let Some(fd) = api_sock_fd {
         check_api_listener(fd).map_err(JailerError::UnexpectedListenerFd)?;
@@ -408,10 +414,7 @@ mod tests {
 
     use super::*;
 
-    fn run_close_fds_test(
-        test_fn: fn(Option<ApiListenerFd>) -> Result<(), JailerError>,
-        keep: Option<usize>,
-    ) {
+    fn run_close_fds_test(test_fn: fn(&[i32]) -> Result<(), JailerError>, keep: Option<usize>) {
         let n = 100;
 
         let tmp_dir_path = format!(
@@ -426,7 +429,7 @@ mod tests {
             fds.push(maybe_file.unwrap().into_raw_fd());
         }
 
-        test_fn(keep.map(|index| fds[index].to_string().parse().unwrap())).unwrap();
+        test_fn(&keep.map(|index| fds[index]).into_iter().collect::<Vec<_>>()).unwrap();
 
         for (index, fd) in fds.into_iter().enumerate() {
             let is_fd_opened = unsafe { libc::fcntl(fd, libc::F_GETFD) } >= 0;

@@ -65,12 +65,14 @@ impl From<&Vsock<VsockUnixBackend>> for VsockDeviceConfig {
 #[derive(Debug, Default)]
 pub struct VsockBuilder {
     inner: Option<VsockAndUnixPath>,
+    /// Launcher-owned control stream, excluded from snapshot state.
+    pub initial_control: Option<crate::devices::virtio::vsock::InitialControl>,
 }
 
 impl VsockBuilder {
     /// Creates an empty Vsock with Unix backend Store.
     pub fn new() -> Self {
-        Self { inner: None }
+        Self::default()
     }
 
     /// Inserts an existing vsock device.
@@ -95,7 +97,10 @@ impl VsockBuilder {
         }
         self.inner = Some(VsockAndUnixPath {
             uds_path: cfg.uds_path.clone(),
-            vsock: Arc::new(Mutex::new(Self::create_unixsock_vsock(cfg)?)),
+            vsock: Arc::new(Mutex::new(Self::create_unixsock_vsock(
+                cfg,
+                self.initial_control.take(),
+            )?)),
         });
         Ok(())
     }
@@ -108,8 +113,10 @@ impl VsockBuilder {
     /// Creates a Vsock device from a VsockDeviceConfig.
     pub fn create_unixsock_vsock(
         cfg: VsockDeviceConfig,
+        control: Option<crate::devices::virtio::vsock::InitialControl>,
     ) -> Result<Vsock<VsockUnixBackend>, VsockConfigError> {
-        let backend = VsockUnixBackend::new(u64::from(cfg.guest_cid), cfg.uds_path)?;
+        let mut backend = VsockUnixBackend::new(u64::from(cfg.guest_cid), cfg.uds_path)?;
+        backend.set_initial_control(control);
 
         Vsock::new(u64::from(cfg.guest_cid), backend).map_err(VsockConfigError::CreateVsockDevice)
     }
@@ -141,7 +148,7 @@ pub(crate) mod tests {
         let mut tmp_sock_file = TempFile::new().unwrap();
         tmp_sock_file.remove().unwrap();
         let vsock_config = default_config(&tmp_sock_file);
-        VsockBuilder::create_unixsock_vsock(vsock_config).unwrap();
+        VsockBuilder::create_unixsock_vsock(vsock_config, None).unwrap();
     }
 
     #[test]

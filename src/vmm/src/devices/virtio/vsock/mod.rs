@@ -28,7 +28,7 @@ use vmm_sys_util::epoll::EventSet;
 pub use self::defs::VSOCK_DEV_ID;
 pub use self::device::Vsock;
 use self::packet::{VsockPacketRx, VsockPacketTx};
-pub use self::unix::{VsockUnixBackend, VsockUnixBackendError};
+pub use self::unix::{InitialControl, VsockUnixBackend, VsockUnixBackendError};
 use super::iov_deque::IovDequeError;
 use crate::devices::virtio::iovec::IoVecError;
 use crate::devices::virtio::persist::PersistError as VirtioStateError;

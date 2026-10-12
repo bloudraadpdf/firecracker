@@ -13,6 +13,13 @@ mod muxer_rxq;
 
 pub use muxer::VsockMuxer as VsockUnixBackend;
 
+/// The first guest connection to a launcher-owned control port.
+#[derive(Debug)]
+pub struct InitialControl {
+    pub port: u32,
+    pub stream: std::os::unix::net::UnixStream,
+}
+
 use crate::devices::virtio::vsock::csm::VsockConnectionBackend;
 
 mod defs {

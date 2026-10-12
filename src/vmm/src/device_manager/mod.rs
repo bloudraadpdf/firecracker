@@ -6,7 +6,6 @@
 // found in the THIRD-PARTY file.
 
 use std::fmt::Debug;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use acpi::ACPIDeviceManager;
@@ -54,7 +53,6 @@ use crate::rate_limiter::TokenBucket;
 use crate::resources::VmResources;
 use crate::rpc_interface::VmmActionError;
 use crate::snapshot::Persist;
-use crate::utils::open_file_nonblock;
 use crate::vmm_config::HotplugDeviceConfig;
 use crate::vmm_config::drive::{BlockDeviceConfig, DriveError};
 use crate::vmm_config::mmds::MmdsConfigError;
@@ -150,17 +148,14 @@ impl DeviceManager {
     /// Sets up the serial device.
     fn setup_serial_device(
         event_manager: &mut EventManager,
-        output: Option<&PathBuf>,
+        output: Option<&crate::devices::legacy::serial::SerialOutput>,
         state: Option<&serial::SerialState>,
         rate_limiter: Option<TokenBucket>,
     ) -> Result<Arc<Mutex<SerialDevice>>, std::io::Error> {
         let (serial_in, serial_out) = match output {
             Some(path) => (
                 None,
-                SerialOut::new(
-                    SerialOutInner::File(open_file_nonblock(path)?),
-                    rate_limiter,
-                ),
+                SerialOut::new(SerialOutInner::File(path.open()?), rate_limiter),
             ),
             None => {
                 Self::set_stdout_nonblocking();
@@ -205,7 +200,7 @@ impl DeviceManager {
         event_manager: &mut EventManager,
         vcpus_exit_evt: &EventFd,
         vm: &KvmVm,
-        serial_output: Option<&PathBuf>,
+        serial_output: Option<&crate::devices::legacy::serial::SerialOutput>,
         serial_state: Option<&serial::SerialState>,
         serial_rate_limiter: Option<TokenBucket>,
     ) -> Result<PortIODeviceManager, DeviceManagerCreateError> {
@@ -236,7 +231,7 @@ impl DeviceManager {
         event_manager: &mut EventManager,
         vcpus_exit_evt: &EventFd,
         vm: &Arc<KvmVm>,
-        serial_output: Option<&PathBuf>,
+        serial_output: Option<&crate::devices::legacy::serial::SerialOutput>,
         serial_rate_limiter: Option<TokenBucket>,
         pci_enabled: bool,
     ) -> Result<Self, DeviceManagerCreateError> {
@@ -354,7 +349,7 @@ impl DeviceManager {
         vm: &KvmVm,
         event_manager: &mut EventManager,
         cmdline: &mut Cmdline,
-        serial_out_path: Option<&PathBuf>,
+        serial_out_path: Option<&crate::devices::legacy::serial::SerialOutput>,
         serial_rate_limiter: Option<TokenBucket>,
     ) -> Result<(), AttachDeviceError> {
         // Serial device setup.
@@ -722,7 +717,7 @@ impl<'a> Persist<'a> for DeviceManager {
             constructor_args.event_manager,
             constructor_args.vcpus_exit_evt,
             constructor_args.vm,
-            constructor_args.vm_resources.serial_out_path.as_ref(),
+            constructor_args.vm_resources.serial_output.as_ref(),
             serial_state.as_ref(),
             constructor_args.vm_resources.serial_rate_limiter(),
         )?;
