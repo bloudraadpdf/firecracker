@@ -65,17 +65,34 @@ pub fn clone_vmm() -> Result<(i32, Option<OwnedFd>), JailerError> {
     ))
 }
 
+pub fn executable(fd: i32) -> Result<File, JailerError> {
+    // SAFETY: the launch protocol transfers this unique descriptor to the jailer.
+    let file = File::from(unsafe { utils::inherited::take(fd) }.map_err(JailerError::Launch)?);
+    let seals = libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
+    // SAFETY: F_GET_SEALS reads flags from the live descriptor.
+    let actual = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GET_SEALS) };
+    if actual < 0 || actual & seals != seals {
+        return Err(JailerError::Launch(io::ErrorKind::InvalidInput.into()));
+    }
+    Ok(file)
+}
+
 pub fn publish(
     channel: &UnixDatagram,
     pid: i32,
     pidfd: &OwnedFd,
     namespace: &File,
+    executable: &File,
 ) -> Result<(), JailerError> {
     let bytes = pid.to_le_bytes();
     let sent = channel
         .send_with_fds(
             &[bytes.as_slice()],
-            &[pidfd.as_raw_fd(), namespace.as_raw_fd()],
+            &[
+                pidfd.as_raw_fd(),
+                namespace.as_raw_fd(),
+                executable.as_raw_fd(),
+            ],
         )
         .map_err(|error| JailerError::Launch(io::Error::from_raw_os_error(error.errno())))?;
     if sent != bytes.len() {
@@ -90,6 +107,39 @@ mod tests {
     use std::io::{BufRead, BufReader, Read, Write};
     use std::os::fd::{AsFd, IntoRawFd};
     use std::process::{Command, Stdio};
+
+    #[test]
+    fn retained_executable_requires_all_seals_and_closes_on_exec() {
+        for seals in [
+            0,
+            libc::F_SEAL_WRITE,
+            libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL,
+        ] {
+            // SAFETY: name is NUL-terminated; flags request a private sealable executable.
+            let fd = unsafe {
+                libc::memfd_create(
+                    c"retained-exec-test".as_ptr(),
+                    libc::MFD_ALLOW_SEALING | libc::MFD_EXEC,
+                )
+            };
+            assert!(fd >= 0);
+            // SAFETY: fd is live; F_ADD_SEALS takes the integer seal mask.
+            assert_eq!(unsafe { libc::fcntl(fd, libc::F_ADD_SEALS, seals) }, 0);
+            let result = executable(fd);
+            if seals & libc::F_SEAL_SEAL == 0 {
+                assert!(result.is_err());
+            } else {
+                let file = result.unwrap();
+                // SAFETY: file owns the descriptor; F_GETFD only reads descriptor flags.
+                assert_ne!(
+                    unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC,
+                    0
+                );
+            }
+        }
+        let regular = File::open("/dev/null").unwrap();
+        assert!(executable(regular.into_raw_fd()).is_err());
+    }
 
     #[test]
     #[ignore = "requires CAP_SYS_ADMIN; launches isolated namespace processes"]

@@ -245,6 +245,7 @@ pub fn build_arg_parser() -> ArgParser<'static> {
             "Writable directory bind: destination-name=/absolute/source. Restricts suid, devices and execution.",
         ))
         .arg(Argument::new("bootstrap-fd").takes_value(true).help("Private Unix datagram socket for pidfd and mount namespace hand-off."))
+        .arg(Argument::new("exec-fd").takes_value(true).help("Sealed executable owned by this retained jail."))
         .arg(Argument::new("mount-ns-fd").takes_value(true).help("Owned mount namespace of this retained jail."))
         .arg(Argument::new("control-fd").takes_value(true).help("Initial guest control stream descriptor."))
         .arg(Argument::new("control-port").takes_value(true).help("Guest-initiated port for the initial control stream."))
@@ -364,7 +365,13 @@ fn main_exec() -> Result<(), JailerError> {
     let api_sock_fd = env::api_sock_fd(arguments)?;
 
     let mut keep = api_sock_fd.iter().map(|fd| fd.raw()).collect::<Vec<_>>();
-    for name in ["bootstrap-fd", "mount-ns-fd", "control-fd", "serial-out-fd"] {
+    for name in [
+        "bootstrap-fd",
+        "mount-ns-fd",
+        "exec-fd",
+        "control-fd",
+        "serial-out-fd",
+    ] {
         if let Some(fd) = env::launch_fd(arguments, name)? {
             keep.push(fd);
         }

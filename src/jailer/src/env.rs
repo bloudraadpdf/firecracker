@@ -109,6 +109,7 @@ pub struct Env {
     api_sock_fd: Option<ApiListenerFd>,
     bootstrap: Option<std::os::unix::net::UnixDatagram>,
     mount_ns_fd: Option<i32>,
+    exec_fd: Option<i32>,
     control_fd: Option<i32>,
     control_port: Option<u32>,
     serial_out_fd: Option<i32>,
@@ -285,6 +286,7 @@ impl Env {
             .map(crate::bootstrap::channel)
             .transpose()?;
         let mount_ns_fd = launch_fd(arguments, "mount-ns-fd")?;
+        let exec_fd = launch_fd(arguments, "exec-fd")?;
         let control_fd = launch_fd(arguments, "control-fd")?;
         let serial_out_fd = launch_fd(arguments, "serial-out-fd")?;
         let control_port = arguments
@@ -296,6 +298,7 @@ impl Env {
             || control_port == Some(0)
             || (bootstrap.is_some() && (!new_pid_ns || daemonize))
             || (mount_ns_fd.is_some() && !bind_mounts.is_empty())
+            || (exec_fd.is_some() && mount_ns_fd.is_none())
         {
             return Err(JailerError::Launch(io::ErrorKind::InvalidInput.into()));
         }
@@ -322,6 +325,7 @@ impl Env {
             api_sock_fd,
             bootstrap,
             mount_ns_fd,
+            exec_fd,
             control_fd,
             control_port,
             serial_out_fd,
@@ -447,6 +451,7 @@ impl Env {
                         child_pid,
                         pidfd.as_ref().unwrap(),
                         namespace,
+                        exec_file,
                     )?;
                 } else {
                     self.save_exec_file_pid(child_pid, pid_file)?;
@@ -781,7 +786,10 @@ impl Env {
     }
 
     pub fn run(mut self) -> Result<(), JailerError> {
-        let exec_file = self.exec_memfd()?;
+        let exec_file = match self.exec_fd.take() {
+            Some(fd) => crate::bootstrap::executable(fd)?,
+            None => self.exec_memfd()?,
+        };
         let pid_file = PathBuf::from(format!("/{}{}", self.exec_file_name, PID_FILE_EXTENSION));
 
         // Join the specified network namespace, if applicable.

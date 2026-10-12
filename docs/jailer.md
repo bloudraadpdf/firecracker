@@ -129,7 +129,11 @@ After starting, the Jailer goes through the following operations:
 - Copy the file specified with `--exec-file` into a new memory file
   (`memfd_create()` with `MFD_EXEC`) and seal it against writes and size
   changes. This ensures the new process will not share memory with any other
-  Firecracker process. The jail holds no copy of the executable.
+  concurrent Firecracker process. The jail holds no copy of the executable.
+  A retained jail can instead supply `--exec-fd` with its sealed executable and
+  `--mount-ns-fd` with its mount namespace. The owner must prove the previous
+  VMM dead before reusing either. The bootstrap message returns the VMM pidfd,
+  mount namespace and sealed executable descriptors to that owner.
 - Set resource bounds for current process and its children through
   `--resource-limit` argument, by calling `setrlimit()` system call with the
   specific resource argument. If no limits are provided, the jailer bounds
