@@ -466,6 +466,31 @@ impl Env {
         dev_major: u32,
         dev_minor: u32,
     ) -> Result<(), JailerError> {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+        let path = Path::new(dev_path.to_str().unwrap());
+        match fs::symlink_metadata(path) {
+            Ok(metadata) => {
+                if metadata.file_type().is_char_device()
+                    && metadata.rdev() == libc::makedev(dev_major, dev_minor)
+                    && metadata.mode() == libc::S_IFCHR | 0o600
+                    && metadata.uid() == self.uid()
+                    && metadata.gid() == self.gid()
+                    && metadata.nlink() == 1
+                {
+                    return Ok(());
+                }
+                return Err(JailerError::MknodDev(
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "existing jail device does not match",
+                    ),
+                    path.display().to_string(),
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(JailerError::MknodDev(error, path.display().to_string())),
+        }
         // As per sysstat.h:
         // S_IFCHR -> character special device
         // S_IRUSR -> read permission, owner
@@ -493,11 +518,37 @@ impl Env {
     }
 
     fn setup_jailed_folder(&self, folder: impl AsRef<Path>) -> Result<(), JailerError> {
+        use std::os::unix::fs::MetadataExt;
+
         let folder_path = folder.as_ref();
-        fs::create_dir_all(folder_path)
-            .map_err(|err| JailerError::CreateDir(folder_path.to_owned(), err))?;
-        fs::set_permissions(folder_path, Permissions::from_mode(FOLDER_PERMISSIONS))
-            .map_err(|err| JailerError::Chmod(folder_path.to_owned(), err))?;
+        let existing = match fs::symlink_metadata(folder_path) {
+            Ok(metadata) if metadata.is_dir() => Some(metadata),
+            Ok(_) => {
+                return Err(JailerError::CreateDir(
+                    folder_path.to_owned(),
+                    io::Error::new(io::ErrorKind::InvalidData, "jail folder is not a directory"),
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                fs::create_dir_all(folder_path)
+                    .map_err(|err| JailerError::CreateDir(folder_path.to_owned(), err))?;
+                None
+            }
+            Err(error) => return Err(JailerError::CreateDir(folder_path.to_owned(), error)),
+        };
+        if existing
+            .as_ref()
+            .is_none_or(|metadata| metadata.mode() & 0o7777 != FOLDER_PERMISSIONS)
+        {
+            fs::set_permissions(folder_path, Permissions::from_mode(FOLDER_PERMISSIONS))
+                .map_err(|err| JailerError::Chmod(folder_path.to_owned(), err))?;
+        }
+        if existing
+            .as_ref()
+            .is_some_and(|metadata| metadata.uid() == self.uid() && metadata.gid() == self.gid())
+        {
+            return Ok(());
+        }
 
         let c_path = CString::new(folder_path.to_str().unwrap()).unwrap();
         // SAFETY: This is safe because folder was checked for a null-terminator.
@@ -1196,6 +1247,13 @@ mod tests {
         assert_eq!(metadata.st_uid(), env.uid);
         assert_eq!(metadata.st_gid(), env.gid);
 
+        env.setup_jailed_folder(&foo_dir).unwrap();
+        assert_eq!(fs::metadata(&foo_dir).unwrap().st_ino(), metadata.st_ino());
+        let alias = foo_dir.with_extension("alias");
+        std::os::unix::fs::symlink(&foo_dir, &alias).unwrap();
+        assert!(env.setup_jailed_folder(&alias).is_err());
+        fs::remove_file(alias).unwrap();
+
         // Can't safely test that permissions remain unchanged by umask settings without affecting
         // the umask of the whole unit test process.
         // This crate produces a binary, so Rust integ tests aren't an option either.
@@ -1219,17 +1277,19 @@ mod tests {
             libc::S_IFCHR | libc::S_IRUSR | libc::S_IWUSR
         );
 
-        // Trying to create again the same device node is not allowed.
+        env.mknod_and_own_dev(dev_path, major, minor).unwrap();
         assert_eq!(
-            format!(
-                "{}",
-                env.mknod_and_own_dev(dev_path, major, minor).unwrap_err()
-            ),
-            format!(
-                "Failed to create {} via mknod inside the jail: File exists (os error 17)",
-                dev_path.to_str().unwrap()
-            )
+            fs::symlink_metadata(dev_path.to_str().unwrap())
+                .unwrap()
+                .st_ino(),
+            metadata.st_ino()
         );
+        fs::set_permissions(
+            dev_path.to_str().unwrap(),
+            fs::Permissions::from_mode(0o640),
+        )
+        .unwrap();
+        assert!(env.mknod_and_own_dev(dev_path, major, minor).is_err());
     }
 
     #[test]
