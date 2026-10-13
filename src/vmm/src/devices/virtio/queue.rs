@@ -471,6 +471,9 @@ impl Queue {
     /// Set up pointers to the queue objects in the guest memory
     /// and mark memory dirty for those objects
     pub fn initialize<M: GuestMemoryBackend>(&mut self, mem: &M) -> Result<(), QueueError> {
+        self.desc_table_ptr = std::ptr::null();
+        self.avail_ring_ptr = std::ptr::null_mut();
+        self.used_ring_ptr = std::ptr::null_mut();
         if !self.ready {
             return Err(QueueError::NotReady);
         }
@@ -492,14 +495,25 @@ impl Queue {
         // > Available Ring   2
         // > Used Ring        4
         // > ================ ==========
-        self.desc_table_ptr =
+        let desc =
             self.get_aligned_slice_ptr(mem, self.desc_table_address, self.desc_table_size(), 16)?;
-        self.avail_ring_ptr =
+        let avail =
             self.get_aligned_slice_ptr(mem, self.avail_ring_address, self.avail_ring_size(), 2)?;
-        self.used_ring_ptr =
+        let used =
             self.get_aligned_slice_ptr(mem, self.used_ring_address, self.used_ring_size(), 4)?;
+        self.desc_table_ptr = desc;
+        self.avail_ring_ptr = avail;
+        self.used_ring_ptr = used;
 
         Ok(())
+    }
+
+    /// Whether all ring pointers have been validated against guest memory.
+    pub fn is_initialized(&self) -> bool {
+        self.ready
+            && !self.desc_table_ptr.is_null()
+            && !self.avail_ring_ptr.is_null()
+            && !self.used_ring_ptr.is_null()
     }
 
     /// Get AvailRing.idx
@@ -588,6 +602,9 @@ impl Queue {
 
     /// Returns the number of yet-to-be-popped descriptor chains in the avail ring.
     pub fn len(&self) -> u16 {
+        if !self.is_initialized() {
+            return 0;
+        }
         (Wrapping(self.avail_ring_idx_get()) - self.next_avail).0
     }
 
@@ -694,6 +711,9 @@ impl Queue {
         desc_index: u16,
         len: u32,
     ) -> Result<(), QueueError> {
+        if !self.is_initialized() {
+            return Err(QueueError::NotReady);
+        }
         if self.size <= desc_index {
             error!(
                 "attempted to add out of bounds descriptor to used ring: {}",
@@ -724,6 +744,9 @@ impl Queue {
     /// Set the used ring index to the current `next_used` value.
     /// Should be called once after number of `add_used` calls.
     pub fn advance_used_ring_idx(&mut self) {
+        if !self.is_initialized() {
+            return;
+        }
         // This fence ensures all descriptor writes are visible before the index update is.
         fence(Ordering::Release);
         self.used_ring_idx_set(self.next_used.0);
@@ -741,6 +764,9 @@ impl Queue {
     /// from the available ring and we can't guarantee that there will be a notification. In this
     /// case the caller might want to consume the mentioned descriptors and call this method again.
     fn try_enable_notification(&mut self) -> Result<bool, InvalidAvailIdx> {
+        if !self.is_initialized() {
+            return Ok(true);
+        }
         // If the device doesn't use notification suppression, we'll continue to get notifications
         // no matter what.
         if !self.uses_notif_suppression {
@@ -782,6 +808,9 @@ impl Queue {
     /// `avail.idx`; only correct when the driver does not add to the avail
     /// ring until it has observed our used-ring update.
     pub fn enable_notification(&mut self) {
+        if !self.is_initialized() {
+            return;
+        }
         if !self.uses_notif_suppression {
             return;
         }
@@ -798,6 +827,9 @@ impl Queue {
     ///
     /// This is similar to the `vring_need_event()` method implemented by the Linux kernel.
     pub fn prepare_kick(&mut self) -> bool {
+        if !self.is_initialized() {
+            return false;
+        }
         // If the device doesn't use notification suppression, always return true
         if !self.uses_notif_suppression {
             return true;

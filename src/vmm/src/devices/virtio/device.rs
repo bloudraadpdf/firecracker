@@ -191,6 +191,15 @@ pub trait VirtioDevice: AsAny + MutEventSubscriber + Send {
         interrupt: Arc<dyn VirtioInterrupt>,
     ) -> Result<(), ActivateError>;
 
+    /// Activate the configured queues of a legacy PCI device.
+    fn activate_legacy(
+        &mut self,
+        mem: GuestMemoryMmap,
+        interrupt: Arc<dyn VirtioInterrupt>,
+    ) -> Result<(), ActivateError> {
+        self.activate(mem, interrupt)
+    }
+
     /// Checks if the resources of this device are activated.
     fn is_activated(&self) -> bool;
 
@@ -217,7 +226,7 @@ pub trait VirtioDevice: AsAny + MutEventSubscriber + Send {
 
     /// Mark pages used by queues as dirty.
     fn mark_queue_memory_dirty(&mut self, mem: &GuestMemoryMmap) -> Result<(), QueueError> {
-        for queue in self.queues_mut() {
+        for queue in self.queues_mut().iter_mut().filter(|queue| queue.ready) {
             queue.initialize(mem)?
         }
         Ok(())

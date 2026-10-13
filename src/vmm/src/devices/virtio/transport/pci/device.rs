@@ -247,6 +247,7 @@ const VIRTIO_PCI_DEVICE_ID_BASE: u16 = 0x1040; // Add to device type to get devi
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VirtioPciDeviceState {
+    pub legacy_interface: bool,
     pub io_bar_address: Option<u16>,
     pub sbdf: PciSBDF,
     pub device_activated: bool,
@@ -279,6 +280,7 @@ pub enum VirtioPciDeviceError {
 }
 
 pub struct VirtioPciDevice {
+    legacy_interface: bool,
     io_bar_address: Option<u16>,
     id: String,
 
@@ -504,6 +506,7 @@ impl VirtioPciDevice {
         ));
 
         VirtioPciDevice {
+            legacy_interface: false,
             io_bar_address: legacy_id.map(|_| 0),
             id,
             sub_id: None,
@@ -546,7 +549,10 @@ impl VirtioPciDevice {
             device.lock().unwrap().device_type(),
         )
         .is_some();
-        if legacy != state.io_bar_address.is_some() {
+        if legacy != state.io_bar_address.is_some()
+            || (state.legacy_interface
+                && (!legacy || device.lock().unwrap().acked_features() >> 32 != 0))
+        {
             return Err(VirtioPciDeviceError::InvalidIoBar);
         }
         let bar_index = if legacy {
@@ -591,8 +597,14 @@ impl VirtioPciDevice {
             let driver_ok = ACKNOWLEDGE | DRIVER | FEATURES_OK | DRIVER_OK;
             // The reset code path leaves the backend active while setting
             // driver_status to 0 (INIT), so INIT is also valid
-            let valid = virtio_common_config.driver_status == driver_ok
-                || virtio_common_config.driver_status == INIT;
+            let valid = if state.legacy_interface {
+                virtio_common_config.driver_status
+                    & !(ACKNOWLEDGE | DRIVER | DRIVER_OK | FAILED | DEVICE_NEEDS_RESET)
+                    == 0
+            } else {
+                virtio_common_config.driver_status == driver_ok
+                    || virtio_common_config.driver_status == INIT
+            };
             if !valid {
                 return Err(VirtioPciDeviceError::InvalidRestoreState(
                     virtio_common_config.driver_status,
@@ -616,6 +628,7 @@ impl VirtioPciDevice {
         ));
 
         let virtio_pci_device = VirtioPciDevice {
+            legacy_interface: state.legacy_interface,
             io_bar_address: state.io_bar_address,
             id,
             sub_id: None,
@@ -634,14 +647,14 @@ impl VirtioPciDevice {
         };
 
         if state.device_activated {
-            virtio_pci_device
-                .device
-                .lock()
-                .expect("Poisoned lock")
-                .activate(
-                    virtio_pci_device.vm.guest_memory().clone(),
-                    virtio_pci_device.virtio_interrupt.as_ref().unwrap().clone(),
-                )?;
+            let mut device = virtio_pci_device.device.lock().expect("Poisoned lock");
+            let mem = virtio_pci_device.vm.guest_memory().clone();
+            let interrupt = virtio_pci_device.virtio_interrupt.as_ref().unwrap().clone();
+            if state.legacy_interface {
+                device.activate_legacy(mem, interrupt)?;
+            } else {
+                device.activate(mem, interrupt)?;
+            }
         }
 
         Ok(virtio_pci_device)
@@ -838,21 +851,155 @@ impl VirtioPciDevice {
             }
             (4 | 8, [a, b, c, d]) => {
                 let mut device = self.device.lock().unwrap();
-                if device.is_activated() {
-                    return;
-                }
+                let active = device.is_activated();
                 let value = u32::from_le_bytes([*a, *b, *c, *d]);
                 if offset == 4 {
-                    let features = u64::from(value) & device.avail_features();
-                    device.set_acked_features(features);
-                } else if let Some(queue) = device
-                    .queues_mut()
-                    .get_mut(usize::from(self.common_config.queue_select))
-                {
-                    queue.configure_legacy_pci(value);
+                    if !active {
+                        let features = u64::from(value) & device.avail_features();
+                        device.set_acked_features(features);
+                    }
+                } else {
+                    let event_idx = device.has_feature(u64::from(
+                        crate::devices::virtio::generated::virtio_ring::VIRTIO_RING_F_EVENT_IDX,
+                    ));
+                    if let Some(queue) = device
+                        .queues_mut()
+                        .get_mut(usize::from(self.common_config.queue_select))
+                    {
+                        if active && (!self.legacy_interface || queue.is_initialized()) {
+                            return;
+                        }
+                        let mut configured = queue.clone();
+                        configured.configure_legacy_pci(value);
+                        if active && value != 0 {
+                            if let Err(err) = configured.initialize(self.vm.guest_memory()) {
+                                error!("Invalid legacy queue: {err}");
+                                self.common_config.driver_status |= DEVICE_NEEDS_RESET;
+                                return;
+                            }
+                            if event_idx {
+                                configured.enable_notif_suppression();
+                            }
+                        }
+                        *queue = configured;
+                    }
                 }
             }
             _ => (),
+        }
+    }
+
+    fn reset_legacy_device(&mut self) -> bool {
+        let mut device = self.device.lock().unwrap();
+        if !device.reset() {
+            self.common_config.driver_status |= DEVICE_NEEDS_RESET;
+            return false;
+        }
+        device.drain_queue_events();
+        self.device_activated.store(false, Ordering::Release);
+        self.common_config.driver_status = INIT;
+        self.common_config.queue_select = 0;
+        self.common_config.device_feature_select = 0;
+        self.common_config.driver_feature_select = 0;
+        self.common_config
+            .msix_config
+            .store(VIRTQ_MSI_NO_VECTOR, Ordering::Release);
+        self.common_config
+            .msix_queues
+            .lock()
+            .unwrap()
+            .fill(VIRTQ_MSI_NO_VECTOR);
+        true
+    }
+
+    fn activate_backend(&mut self, legacy: bool) {
+        let interrupt = Arc::clone(self.virtio_interrupt.as_ref().unwrap());
+        let mut device = self.device.lock().unwrap();
+        let mem = self.vm.guest_memory().clone();
+        let result = if legacy {
+            device.activate_legacy(mem, interrupt.clone())
+        } else {
+            device.activate(mem, interrupt.clone())
+        };
+        match result {
+            Ok(()) => {
+                self.device_activated.store(true, Ordering::Release);
+                device.notify_queue_events();
+            }
+            Err(err) => {
+                self.common_config.driver_status |= DEVICE_NEEDS_RESET;
+                error!("Error activating device: {err:?}");
+                let _ = interrupt.trigger(VirtioInterruptType::Config);
+            }
+        }
+    }
+
+    fn select_legacy_interface(&mut self) -> bool {
+        if self.device_activated.load(Ordering::Acquire) && !self.legacy_interface {
+            return false;
+        }
+        if !self.legacy_interface {
+            let mut device = self.device.lock().unwrap();
+            let features = device.acked_features() & u64::from(u32::MAX);
+            device.set_acked_features(features);
+            self.common_config.driver_status &= !FEATURES_OK;
+            self.legacy_interface = true;
+        }
+        true
+    }
+
+    fn write_legacy_bar(&mut self, offset: u64, data: &[u8]) {
+        match (offset, data) {
+            (18, [0]) => {
+                if self.reset_legacy_device() {
+                    self.legacy_interface = true;
+                }
+            }
+            (18, [status]) => {
+                if !self.select_legacy_interface() {
+                    return;
+                }
+                let status = status & (ACKNOWLEDGE | DRIVER | DRIVER_OK | FAILED);
+                self.common_config.driver_status |= status;
+                if status & DRIVER_OK != 0
+                    && self.common_config.driver_status & (FAILED | DEVICE_NEEDS_RESET) == 0
+                    && !self.device_activated.load(Ordering::Acquire)
+                {
+                    self.activate_backend(true);
+                }
+            }
+            (16, [lo, hi]) => {
+                if self.common_config.driver_status & (FAILED | DEVICE_NEEDS_RESET) != 0 {
+                    return;
+                }
+                if self.device_activated.load(Ordering::Acquire) && !self.legacy_interface {
+                    return;
+                }
+                let index = usize::from(u16::from_le_bytes([*lo, *hi]));
+                if !self
+                    .device
+                    .lock()
+                    .unwrap()
+                    .queues()
+                    .get(index)
+                    .is_some_and(|queue| queue.ready)
+                {
+                    return;
+                }
+                if !self.select_legacy_interface() {
+                    return;
+                }
+                if !self.device_activated.load(Ordering::Acquire) {
+                    self.activate_backend(true);
+                }
+                if self.device_activated.load(Ordering::Acquire)
+                    && let Some(event) = self.device.lock().unwrap().queue_events().get(index)
+                    && let Err(err) = event.write(1)
+                {
+                    error!("Failed to notify legacy queue {index}: {err}");
+                }
+            }
+            _ => self.write_legacy_configuration(offset, data),
         }
     }
 
@@ -963,7 +1110,9 @@ impl VirtioPciDevice {
     }
 
     fn needs_activation(&self) -> bool {
-        !self.device_activated.load(Ordering::SeqCst) && self.is_driver_ready()
+        !self.legacy_interface
+            && !self.device_activated.load(Ordering::SeqCst)
+            && self.is_driver_ready()
     }
 
     fn set_notification_ioevents(
@@ -1138,6 +1287,7 @@ impl VirtioPciDevice {
 
     pub fn state(&self) -> VirtioPciDeviceState {
         VirtioPciDeviceState {
+            legacy_interface: self.legacy_interface,
             io_bar_address: self.io_bar_address,
             sbdf: self.sbdf,
             device_activated: self.device_activated.load(Ordering::Acquire),
@@ -1388,7 +1538,18 @@ impl PciDevice for VirtioPciDevice {
 
     fn write_bar(&mut self, base: u64, offset: u64, data: &[u8]) -> Option<Arc<Barrier>> {
         if self.io_bar_address() == Some(base) {
-            self.write_legacy_configuration(offset, data);
+            self.write_legacy_bar(offset, data);
+            return None;
+        }
+        if self.legacy_interface
+            && offset < u64::from(COMMON_CONFIG_BAR_OFFSET + COMMON_CONFIG_SIZE)
+        {
+            if offset == super::common_config_offset::DEVICE_STATUS
+                && data == [0]
+                && self.reset_legacy_device()
+            {
+                self.legacy_interface = false;
+            }
             return None;
         }
         match offset {
@@ -1459,35 +1620,15 @@ impl PciDevice for VirtioPciDevice {
             _ => (),
         };
 
-        // Try and activate the device if the driver status has changed
         if self.needs_activation() {
-            debug!("Activating device");
-            let interrupt = Arc::clone(self.virtio_interrupt.as_ref().unwrap());
-            let device = self.virtio_device();
-            let mut locked_device = device.lock().unwrap();
-            match locked_device.activate(self.vm.guest_memory().clone(), interrupt.clone()) {
-                Ok(()) => {
-                    self.device_activated.store(true, Ordering::SeqCst);
-
-                    // A queue notification may have arrived after the guest set DRIVER_OK but
-                    // before the device finished activating, in which case it was discarded as
-                    // spurious. Re-notify the queues so any buffers the guest already made
-                    // available get processed.
-                    locked_device.notify_queue_events();
-                }
-                Err(err) => {
-                    self.common_config.driver_status |= DEVICE_NEEDS_RESET;
-                    error!("Error activating device: {err:?}");
-
-                    // Section 2.1.2 of the specification states that we need to send a device
-                    // configuration change interrupt
-                    let _ = interrupt.trigger(VirtioInterruptType::Config);
-                }
-            }
+            self.activate_backend(false);
         }
 
         // Device has been reset by the driver
-        if self.device_activated.load(Ordering::SeqCst) && self.is_driver_init() {
+        if !self.legacy_interface
+            && self.device_activated.load(Ordering::SeqCst)
+            && self.is_driver_init()
+        {
             let reset_succeeded = self.device.lock().unwrap().reset();
             if reset_succeeded {
                 self.device_activated.store(false, Ordering::SeqCst);
@@ -1552,6 +1693,8 @@ mod tests {
     use crate::Vmm;
     use crate::arch::{MEM_64BIT_DEVICES_SIZE, MEM_64BIT_DEVICES_START};
     use crate::device_manager::tests::pci_devices;
+    #[cfg(target_arch = "x86_64")]
+    use crate::devices::virtio::device::VirtioDevice;
     use crate::devices::virtio::device::VirtioDeviceType;
     use crate::devices::virtio::generated::virtio_config::VIRTIO_F_VERSION_1;
     use crate::devices::virtio::rng::Entropy;
@@ -1681,11 +1824,7 @@ mod tests {
         let vmm = create_vmm_with_pci_mode(crate::pci::PciTransportMode::Transitional);
         let device = get_virtio_device(&vmm);
         let vm = kvm_vm(&vmm);
-        let base = device.lock().unwrap().io_bar_address().unwrap();
-        device
-            .lock()
-            .unwrap()
-            .write_config_register(COMMAND_REG, 0, &1u16.to_le_bytes());
+        let base = enable_legacy_ports(&device);
         vm.pio_bus.write(base + 14, &1u16.to_le_bytes()).unwrap();
         let mut selected = [0u8; 2];
         vm.pio_bus.read(base + 14, &mut selected).unwrap();
@@ -1753,21 +1892,165 @@ mod tests {
     }
 
     #[cfg(target_arch = "x86_64")]
-    #[test]
-    fn test_legacy_device_configuration_and_msix_layout() {
+    fn legacy_balloon_fixture() -> (Vmm, Arc<Mutex<crate::devices::virtio::balloon::Balloon>>) {
         use crate::devices::virtio::balloon::Balloon;
         let mut vmm = create_vmm_with_pci_mode(crate::pci::PciTransportMode::Transitional);
-        let backend = Arc::new(Mutex::new(Balloon::new(0, false, 0, false, false).unwrap()));
+        let backend = Arc::new(Mutex::new(Balloon::new(0, true, 0, false, false).unwrap()));
         vmm.device_manager
             .attach_boot_virtio_device(
                 &vmm.vm,
                 "balloon".into(),
-                backend,
+                backend.clone(),
                 &mut Cmdline::new(1024).unwrap(),
                 &mut crate::EventManager::new().unwrap(),
                 false,
             )
             .unwrap();
+        (vmm, backend)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn enable_legacy_ports(device: &Arc<Mutex<VirtioPciDevice>>) -> u64 {
+        let mut device = device.lock().unwrap();
+        device.write_config_register(COMMAND_REG, 0, &1u16.to_le_bytes());
+        device.io_bar_address().unwrap()
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_legacy_partial_queue_use_and_reset() {
+        use crate::devices::virtio::balloon::Balloon;
+        use crate::devices::virtio::queue::Descriptor;
+        use vm_memory::{Bytes, GuestAddress};
+
+        let (vmm, backend) = legacy_balloon_fixture();
+        let device = pci_devices(&vmm.device_manager)
+            .get_virtio_device(VirtioDeviceType::Balloon, "balloon")
+            .unwrap()
+            .clone();
+        let vm = kvm_vm(&vmm);
+        let base = enable_legacy_ports(&device);
+        vm.pio_bus.write(base + 14, &1u16.to_le_bytes()).unwrap();
+        vm.pio_bus.write(base + 8, &0x10u32.to_le_bytes()).unwrap();
+        let (desc, avail, used) = {
+            let backend = backend.lock().unwrap();
+            let queue = &backend.queues()[1];
+            (
+                queue.desc_table_address,
+                queue.avail_ring_address,
+                queue.used_ring_address,
+            )
+        };
+        let mem = vm.guest_memory();
+        mem.write_obj(
+            Descriptor {
+                addr: 0x40000,
+                len: 4,
+                flags: 0,
+                next: 0,
+            },
+            desc,
+        )
+        .unwrap();
+        mem.write_obj(0u16, GuestAddress(avail.0 + 4)).unwrap();
+        mem.write_obj(1u16, GuestAddress(avail.0 + 2)).unwrap();
+        vm.pio_bus.write(base + 16, &1u16.to_le_bytes()).unwrap();
+        assert!(backend.lock().unwrap().is_activated());
+        assert_eq!(device.lock().unwrap().common_config.driver_status, 0);
+        vm.pio_bus.write(base + 8, &0u32.to_le_bytes()).unwrap();
+        assert_eq!(backend.lock().unwrap().queues()[1].desc_table_address, desc);
+        vm.pio_bus.write(base + 4, &u32::MAX.to_le_bytes()).unwrap();
+        assert_eq!(backend.lock().unwrap().acked_features(), 0);
+        backend.lock().unwrap().process_virtio_queues().unwrap();
+        assert_eq!(mem.read_obj::<u16>(GuestAddress(used.0 + 2)).unwrap(), 1);
+        assert!(!backend.lock().unwrap().queues()[0].ready);
+        {
+            use crate::devices::virtio::balloon::persist::BalloonConstructorArgs;
+            use crate::snapshot::Persist;
+            backend
+                .lock()
+                .unwrap()
+                .mark_queue_memory_dirty(mem)
+                .unwrap();
+            let backend_bytes = bitcode::serialize(&backend.lock().unwrap().save()).unwrap();
+            let transport_bytes = bitcode::serialize(&device.lock().unwrap().state()).unwrap();
+            let restored_vmm = crate::builder::tests::default_vmm_with_pci_mode(
+                crate::pci::PciTransportMode::Transitional,
+            );
+            let restored_vm = kvm_vm(&restored_vmm);
+            let restored_mem = restored_vm.guest_memory();
+            let mut rings = [0u8; 0x3000];
+            mem.read_slice(&mut rings, desc).unwrap();
+            restored_mem.write_slice(&rings, desc).unwrap();
+            let restored_backend = Arc::new(Mutex::new(
+                Balloon::restore(
+                    BalloonConstructorArgs {
+                        mem: restored_mem.clone(),
+                    },
+                    &bitcode::deserialize(&backend_bytes).unwrap(),
+                )
+                .unwrap(),
+            ));
+            let restored_transport = VirtioPciDevice::new_from_state(
+                "early".into(),
+                restored_vm,
+                restored_backend.clone(),
+                bitcode::deserialize(&transport_bytes).unwrap(),
+            )
+            .unwrap();
+            assert!(restored_transport.legacy_interface);
+            assert_eq!(restored_transport.common_config.driver_status, 0);
+            assert!(!restored_backend.lock().unwrap().queues()[0].ready);
+            restored_mem
+                .write_obj(0u16, GuestAddress(avail.0 + 6))
+                .unwrap();
+            restored_mem
+                .write_obj(2u16, GuestAddress(avail.0 + 2))
+                .unwrap();
+            restored_backend
+                .lock()
+                .unwrap()
+                .process_virtio_queues()
+                .unwrap();
+            assert_eq!(
+                restored_mem
+                    .read_obj::<u16>(GuestAddress(used.0 + 2))
+                    .unwrap(),
+                2
+            );
+        }
+        vm.pio_bus.write(base + 14, &0u16.to_le_bytes()).unwrap();
+        vm.pio_bus.write(base + 8, &0x20u32.to_le_bytes()).unwrap();
+        assert!(backend.lock().unwrap().queues()[0].ready);
+        backend.lock().unwrap().process_virtio_queues().unwrap();
+        for status in [
+            ACKNOWLEDGE,
+            ACKNOWLEDGE | DRIVER,
+            ACKNOWLEDGE | DRIVER | DRIVER_OK,
+        ] {
+            vm.pio_bus.write(base + 18, &[status]).unwrap();
+            assert_eq!(device.lock().unwrap().common_config.driver_status, status);
+        }
+        vm.pio_bus.write(base + 18, &[0]).unwrap();
+        let backend = backend.lock().unwrap();
+        assert!(!backend.is_activated());
+        assert!(backend.queues().iter().all(|queue| !queue.ready));
+        assert_eq!(backend.acked_features(), 0);
+        drop(backend);
+        vm.pio_bus.write(base + 8, &0x30u32.to_le_bytes()).unwrap();
+        vm.pio_bus.write(base + 18, &[0]).unwrap();
+        assert!(!device.lock().unwrap().device.lock().unwrap().queues()[0].ready);
+        let mut device = device.lock().unwrap();
+        write_driver_status(&mut device, 0);
+        assert!(!device.legacy_interface);
+        write_driver_status(&mut device, ACKNOWLEDGE);
+        assert_eq!(device.common_config.driver_status, ACKNOWLEDGE);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_legacy_device_configuration_and_msix_layout() {
+        let (vmm, _backend) = legacy_balloon_fixture();
         let device = pci_devices(&vmm.device_manager)
             .get_virtio_device(VirtioDeviceType::Balloon, "balloon")
             .unwrap()
