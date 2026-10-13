@@ -124,7 +124,10 @@ impl PortIODeviceManager {
         Ok(())
     }
 
-    pub(crate) fn append_aml_bytes(bytes: &mut Vec<u8>) -> Result<(), AmlError> {
+    pub(crate) fn append_aml_bytes(
+        bytes: &mut Vec<u8>,
+        scope: crate::acpi::DeviceScope,
+    ) -> Result<(), AmlError> {
         aml::Device::new(
             "_SB_.PRES".try_into()?,
             vec![
@@ -143,7 +146,7 @@ impl PortIODeviceManager {
         )
         .append_aml_bytes(bytes)?;
         aml::Device::new(
-            "_SB_.RTC0".try_into()?,
+            scope.device_path("RTC0")?,
             vec![
                 &aml::Name::new("_HID".try_into()?, &aml::EisaName::new("PNP0B00")?)?,
                 &aml::Name::new(
@@ -163,7 +166,7 @@ impl PortIODeviceManager {
         .append_aml_bytes(bytes)?;
         // Setup COM1
         aml::Device::new(
-            "_SB_.COM1".try_into()?,
+            scope.device_path("COM1")?,
             vec![
                 &aml::Name::new("_HID".try_into()?, &aml::EisaName::new("PNP0501")?)?,
                 &aml::Name::new("_UID".try_into()?, &0u8)?,
@@ -185,7 +188,7 @@ impl PortIODeviceManager {
         .append_aml_bytes(bytes)?;
         // Setup i8042
         aml::Device::new(
-            "_SB_.PS2_".try_into()?,
+            scope.device_path("PS2_")?,
             vec![
                 &aml::Name::new("_HID".try_into()?, &aml::EisaName::new("PNP0303")?)?,
                 &aml::Method::new(
@@ -226,7 +229,8 @@ mod tests {
     #[test]
     fn power_reservation_has_unique_id() {
         let mut bytes = Vec::new();
-        PortIODeviceManager::append_aml_bytes(&mut bytes).unwrap();
+        PortIODeviceManager::append_aml_bytes(&mut bytes, crate::acpi::DeviceScope::SystemBus)
+            .unwrap();
         let end = bytes.windows(4).position(|name| name == b"RTC0").unwrap();
         let uid = b"\x08_UID\x0dPOWER\0";
         assert!(bytes[..end].windows(uid.len()).any(|entry| entry == uid));

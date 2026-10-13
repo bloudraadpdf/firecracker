@@ -24,7 +24,7 @@ use crate::vstate::bus::BusError;
 use crate::vstate::vm::KvmVm;
 
 pub struct PciSegment {
-    pci_transport: PciTransportMode,
+    pub(crate) pci_transport: PciTransportMode,
     pub(crate) id: u16,
     pub(crate) pci_bus: Arc<Mutex<PciBus>>,
     // The MMIO bus only holds a weak reference to the device, so we need to keep
