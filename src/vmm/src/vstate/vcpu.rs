@@ -96,7 +96,7 @@ pub struct Vcpu {
     exit_evt: EventFd,
     /// Debugger emitter for gdb events
     #[cfg(feature = "gdb")]
-    gdb_event: Option<Sender<usize>>,
+    gdb_event: Option<Sender<crate::gdb::GdbEvent>>,
     /// The receiving end of events channel owned by the vcpu side.
     event_receiver: Receiver<VcpuEvent>,
     /// The transmitting end of the events channel which will be given to the handler.
@@ -162,7 +162,7 @@ impl Vcpu {
 
     /// Attaches the fields required for debugging
     #[cfg(feature = "gdb")]
-    pub fn attach_debug_info(&mut self, gdb_event: Sender<usize>) {
+    pub fn attach_debug_info(&mut self, gdb_event: Sender<crate::gdb::GdbEvent>) {
         self.gdb_event = Some(gdb_event);
     }
 
@@ -436,10 +436,10 @@ impl Vcpu {
                 Ok(VcpuEmulation::Interrupted)
             }
             #[cfg(feature = "gdb")]
-            Ok(VcpuExit::Debug(_)) => {
+            Ok(VcpuExit::Debug(debug)) => {
                 if let Some(gdb_event) = &self.gdb_event {
                     gdb_event
-                        .send(get_raw_tid(self.kvm_vcpu.index.into()))
+                        .send((get_raw_tid(self.kvm_vcpu.index.into()), debug))
                         .expect("Unable to notify gdb event");
                 }
 

@@ -21,7 +21,7 @@ use crate::logger::{error, trace};
 pub fn event_loop(
     connection: UnixStream,
     vmm: Arc<Mutex<Vmm>>,
-    gdb_event_receiver: Receiver<usize>,
+    gdb_event_receiver: Receiver<crate::gdb::GdbEvent>,
     entry_addr: GuestAddress,
 ) {
     let target = FirecrackerTarget::new(vmm, gdb_event_receiver, entry_addr);
@@ -58,7 +58,7 @@ impl run_blocking::BlockingEventLoop for GdbBlockingEventLoop {
     > {
         loop {
             match target.gdb_event.try_recv() {
-                Ok(cpu_id) => {
+                Ok((cpu_id, debug)) => {
                     // The Vcpu reports it's id from raw_id so we straight convert here
                     let tid = Tid::new(cpu_id).expect("Error converting cpu id to Tid");
                     // If notify paused returns false this means we were already debugging a single
@@ -75,7 +75,7 @@ impl run_blocking::BlockingEventLoop for GdbBlockingEventLoop {
                         // the guest kernel (e.g. kernel int3 self testing) so we won't notify
                         // GDB and instead inject this back into the guest
                         target
-                            .inject_bp_to_guest(tid)
+                            .inject_bp_to_guest(tid, debug)
                             .map_err(WaitForStopReasonError::Target)?;
                         target
                             .resume_vcpu(tid)
