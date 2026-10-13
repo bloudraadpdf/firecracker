@@ -141,6 +141,7 @@ impl AcpiTableWriter<'_> {
             *b"FCVMMADT",
             OEM_REVISION,
             apic_address,
+            cfg!(target_arch = "x86_64"),
             interrupt_controllers,
         );
         self.write_acpi_table(resource_allocator, &mut madt)
@@ -226,6 +227,30 @@ mod tests {
     use crate::vstate::vm::tests::setup_vm_with_memory;
 
     struct MockSdt(Vec<u8>);
+
+    #[test]
+    fn test_madt_declares_legacy_pic() {
+        let vmm = default_vmm();
+        let mut writer = AcpiTableWriter {
+            mem: vmm.vm.as_kvm().unwrap().guest_memory(),
+        };
+        let address = writer
+            .build_madt(
+                &mut vmm.vm.as_kvm().unwrap().resource_allocator(),
+                super::setup_interrupt_controllers(1),
+                super::apic_addr(),
+            )
+            .unwrap();
+        let mut table = [0u8; 64];
+        writer
+            .mem
+            .read_slice(&mut table, vm_memory::GuestAddress(address))
+            .unwrap();
+        assert_eq!(&table[..4], b"APIC");
+        assert_eq!(u32::from_le_bytes(table[4..8].try_into().unwrap()), 64);
+        assert_eq!(u32::from_le_bytes(table[40..44].try_into().unwrap()), 1);
+        assert_eq!(table.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte)), 0);
+    }
 
     impl Sdt for MockSdt {
         fn len(&self) -> usize {

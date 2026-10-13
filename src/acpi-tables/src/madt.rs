@@ -96,6 +96,7 @@ impl Madt {
         oem_table_id: [u8; 8],
         oem_revision: u32,
         base_address: u32,
+        pcat_compat: bool,
         interrupt_controllers: Vec<u8>,
     ) -> Self {
         let length = size_of::<MadtHeader>() + interrupt_controllers.len();
@@ -113,7 +114,7 @@ impl Madt {
         let mut header = MadtHeader {
             sdt: sdt_header,
             base_address: U32::new(base_address),
-            flags: U32::ZERO,
+            flags: U32::new(u32::from(pcat_compat)),
         };
 
         header.sdt.checksum = checksum(&[header.as_bytes(), interrupt_controllers.as_bytes()]);
