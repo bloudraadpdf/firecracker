@@ -229,10 +229,14 @@ impl DeviceManager {
                 )
                 .map_err(DeviceManagerCreateError::EventFd)?,
             )),
-            cmos: Arc::new(Mutex::new(crate::devices::legacy::cmos::Cmos::default())),
+            cmos: Arc::new(Mutex::new(
+                crate::devices::legacy::cmos::Rtc::new()
+                    .map_err(DeviceManagerCreateError::EventFd)?,
+            )),
         };
         legacy_devices.register_devices(vm)?;
         event_manager.add_subscriber(legacy_devices.acpi_power.clone());
+        event_manager.add_subscriber(legacy_devices.cmos.clone());
         Ok(legacy_devices)
     }
 
@@ -721,7 +725,7 @@ impl<'a> Persist<'a> for DeviceManager {
             cmos_state: self
                 .legacy_devices
                 .as_ref()
-                .map(|legacy| legacy.cmos.lock().expect("Poisoned lock").clone()),
+                .map(|legacy| legacy.cmos.lock().expect("Poisoned lock").save()),
             #[cfg(target_arch = "x86_64")]
             power_state: self
                 .legacy_devices
@@ -750,7 +754,11 @@ impl<'a> Persist<'a> for DeviceManager {
 
         #[cfg(target_arch = "x86_64")]
         if let Some(cmos) = &state.cmos_state {
-            *legacy_devices.cmos.lock().expect("Poisoned lock") = cmos.clone();
+            legacy_devices
+                .cmos
+                .lock()
+                .expect("Poisoned lock")
+                .restore(cmos);
         }
 
         #[cfg(target_arch = "x86_64")]

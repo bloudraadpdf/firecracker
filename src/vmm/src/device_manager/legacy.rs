@@ -12,7 +12,7 @@ use acpi_tables::aml::AmlError;
 use acpi_tables::{Aml, aml};
 
 use crate::devices::legacy::acpi::{AcpiPower, PORT_COUNT, POWER_PORT, SCI_GSI};
-use crate::devices::legacy::cmos::{CMOS_PORT, Cmos};
+use crate::devices::legacy::cmos::{CMOS_PORT, RTC_GSI, Rtc};
 use crate::devices::legacy::{I8042Device, SerialDevice};
 use crate::vstate::bus::BusError;
 use crate::vstate::vm::KvmVm;
@@ -36,7 +36,7 @@ pub struct PortIODeviceManager {
     /// ACPI reset and shutdown registers.
     pub acpi_power: Arc<Mutex<AcpiPower>>,
     /// Firmware CMOS real-time clock.
-    pub cmos: Arc<Mutex<Cmos>>,
+    pub cmos: Arc<Mutex<Rtc>>,
 }
 
 impl PortIODeviceManager {
@@ -72,7 +72,7 @@ impl PortIODeviceManager {
             acpi_power: Arc::new(Mutex::new(
                 AcpiPower::new(EventFd::new(libc::EFD_NONBLOCK).unwrap()).unwrap(),
             )),
-            cmos: Arc::new(Mutex::new(Cmos::default())),
+            cmos: Arc::new(Mutex::new(Rtc::new().unwrap())),
         }
     }
 
@@ -90,6 +90,10 @@ impl PortIODeviceManager {
                 LegacyDeviceError::EventFd(std::io::Error::from_raw_os_error(e.errno()))
             })?;
         io_bus.insert(self.cmos.clone(), CMOS_PORT, 2)?;
+        vm.register_irq(&self.cmos.lock().expect("Poisoned lock").irq_evt, RTC_GSI)
+            .map_err(|e| {
+                LegacyDeviceError::EventFd(std::io::Error::from_raw_os_error(e.errno()))
+            })?;
         io_bus.insert(
             self.stdio_serial.clone(),
             Self::SERIAL_PORT_ADDRESS,
@@ -127,6 +131,22 @@ impl PortIODeviceManager {
                 &aml::Name::new("_HID".try_into()?, &aml::EisaName::new("PNP0C02")?)?,
                 &aml::Name::new(
                     "_CRS".try_into()?,
+                    &aml::ResourceTemplate::new(vec![&aml::Io::new(
+                        POWER_PORT.try_into().unwrap(),
+                        POWER_PORT.try_into().unwrap(),
+                        1,
+                        PORT_COUNT.try_into().unwrap(),
+                    )]),
+                )?,
+            ],
+        )
+        .append_aml_bytes(bytes)?;
+        aml::Device::new(
+            "_SB_.RTC0".try_into()?,
+            vec![
+                &aml::Name::new("_HID".try_into()?, &aml::EisaName::new("PNP0B00")?)?,
+                &aml::Name::new(
+                    "_CRS".try_into()?,
                     &aml::ResourceTemplate::new(vec![
                         &aml::Io::new(
                             CMOS_PORT.try_into().unwrap(),
@@ -134,12 +154,7 @@ impl PortIODeviceManager {
                             1,
                             2,
                         ),
-                        &aml::Io::new(
-                            POWER_PORT.try_into().unwrap(),
-                            POWER_PORT.try_into().unwrap(),
-                            1,
-                            PORT_COUNT.try_into().unwrap(),
-                        ),
+                        &aml::Interrupt::new(true, true, false, false, RTC_GSI),
                     ]),
                 )?,
             ],
@@ -213,5 +228,20 @@ mod tests {
         vm.setup_irqchip().unwrap();
         let mut ldm = PortIODeviceManager::for_tests();
         ldm.register_devices(&vm).unwrap();
+        vm.set_gsi_routes().unwrap();
+        ldm.cmos.lock().unwrap().irq_evt.write(1).unwrap();
+        let mut pic = kvm_bindings::kvm_irqchip {
+            chip_id: kvm_bindings::KVM_IRQCHIP_PIC_SLAVE,
+            ..Default::default()
+        };
+        for _ in 0..100 {
+            vm.fd().get_irqchip(&mut pic).unwrap();
+            // SAFETY: KVM returned the slave PIC selected above.
+            if unsafe { pic.chip.pic.irr } & 1 != 0 {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        panic!("RTC IRQ 8 did not reach the slave PIC");
     }
 }
