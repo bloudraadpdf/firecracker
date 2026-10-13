@@ -259,7 +259,13 @@ impl Aml for PciSegment {
 
         let bus_range = aml::AddressSpace::new_bus_number(0x0u16, 0x0u16)?;
         let config_ports = aml::Io::new(0xcf8, 0xcf8, 1, 0x8);
-        let io_window = aml::AddressSpace::new_io(0x1000u16, 0xffffu16)?;
+        let legacy_io_window = aml::AddressSpace::new_io(0u16, 0x0cf7u16)?;
+        let io_start = if self.pci_transport.is_modern() {
+            0x1000u16
+        } else {
+            0x0d00u16
+        };
+        let io_window = aml::AddressSpace::new_io(io_start, 0xffffu16)?;
         let mem32 = aml::AddressSpace::new_memory(
             aml::AddressSpaceCacheable::NotCacheable,
             true,
@@ -282,6 +288,9 @@ impl Aml for PciSegment {
             resources.push(&mem64);
         }
         if has_ports {
+            if !self.pci_transport.is_modern() {
+                resources.push(&legacy_io_window);
+            }
             resources.push(&io_window);
         }
         let crs = aml::Name::new("_CRS".try_into()?, &aml::ResourceTemplate::new(resources))?;
@@ -364,6 +373,14 @@ mod tests {
         let segment = PciSegment::new(0, &vm, &[0; 32]).unwrap();
         let mut bytes = Vec::new();
         segment.append_aml_bytes(&mut bytes).unwrap();
+        for (start, end) in [(0u16, 0x0cf7u16), (0x0d00, 0xffff)] {
+            let mut resource = Vec::new();
+            aml::AddressSpace::new_io(start, end)
+                .unwrap()
+                .append_aml_bytes(&mut resource)
+                .unwrap();
+            assert!(bytes.windows(resource.len()).any(|w| w == resource));
+        }
         for (start, end, present) in [
             (segment.start_of_mem32_area, segment.end_of_mem32_area, true),
             (
