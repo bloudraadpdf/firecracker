@@ -13,8 +13,8 @@ pub mod facs;
 pub mod fadt;
 pub mod madt;
 pub mod mcfg;
+pub mod root_table;
 pub mod rsdp;
-pub mod xsdt;
 
 pub use aml::Aml;
 pub use dsdt::Dsdt;
@@ -22,8 +22,8 @@ pub use facs::Facs;
 pub use fadt::Fadt;
 pub use madt::Madt;
 pub use mcfg::Mcfg;
+pub use root_table::{RootTable, RootTableEntries};
 pub use rsdp::Rsdp;
-pub use xsdt::Xsdt;
 use zerocopy::little_endian::{U32, U64};
 use zerocopy::{Immutable, IntoBytes};
 
