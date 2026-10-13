@@ -42,6 +42,9 @@ fn allocate_many_ids(
 /// * Memory allocations in the MMIO address space
 #[derive(Debug, Clone)]
 pub struct ResourceAllocator {
+    /// PCI I/O port allocations on x86.
+    #[cfg(target_arch = "x86_64")]
+    pub pci_io: AddressAllocator,
     /// PCI platform and BAR allocation window.
     pub pci_transport: PciTransportMode,
     /// Allocator for legacy device interrupt lines
@@ -83,6 +86,8 @@ impl ResourceAllocator {
         // It is fine for us to unwrap the following since we know we are passing valid ranges for
         // all allocators
         Self {
+            #[cfg(target_arch = "x86_64")]
+            pci_io: AddressAllocator::new(0x1000, 0xf000).unwrap(),
             pci_transport: PciTransportMode::default(),
             gsi_legacy_allocator: legacy_gsi_allocator(),
             gsi_msi_allocator: IdAllocator::new(arch::GSI_MSI_START, arch::GSI_MSI_END).unwrap(),
@@ -140,6 +145,9 @@ impl ResourceAllocator {
 /// snapshots cannot provide allocator state that disagrees with the devices.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResourceAllocatorState {
+    /// PCI I/O port allocations on x86.
+    #[cfg(target_arch = "x86_64")]
+    pub pci_io: AddressAllocator,
     /// PCI platform and BAR allocation window.
     pub pci_transport: PciTransportMode,
     /// Allocator for memory in the 32-bit MMIO address space
@@ -165,6 +173,8 @@ impl<'a> Persist<'a> for ResourceAllocator {
 
     fn save(&self) -> Self::State {
         ResourceAllocatorState {
+            #[cfg(target_arch = "x86_64")]
+            pci_io: self.pci_io.clone(),
             pci_transport: self.pci_transport,
             mmio32_memory: self.mmio32_memory.clone(),
             mmio64_memory: self.mmio64_memory.clone(),
@@ -178,6 +188,8 @@ impl<'a> Persist<'a> for ResourceAllocator {
         state: &Self::State,
     ) -> Result<Self, Self::Error> {
         Ok(ResourceAllocator {
+            #[cfg(target_arch = "x86_64")]
+            pci_io: state.pci_io.clone(),
             pci_transport: state.pci_transport,
             gsi_legacy_allocator: legacy_gsi_allocator(),
             gsi_msi_allocator: IdAllocator::new(arch::GSI_MSI_START, arch::GSI_MSI_END)?,
@@ -308,10 +320,23 @@ mod tests {
                 .allocate(0x80000, 0x80000, AllocPolicy::FirstMatch)
                 .unwrap();
             assert!(range.end() < 1 << 32);
+            let ports = allocator
+                .pci_io
+                .allocate(0x100, 0x100, AllocPolicy::FirstMatch)
+                .unwrap();
             let bytes = bitcode::serialize(&allocator.save()).unwrap();
             let mut restored =
                 ResourceAllocator::restore((), &bitcode::deserialize(&bytes).unwrap()).unwrap();
             assert_eq!(restored.pci_transport, PciTransportMode::Transitional);
+            restored
+                .pci_io
+                .allocate(0x100, 0x100, AllocPolicy::ExactMatch(ports.start()))
+                .unwrap_err();
+            restored.pci_io.free(&ports).unwrap();
+            restored
+                .pci_io
+                .allocate(0x100, 0x100, AllocPolicy::ExactMatch(ports.start()))
+                .unwrap();
             restored
                 .pci_memory()
                 .allocate(0x80000, 0x80000, AllocPolicy::ExactMatch(range.start()))

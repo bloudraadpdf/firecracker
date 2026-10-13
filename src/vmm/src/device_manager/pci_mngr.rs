@@ -25,6 +25,8 @@ use crate::devices::virtio::pmem::device::Pmem;
 use crate::devices::virtio::pmem::persist::{PmemConstructorArgs, PmemState};
 use crate::devices::virtio::rng::Entropy;
 use crate::devices::virtio::rng::persist::{EntropyConstructorArgs, EntropyState};
+#[cfg(target_arch = "x86_64")]
+use crate::devices::virtio::transport::pci::device::LEGACY_IO_BAR_SIZE;
 use crate::devices::virtio::transport::pci::device::{
     CAPABILITY_BAR_SIZE, VirtioPciDevice, VirtioPciDeviceError, VirtioPciDeviceState,
 };
@@ -88,7 +90,7 @@ impl PciDevices {
         virtio_device: Arc<Mutex<VirtioPciDevice>>,
         event_manager: &mut EventManager,
     ) -> Result<(), PciManagerError> {
-        let bar_address = {
+        let (bar_address, io_bar_address) = {
             let mut device = virtio_device.lock().unwrap();
 
             device.register_notification_ioevents(vm)?;
@@ -96,7 +98,7 @@ impl PciDevices {
             let sub_id = event_manager.add_subscriber(device.virtio_device());
             device.sub_id = Some(sub_id);
 
-            device.bar_address()
+            (device.bar_address(), device.io_bar_address())
         };
 
         self.virtio_devices
@@ -115,6 +117,12 @@ impl PciDevices {
         vm.common
             .mmio_bus
             .insert(virtio_device.clone(), bar_address, CAPABILITY_BAR_SIZE)?;
+        #[cfg(target_arch = "x86_64")]
+        if let Some(base) = io_bar_address {
+            vm.pio_bus.insert(virtio_device, base, LEGACY_IO_BAR_SIZE)?;
+        }
+        #[cfg(target_arch = "aarch64")]
+        debug_assert!(io_bar_address.is_none());
 
         Ok(())
     }
@@ -144,7 +152,7 @@ impl PciDevices {
         // Don't hold the resource allocator lock across attach_common()
         // below: a device access holds the bus lock and can take the allocator
         // lock, so the reverse order can deadlock.
-        virtio_device.allocate_bars(vm.resource_allocator().pci_memory());
+        virtio_device.allocate_bars(&mut vm.resource_allocator());
 
         let virtio_device = Arc::new(Mutex::new(virtio_device));
 
@@ -189,19 +197,30 @@ impl PciDevices {
         // Next operations of removing device from mmio_bus and pci_bus need to wait for any other
         // user of the device to finish. This requires us to not hold the lock for the device in
         // case someone will try to access the device while we are in these several lines of code.
-        let (bar_addr, sub_id) = {
+        let (bar_addr, io_bar_address, sub_id) = {
             let pci_device = pci_device_arc.lock().expect("Poisoned lock");
 
             pci_device
                 .unregister_notification_ioevents(vm)
                 .map_err(PciManagerError::Kvm)?;
-            (pci_device.bar_address(), pci_device.sub_id)
+            (
+                pci_device.bar_address(),
+                pci_device.io_bar_address(),
+                pci_device.sub_id,
+            )
         };
 
         vm.common
             .mmio_bus
             .remove(bar_addr, CAPABILITY_BAR_SIZE)
             .map_err(PciManagerError::Bus)?;
+
+        #[cfg(target_arch = "x86_64")]
+        if let Some(base) = io_bar_address {
+            vm.pio_bus.remove(base, LEGACY_IO_BAR_SIZE)?;
+        }
+        #[cfg(target_arch = "aarch64")]
+        debug_assert!(io_bar_address.is_none());
 
         if let Some(sub_id) = sub_id
             && event_manager.remove_subscriber(sub_id).is_err()
@@ -212,7 +231,7 @@ impl PciDevices {
         pci_device_arc
             .lock()
             .expect("Poisoned lock")
-            .free_bars(vm.resource_allocator().pci_memory());
+            .free_bars(&mut vm.resource_allocator());
 
         // Ensure no other references to the device remain, so it is freed when
         // this function returns.

@@ -15,7 +15,7 @@ use std::sync::{Arc, Barrier, Mutex};
 
 use kvm_ioctls::{IoEventAddress, NoDatamatch};
 use serde::{Deserialize, Serialize};
-use vm_allocator::{AddressAllocator, AllocPolicy, RangeInclusive};
+use vm_allocator::{AllocPolicy, RangeInclusive};
 use vm_memory::{ByteValued, Le32};
 use vmm_sys_util::errno;
 use vmm_sys_util::eventfd::EventFd;
@@ -40,6 +40,7 @@ use crate::pci::{
 };
 use crate::vstate::bus::BusDevice;
 use crate::vstate::interrupts::{InterruptError, MsixVectorGroup};
+use crate::vstate::resources::ResourceAllocator;
 use crate::vstate::vm::KvmVm;
 
 /// Vector value used to disable MSI for a queue.
@@ -47,6 +48,9 @@ pub const VIRTQ_MSI_NO_VECTOR: u16 = 0xffff;
 
 /// BAR index we are using for VirtIO configuration
 const VIRTIO_BAR_INDEX: u8 = 0;
+const TRANSITIONAL_CAPABILITY_BAR_INDEX: u8 = 2;
+/// Size of the legacy register and device configuration I/O region.
+pub const LEGACY_IO_BAR_SIZE: u64 = 0x100;
 
 enum PciCapabilityType {
     Common = 1,
@@ -91,12 +95,12 @@ impl PciCapability for VirtioPciCap {
 const VIRTIO_PCI_CAP_LEN_OFFSET: u8 = 2;
 
 impl VirtioPciCap {
-    pub fn new(cfg_type: PciCapabilityType, offset: u32, length: u32) -> Self {
+    pub fn new(bar: u8, cfg_type: PciCapabilityType, offset: u32, length: u32) -> Self {
         VirtioPciCap {
             cap_len: u8::try_from(std::mem::size_of::<VirtioPciCap>()).unwrap()
                 + VIRTIO_PCI_CAP_LEN_OFFSET,
             cfg_type: cfg_type as u8,
-            pci_bar: VIRTIO_BAR_INDEX,
+            pci_bar: bar,
             id: 0,
             padding: [0; 2],
             offset: Le32::from(offset),
@@ -125,13 +129,19 @@ impl PciCapability for VirtioPciNotifyCap {
 }
 
 impl VirtioPciNotifyCap {
-    pub fn new(cfg_type: PciCapabilityType, offset: u32, length: u32, multiplier: Le32) -> Self {
+    pub fn new(
+        bar: u8,
+        cfg_type: PciCapabilityType,
+        offset: u32,
+        length: u32,
+        multiplier: Le32,
+    ) -> Self {
         VirtioPciNotifyCap {
             cap: VirtioPciCap {
                 cap_len: u8::try_from(std::mem::size_of::<VirtioPciNotifyCap>()).unwrap()
                     + VIRTIO_PCI_CAP_LEN_OFFSET,
                 cfg_type: cfg_type as u8,
-                pci_bar: VIRTIO_BAR_INDEX,
+                pci_bar: bar,
                 id: 0,
                 padding: [0; 2],
                 offset: Le32::from(offset),
@@ -162,12 +172,12 @@ impl PciCapability for VirtioPciCfgCap {
 }
 
 impl VirtioPciCfgCap {
-    fn new() -> Self {
+    fn new(bar: u8) -> Self {
         VirtioPciCfgCap {
             cap: VirtioPciCap {
                 cap_len: u8::try_from(size_of::<Self>()).unwrap() + VIRTIO_PCI_CAP_LEN_OFFSET,
                 cfg_type: PciCapabilityType::Pci as u8,
-                pci_bar: VIRTIO_BAR_INDEX,
+                pci_bar: bar,
                 id: 0,
                 padding: [0; 2],
                 offset: Le32::from(0),
@@ -228,6 +238,7 @@ pub const CAPABILITY_BAR_SIZE: u64 = 0x80000;
 const COMMAND_REG: u16 = 1;
 /// Command register "Memory Space Enable" bit
 const COMMAND_MEMORY_SPACE_ENABLE: u32 = 0x0000_0002;
+const COMMAND_IO_SPACE_ENABLE: u32 = 1;
 
 const NOTIFY_OFF_MULTIPLIER: u32 = 4; // A dword per notification address.
 
@@ -236,6 +247,7 @@ const VIRTIO_PCI_DEVICE_ID_BASE: u16 = 0x1040; // Add to device type to get devi
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VirtioPciDeviceState {
+    pub io_bar_address: Option<u16>,
     pub sbdf: PciSBDF,
     pub device_activated: bool,
     pub cap_pci_cfg_offset: u16,
@@ -252,6 +264,8 @@ pub struct VirtioPciDeviceState {
 pub enum VirtioPciDeviceError {
     /// Restored BAR address {0:#x} is outside the selected PCI aperture or misaligned.
     InvalidBarAddress(u64),
+    /// Restored legacy I/O BAR does not match the device or the PCI platform.
+    InvalidIoBar,
     /// Error creating MSI configuration: {0}
     Msi(#[from] InterruptError),
     /// Invalid PCI configuration state: {0}
@@ -265,6 +279,7 @@ pub enum VirtioPciDeviceError {
 }
 
 pub struct VirtioPciDevice {
+    io_bar_address: Option<u16>,
     id: String,
 
     // The subscriber ID returned by the EventManager
@@ -320,8 +335,35 @@ impl Debug for VirtioPciDevice {
 }
 
 impl VirtioPciDevice {
-    fn pci_configuration(device_type: VirtioDeviceType) -> PciConfiguration {
-        let pci_device_id = VIRTIO_PCI_DEVICE_ID_BASE + device_type as u16;
+    fn legacy_device_id(
+        mode: crate::pci::PciTransportMode,
+        device_type: VirtioDeviceType,
+    ) -> Option<u16> {
+        if mode.is_modern() {
+            return None;
+        }
+        match device_type {
+            VirtioDeviceType::Net => Some(0x1000),
+            VirtioDeviceType::Block => Some(0x1001),
+            VirtioDeviceType::Balloon => Some(0x1002),
+            VirtioDeviceType::Rng => Some(0x1005),
+            _ => None,
+        }
+    }
+
+    fn capability_bar_index(&self) -> u8 {
+        if self.io_bar_address.is_some() {
+            TRANSITIONAL_CAPABILITY_BAR_INDEX
+        } else {
+            VIRTIO_BAR_INDEX
+        }
+    }
+
+    fn pci_configuration(
+        device_type: VirtioDeviceType,
+        legacy_id: Option<u16>,
+    ) -> PciConfiguration {
+        let pci_device_id = legacy_id.unwrap_or(VIRTIO_PCI_DEVICE_ID_BASE + device_type as u16);
         let (class, subclass) = match device_type {
             VirtioDeviceType::Net => (
                 PciClassCode::NetworkController,
@@ -329,22 +371,34 @@ impl VirtioPciDevice {
             ),
             VirtioDeviceType::Block => (
                 PciClassCode::MassStorageController,
-                PciMassStorageSubclass::MassStorage as u8,
+                if legacy_id.is_some() {
+                    PciMassStorageSubclass::ScsiStorage as u8
+                } else {
+                    PciMassStorageSubclass::MassStorage as u8
+                },
             ),
             _ => (
                 PciClassCode::UnassignedClass,
-                PciVirtioSubclass::NonTransitionalBase as u8,
+                if legacy_id.is_some() {
+                    0
+                } else {
+                    PciVirtioSubclass::NonTransitionalBase as u8
+                },
             ),
         };
 
         PciConfiguration::new_type0(
             VIRTIO_PCI_VENDOR_ID,
             pci_device_id,
-            0x1, // For modern virtio-PCI devices
+            u8::from(legacy_id.is_none()),
             class,
             subclass,
             VIRTIO_PCI_VENDOR_ID,
-            pci_device_id,
+            if legacy_id.is_some() {
+                device_type as u16
+            } else {
+                pci_device_id
+            },
         )
     }
 
@@ -353,10 +407,11 @@ impl VirtioPciDevice {
     /// This must happen only during the creation of a brand new VM. When a VM is restored from a
     /// known state, the BARs are already created with the right content, therefore we don't need
     /// to go through this codepath.
-    pub fn allocate_bars(&mut self, pci_allocator: &mut AddressAllocator) {
+    pub fn allocate_bars(&mut self, allocator: &mut ResourceAllocator) {
         // Allocate the virtio-pci capability BAR.
         // See http://docs.oasis-open.org/virtio/virtio/v1.0/cs04/virtio-v1.0-cs04.html#x1-740004
-        self.bar_address = pci_allocator
+        self.bar_address = allocator
+            .pci_memory()
             .allocate(
                 CAPABILITY_BAR_SIZE,
                 CAPABILITY_BAR_SIZE,
@@ -365,25 +420,54 @@ impl VirtioPciDevice {
             .unwrap()
             .start();
         self.bars.set_bar_64(
-            VIRTIO_BAR_INDEX,
+            self.capability_bar_index(),
             self.bar_address,
             CAPABILITY_BAR_SIZE,
             BarPrefetchable::No,
         );
+        #[cfg(target_arch = "x86_64")]
+        if self.io_bar_address.is_some() {
+            let base = allocator
+                .pci_io
+                .allocate(
+                    LEGACY_IO_BAR_SIZE,
+                    LEGACY_IO_BAR_SIZE,
+                    AllocPolicy::FirstMatch,
+                )
+                .unwrap()
+                .start();
+            self.io_bar_address = Some(u16::try_from(base).unwrap());
+            self.bars.set_bar_io(
+                0,
+                u32::try_from(base).unwrap(),
+                u32::try_from(LEGACY_IO_BAR_SIZE).unwrap(),
+            );
+        }
         self.add_pci_capabilities();
     }
 
     /// Free the PCI BAR of the VirtIO device.
-    pub fn free_bars(&mut self, pci_allocator: &mut AddressAllocator) {
+    pub fn free_bars(&mut self, allocator: &mut ResourceAllocator) {
         let bar_end = self
             .bar_address
             .checked_add(CAPABILITY_BAR_SIZE - 1)
             .expect("virtio-pci BAR end address overflows");
         let range =
             RangeInclusive::new(self.bar_address, bar_end).expect("Invalid virtio-pci BAR range");
-        pci_allocator
+        allocator
+            .pci_memory()
             .free(&range)
             .expect("virtio-pci BAR is not allocated");
+        #[cfg(target_arch = "x86_64")]
+        if let Some(base) = self.io_bar_address.take() {
+            let range =
+                RangeInclusive::new(u64::from(base), u64::from(base) + LEGACY_IO_BAR_SIZE - 1)
+                    .unwrap();
+            allocator
+                .pci_io
+                .free(&range)
+                .expect("virtio-pci I/O BAR is not allocated");
+        }
         self.bar_address = 0;
     }
 
@@ -399,8 +483,9 @@ impl VirtioPciDevice {
         assert_eq!(msix_vectors.vectors.len(), num_queues + 1);
 
         let msix_config = Arc::new(Mutex::new(MsixConfig::new(msix_vectors.clone(), sbdf)));
-        let pci_config =
-            Self::pci_configuration(device.lock().expect("Poisoned lock").device_type());
+        let device_type = device.lock().expect("Poisoned lock").device_type();
+        let legacy_id = Self::legacy_device_id(vm.resource_allocator().pci_transport, device_type);
+        let pci_config = Self::pci_configuration(device_type, legacy_id);
 
         let virtio_common_config = VirtioPciCommonConfig::new(VirtioPciCommonConfigState {
             driver_status: 0,
@@ -419,6 +504,7 @@ impl VirtioPciDevice {
         ));
 
         VirtioPciDevice {
+            io_bar_address: legacy_id.map(|_| 0),
             id,
             sub_id: None,
             sbdf,
@@ -454,6 +540,35 @@ impl VirtioPciDevice {
             {
                 return Err(VirtioPciDeviceError::InvalidBarAddress(state.bar_address));
             }
+        }
+        let legacy = Self::legacy_device_id(
+            vm.resource_allocator().pci_transport,
+            device.lock().unwrap().device_type(),
+        )
+        .is_some();
+        if legacy != state.io_bar_address.is_some() {
+            return Err(VirtioPciDeviceError::InvalidIoBar);
+        }
+        let bar_index = if legacy {
+            TRANSITIONAL_CAPABILITY_BAR_INDEX
+        } else {
+            VIRTIO_BAR_INDEX
+        };
+        if let Some(base) = state.io_bar_address
+            && (base < 0x1000
+                || !u64::from(base).is_multiple_of(LEGACY_IO_BAR_SIZE)
+                || u64::from(base) + LEGACY_IO_BAR_SIZE > 0x1_0000
+                || !state.bars.bar_idx_valid(0)
+                || !state.bars.bars[0].is_io()
+                || state.bars.get_bar_size(0) != LEGACY_IO_BAR_SIZE)
+        {
+            return Err(VirtioPciDeviceError::InvalidIoBar);
+        }
+        if !state.bars.bar_idx_valid(bar_index)
+            || !state.bars.bars[bar_index as usize].is_64bit()
+            || state.bars.get_bar_size(bar_index) != CAPABILITY_BAR_SIZE
+        {
+            return Err(PciConfigurationError::InvalidBarIdx(bar_index).into());
         }
         let msix_config = MsixConfig::from_state(state.msix_state, vm.clone(), state.sbdf)?;
         let vectors = msix_config.vectors.clone();
@@ -500,13 +615,8 @@ impl VirtioPciDevice {
             vectors,
         ));
 
-        if !state.bars.bar_idx_valid(VIRTIO_BAR_INDEX)
-            || !state.bars.bars[VIRTIO_BAR_INDEX as usize].is_64bit()
-        {
-            return Err(PciConfigurationError::InvalidBarIdx(VIRTIO_BAR_INDEX).into());
-        }
-
         let virtio_pci_device = VirtioPciDevice {
+            io_bar_address: state.io_bar_address,
             id,
             sub_id: None,
             sbdf: state.sbdf,
@@ -561,7 +671,7 @@ impl VirtioPciDevice {
     ///
     /// Might be different from bar_address() during BAR relocation.
     pub fn config_bar_addr(&self) -> u64 {
-        self.bars.get_bar_addr_64(VIRTIO_BAR_INDEX)
+        self.bars.get_bar_addr_64(self.capability_bar_index())
     }
 
     /// GPA base at which the capability BAR is currently mapped on the
@@ -573,8 +683,10 @@ impl VirtioPciDevice {
     }
 
     fn add_pci_capabilities(&mut self) {
+        let bar = self.capability_bar_index();
         // Add pointers to the different configuration structures from the PCI capabilities.
         let common_cap = VirtioPciCap::new(
+            bar,
             PciCapabilityType::Common,
             COMMON_CONFIG_BAR_OFFSET,
             COMMON_CONFIG_SIZE,
@@ -582,6 +694,7 @@ impl VirtioPciDevice {
         self.configuration.add_capability(&common_cap);
 
         let isr_cap = VirtioPciCap::new(
+            bar,
             PciCapabilityType::Isr,
             ISR_CONFIG_BAR_OFFSET,
             ISR_CONFIG_SIZE,
@@ -590,6 +703,7 @@ impl VirtioPciDevice {
 
         // TODO(dgreid) - set based on device's configuration size?
         let device_cap = VirtioPciCap::new(
+            bar,
             PciCapabilityType::Device,
             DEVICE_CONFIG_BAR_OFFSET,
             DEVICE_CONFIG_SIZE,
@@ -597,6 +711,7 @@ impl VirtioPciDevice {
         self.configuration.add_capability(&device_cap);
 
         let notify_cap = VirtioPciNotifyCap::new(
+            bar,
             PciCapabilityType::Notify,
             NOTIFICATION_BAR_OFFSET,
             NOTIFICATION_SIZE,
@@ -604,7 +719,7 @@ impl VirtioPciDevice {
         );
         self.configuration.add_capability(&notify_cap);
 
-        let configuration_cap = VirtioPciCfgCap::new();
+        let configuration_cap = VirtioPciCfgCap::new(bar);
         self.cap_pci_cfg_info.offset =
             u16::from(self.configuration.add_capability(&configuration_cap))
                 + VIRTIO_PCI_CAP_OFFSET;
@@ -612,7 +727,7 @@ impl VirtioPciDevice {
 
         if let Some(interrupt) = &self.virtio_interrupt {
             let msix_cap = MsixCap::new(
-                VIRTIO_BAR_INDEX,
+                bar,
                 interrupt
                     .msix_config
                     .lock()
@@ -620,13 +735,113 @@ impl VirtioPciDevice {
                     .vectors
                     .num_vectors(),
                 MSIX_TABLE_BAR_OFFSET,
-                VIRTIO_BAR_INDEX,
+                bar,
                 MSIX_PBA_BAR_OFFSET,
             );
             // The whole Configuration region is 4K, so u16 can address it all
             #[allow(clippy::cast_possible_truncation)]
             let offset = self.configuration.add_capability(&msix_cap) as u16;
             self.msix_config_cap_offset = offset;
+        }
+    }
+
+    /// Port base currently mapped for the legacy interface.
+    pub fn io_bar_address(&self) -> Option<u64> {
+        self.io_bar_address.map(u64::from)
+    }
+
+    fn cap_access_bar_base(&self) -> Option<u64> {
+        let bar = self.cap_pci_cfg_info.cap.cap.pci_bar;
+        if bar == self.capability_bar_index() {
+            Some(self.bar_address)
+        } else if bar == 0 {
+            self.io_bar_address()
+        } else {
+            None
+        }
+    }
+
+    fn io_space_enabled(&self) -> bool {
+        self.configuration.read_reg(COMMAND_REG) & COMMAND_IO_SPACE_ENABLE != 0
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn maybe_relocate_io_bar(&mut self) {
+        let Some(old_base) = self.io_bar_address() else {
+            return;
+        };
+        let new_base = self.bars.get_bar_addr_32(0);
+        if old_base == new_base {
+            return;
+        }
+        let range = match self.vm.resource_allocator().pci_io.allocate(
+            LEGACY_IO_BAR_SIZE,
+            LEGACY_IO_BAR_SIZE,
+            AllocPolicy::ExactMatch(new_base),
+        ) {
+            Ok(range) => range,
+            Err(err) => {
+                error!("Cannot reserve relocated I/O BAR at {new_base:#x}: {err:?}");
+                return;
+            }
+        };
+        if let Err(err) = self
+            .vm
+            .pio_bus
+            .move_range(old_base, new_base, LEGACY_IO_BAR_SIZE)
+        {
+            error!("Cannot relocate I/O BAR to {new_base:#x}: {err:?}");
+            self.vm.resource_allocator().pci_io.free(&range).unwrap();
+            return;
+        }
+        self.vm
+            .resource_allocator()
+            .pci_io
+            .free(&RangeInclusive::new(old_base, old_base + LEGACY_IO_BAR_SIZE - 1).unwrap())
+            .unwrap();
+        self.io_bar_address = Some(u16::try_from(new_base).unwrap());
+    }
+
+    fn read_legacy_bar(&mut self, offset: u64, data: &mut [u8]) {
+        let msix = self.msix_config.lock().unwrap().enabled;
+        let config_offset = if msix { 24 } else { 20 };
+        let device = self.device.lock().unwrap();
+        if offset >= config_offset {
+            device.read_config(offset - config_offset, data);
+            return;
+        }
+        let mut registers = [0u8; 24];
+        registers[..4].copy_from_slice(&device.avail_features().to_le_bytes()[..4]);
+        registers[4..8].copy_from_slice(&device.acked_features().to_le_bytes()[..4]);
+        if let Some(queue) = device
+            .queues()
+            .get(usize::from(self.common_config.queue_select))
+        {
+            let pfn = u32::try_from(queue.desc_table_address.0 >> 12).unwrap_or(0);
+            registers[8..12].copy_from_slice(&pfn.to_le_bytes());
+            registers[12..14].copy_from_slice(&queue.max_size.to_le_bytes());
+        }
+        registers[14..16].copy_from_slice(&self.common_config.queue_select.to_le_bytes());
+        registers[18] = self.common_config.driver_status;
+        registers[20..22].copy_from_slice(
+            &self
+                .common_config
+                .msix_config
+                .load(Ordering::Acquire)
+                .to_le_bytes(),
+        );
+        let vectors = self.common_config.msix_queues.lock().unwrap();
+        let vector = vectors
+            .get(usize::from(self.common_config.queue_select))
+            .copied()
+            .unwrap_or(VIRTQ_MSI_NO_VECTOR);
+        registers[22..24].copy_from_slice(&vector.to_le_bytes());
+        data.fill(0);
+        if let Ok(start) = usize::try_from(offset)
+            && let Some(end) = start.checked_add(data.len())
+            && end <= usize::try_from(config_offset).unwrap()
+        {
+            data.copy_from_slice(&registers[start..end]);
         }
     }
 
@@ -652,7 +867,11 @@ impl VirtioPciDevice {
             // offset is pointing to. So, do some check that the `length` has a meaningful value
             // and only use the part of the buffer we actually need.
             if matches!(len, 1 | 2 | 4) && len <= data.len() {
-                self.read_bar(0, bar_offset as u64, &mut data[..len]);
+                if let Some(base) = self.cap_access_bar_base() {
+                    self.read_bar(base, u64::from(bar_offset), &mut data[..len]);
+                } else {
+                    data[..len].fill(0xff);
+                }
             }
         }
     }
@@ -678,7 +897,8 @@ impl VirtioPciDevice {
             // and only use the part of the buffer we actually need.
             if matches!(len, 1 | 2 | 4) {
                 let len = len.min(data.len());
-                self.write_bar(0, bar_offset as u64, &data[..len])
+                self.cap_access_bar_base()
+                    .and_then(|base| self.write_bar(base, u64::from(bar_offset), &data[..len]))
             } else {
                 None
             }
@@ -865,6 +1085,7 @@ impl VirtioPciDevice {
 
     pub fn state(&self) -> VirtioPciDeviceState {
         VirtioPciDeviceState {
+            io_bar_address: self.io_bar_address,
             sbdf: self.sbdf,
             device_activated: self.device_activated.load(Ordering::Acquire),
             cap_pci_cfg_offset: self.cap_pci_cfg_info.offset,
@@ -1010,8 +1231,14 @@ impl PciDevice for VirtioPciDevice {
             self.write_cap_pci_cfg(offset, data)
         } else {
             let mem_enabled_before = self.memory_space_enabled();
+            #[cfg(target_arch = "x86_64")]
+            let io_enabled_before = self.io_space_enabled();
             self.configuration
                 .write_config_register(reg_idx, offset, data);
+            #[cfg(target_arch = "x86_64")]
+            if !io_enabled_before && self.io_space_enabled() {
+                self.maybe_relocate_io_bar();
+            }
             if !mem_enabled_before && self.memory_space_enabled() {
                 self.maybe_relocate_bar();
             }
@@ -1036,19 +1263,18 @@ impl PciDevice for VirtioPciDevice {
             // guest to access other capabilities without mapping the PCI BAR.
             let offset = (reg_idx * 4 - self.cap_pci_cfg_info.offset) as usize;
             let mut data = [0u8; 4];
-            let len = u32::from(self.cap_pci_cfg_info.cap.cap.length) as usize;
-            if len <= 4 {
-                self.read_cap_pci_cfg(offset, &mut data[..len]);
-                u32::from_le_bytes(data)
-            } else {
-                0
-            }
+            self.read_cap_pci_cfg(offset, &mut data);
+            u32::from_le_bytes(data)
         } else {
             self.configuration.read_reg(reg_idx)
         }
     }
 
-    fn read_bar(&mut self, _base: u64, offset: u64, data: &mut [u8]) {
+    fn read_bar(&mut self, base: u64, offset: u64, data: &mut [u8]) {
+        if self.io_bar_address() == Some(base) {
+            self.read_legacy_bar(offset, data);
+            return;
+        }
         match offset {
             o if o < u64::from(COMMON_CONFIG_BAR_OFFSET + COMMON_CONFIG_SIZE) => {
                 self.common_config.read(
@@ -1107,7 +1333,10 @@ impl PciDevice for VirtioPciDevice {
         }
     }
 
-    fn write_bar(&mut self, _base: u64, offset: u64, data: &[u8]) -> Option<Arc<Barrier>> {
+    fn write_bar(&mut self, base: u64, offset: u64, data: &[u8]) -> Option<Arc<Barrier>> {
+        if self.io_bar_address() == Some(base) {
+            return None;
+        }
         match offset {
             o if o < u64::from(COMMON_CONFIG_BAR_OFFSET + COMMON_CONFIG_SIZE) => {
                 self.common_config.write(
@@ -1239,11 +1468,19 @@ impl PciDevice for VirtioPciDevice {
 
 impl BusDevice for VirtioPciDevice {
     fn read(&mut self, base: u64, offset: u64, data: &mut [u8]) {
-        self.read_bar(base, offset, data)
+        if self.io_bar_address() == Some(base) && !self.io_space_enabled() {
+            data.fill(0xff);
+        } else {
+            self.read_bar(base, offset, data);
+        }
     }
 
     fn write(&mut self, base: u64, offset: u64, data: &[u8]) -> Option<Arc<Barrier>> {
-        self.write_bar(base, offset, data)
+        if self.io_bar_address() == Some(base) && !self.io_space_enabled() {
+            None
+        } else {
+            self.write_bar(base, offset, data)
+        }
     }
 }
 
@@ -1305,6 +1542,187 @@ mod tests {
             .get_virtio_device(VirtioDeviceType::Rng, "rng")
             .unwrap()
             .clone()
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_transitional_pci_identity_and_bars() {
+        let vmm = create_vmm_with_pci_mode(crate::pci::PciTransportMode::Transitional);
+        let device = get_virtio_device(&vmm);
+        let mut device = device.lock().unwrap();
+        assert_eq!(device.read_config_register(0), 0x1005_1af4);
+        assert_eq!(device.read_config_register(2) & 0xff, 0);
+        assert_eq!(device.read_config_register(11), 0x0004_1af4);
+        assert_eq!(device.read_config_register(BAR0_REG_IDX) & 3, 1);
+        assert_eq!(device.read_config_register(BAR0_REG_IDX + 2) & 7, 4);
+        let memory_bar = device.read_config_register(BAR0_REG_IDX + 2);
+        let io_bar = device.read_config_register(BAR0_REG_IDX);
+        device.write_config_register(BAR0_REG_IDX, 0, &u32::MAX.to_le_bytes());
+        assert_eq!(device.read_config_register(BAR0_REG_IDX), 0xffff_ff01);
+        assert_eq!(device.read_config_register(BAR0_REG_IDX + 1), 0);
+        assert_eq!(device.read_config_register(BAR0_REG_IDX + 2), memory_bar);
+        device.write_config_register(BAR0_REG_IDX, 0, &io_bar.to_le_bytes());
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_transitional_io_mapping_and_relocation() {
+        let vmm = create_vmm_with_pci_mode(crate::pci::PciTransportMode::Transitional);
+        let device = get_virtio_device(&vmm);
+        let base = device.lock().unwrap().io_bar_address().unwrap();
+        let vm = kvm_vm(&vmm);
+        let mut value = [0u8; 2];
+        vm.pio_bus.read(base + 12, &mut value).unwrap();
+        assert_eq!(value, [0xff; 2]);
+        let queue_size = device.lock().unwrap().device.lock().unwrap().queues()[0].max_size;
+        let command = |enabled: bool| {
+            device.lock().unwrap().write_config_register(
+                COMMAND_REG,
+                0,
+                &u16::from(enabled).to_le_bytes(),
+            );
+        };
+        command(true);
+        vm.pio_bus.read(base + 12, &mut value).unwrap();
+        assert_eq!(u16::from_le_bytes(value), queue_size);
+        command(false);
+        let new_base = base + super::LEGACY_IO_BAR_SIZE;
+        device.lock().unwrap().write_config_register(
+            BAR0_REG_IDX,
+            0,
+            &(new_base as u32).to_le_bytes(),
+        );
+        assert_eq!(device.lock().unwrap().io_bar_address(), Some(base));
+        command(true);
+        assert_eq!(device.lock().unwrap().io_bar_address(), Some(new_base));
+        vm.pio_bus.read(base, &mut value).unwrap_err();
+        vm.pio_bus.read(new_base + 12, &mut value).unwrap();
+        assert_eq!(u16::from_le_bytes(value), queue_size);
+        vm.resource_allocator()
+            .pci_io
+            .allocate(0x100, 0x100, AllocPolicy::ExactMatch(base))
+            .unwrap();
+        vm.resource_allocator()
+            .pci_io
+            .allocate(0x100, 0x100, AllocPolicy::ExactMatch(new_base))
+            .unwrap_err();
+        for invalid in [base, 0x1_0000] {
+            command(false);
+            device.lock().unwrap().write_config_register(
+                BAR0_REG_IDX,
+                0,
+                &(invalid as u32).to_le_bytes(),
+            );
+            command(true);
+            assert_eq!(device.lock().unwrap().io_bar_address(), Some(new_base));
+        }
+        command(false);
+        vm.pio_bus.read(new_base + 12, &mut value).unwrap();
+        assert_eq!(value, [0xff; 2]);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_transitional_detach_releases_bars() {
+        let mut vmm = create_vmm_with_pci_mode(crate::pci::PciTransportMode::Transitional);
+        let vm = kvm_vm(&vmm).clone();
+        let (io_base, memory_base) = {
+            let device = get_virtio_device(&vmm);
+            let device = device.lock().unwrap();
+            (device.io_bar_address().unwrap(), device.bar_address())
+        };
+        vmm.device_manager
+            .hot_unplug_device(
+                vm.clone(),
+                (VirtioDeviceType::Rng, "rng".into()),
+                &mut crate::EventManager::new().unwrap(),
+            )
+            .unwrap();
+        vm.pio_bus.read(io_base, &mut [0]).unwrap_err();
+        vm.common.mmio_bus.read(memory_base, &mut [0]).unwrap_err();
+        let mut allocator = vm.resource_allocator();
+        allocator
+            .pci_io
+            .allocate(
+                super::LEGACY_IO_BAR_SIZE,
+                super::LEGACY_IO_BAR_SIZE,
+                AllocPolicy::ExactMatch(io_base),
+            )
+            .unwrap();
+        allocator
+            .pci_memory()
+            .allocate(
+                CAPABILITY_BAR_SIZE,
+                CAPABILITY_BAR_SIZE,
+                AllocPolicy::ExactMatch(memory_base),
+            )
+            .unwrap();
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_configuration_access_selects_the_bar() {
+        let vmm = create_vmm_with_pci_mode(crate::pci::PciTransportMode::Transitional);
+        let device = get_virtio_device(&vmm);
+        let mut device = device.lock().unwrap();
+        assert_eq!(cap_pci_cfg_read(&mut device, NUM_QUEUES as u32, 2), 1);
+        let cap_bar = (device.cap_pci_cfg_info.offset + 2) / 4;
+        device.write_config_register(cap_bar, 0, &[0]);
+        let queue_size = device.device.lock().unwrap().queues()[0].max_size;
+        assert_eq!(cap_pci_cfg_read(&mut device, 12, 2), u32::from(queue_size));
+        device.write_config_register(cap_bar, 0, &[1]);
+        assert_eq!(cap_pci_cfg_read(&mut device, NUM_QUEUES as u32, 2), 0xffff);
+        cap_pci_cfg_write(&mut device, QUEUE_SELECT as u32, 2, &7u16.to_le_bytes());
+        assert_eq!(device.common_config.queue_select, 0);
+        device.write_config_register(cap_bar, 0, &[2]);
+        cap_pci_cfg_write(&mut device, QUEUE_SELECT as u32, 2, &7u16.to_le_bytes());
+        assert_eq!(device.common_config.queue_select, 7);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_transitional_ids_and_restore_validation() {
+        use crate::pci::PciTransportMode;
+        for (kind, id) in [
+            (VirtioDeviceType::Net, 0x1000),
+            (VirtioDeviceType::Block, 0x1001),
+            (VirtioDeviceType::Balloon, 0x1002),
+            (VirtioDeviceType::Rng, 0x1005),
+        ] {
+            let config = VirtioPciDevice::pci_configuration(
+                kind,
+                VirtioPciDevice::legacy_device_id(PciTransportMode::Transitional, kind),
+            );
+            assert_eq!(config.read_reg(0), (id << 16) | 0x1af4);
+            assert_eq!(config.read_reg(11) >> 16, kind as u32);
+            assert_eq!(config.read_reg(2) & 0xff, 0);
+        }
+        for kind in [
+            VirtioDeviceType::Vsock,
+            VirtioDeviceType::Mem,
+            VirtioDeviceType::Pmem,
+        ] {
+            assert_eq!(
+                VirtioPciDevice::legacy_device_id(PciTransportMode::Transitional, kind),
+                None
+            );
+        }
+        let vmm = create_vmm_with_pci_mode(PciTransportMode::Transitional);
+        let device = get_virtio_device(&vmm);
+        let device = device.lock().unwrap();
+        for invalid in [None, Some(0), Some(0x1001), Some(0xffff)] {
+            let mut state = device.state();
+            state.io_bar_address = invalid;
+            assert!(matches!(
+                VirtioPciDevice::new_from_state(
+                    "bad".into(),
+                    kvm_vm(&vmm),
+                    device.virtio_device(),
+                    state
+                ),
+                Err(super::VirtioPciDeviceError::InvalidIoBar)
+            ));
+        }
     }
 
     #[test]
@@ -1467,8 +1885,9 @@ mod tests {
     }
 
     fn write_bar_base(device: &mut VirtioPciDevice, base: u64) {
-        device.write_config_register(BAR0_REG_IDX, 0, &(base as u32).to_le_bytes());
-        device.write_config_register(BAR0_REG_IDX + 1, 0, &((base >> 32) as u32).to_le_bytes());
+        let index = BAR0_REG_IDX + u16::from(device.capability_bar_index());
+        device.write_config_register(index, 0, &(base as u32).to_le_bytes());
+        device.write_config_register(index + 1, 0, &((base >> 32) as u32).to_le_bytes());
     }
 
     fn set_memory_space_enable(device: &mut VirtioPciDevice, enable: bool) {
@@ -1709,7 +2128,13 @@ mod tests {
 
     #[test]
     fn test_capabilities() {
-        let vmm = create_vmm_with_virtio_pci_device();
+        check_capabilities(crate::pci::PciTransportMode::Modern, 0);
+        #[cfg(target_arch = "x86_64")]
+        check_capabilities(crate::pci::PciTransportMode::Transitional, 2);
+    }
+
+    fn check_capabilities(mode: crate::pci::PciTransportMode, bar: u8) {
+        let vmm = create_vmm_with_pci_mode(mode);
         let device = get_virtio_device(&vmm);
         let mut locked_virtio_pci_device = device.lock().unwrap();
 
@@ -1730,7 +2155,7 @@ mod tests {
         assert_eq!(id, PciCapabilityId::VendorSpecific);
         assert_eq!(cap.cap_len as usize, size_of::<VirtioPciCap>() + 2);
         assert_eq!(cap.cfg_type, PciCapabilityType::Common as u8);
-        assert_eq!(cap.pci_bar, 0);
+        assert_eq!(cap.pci_bar, bar);
         assert_eq!(u32::from(cap.offset), COMMON_CONFIG_BAR_OFFSET);
         assert_eq!(u32::from(cap.length), COMMON_CONFIG_SIZE);
         assert_eq!(next as u32, common_config_cap_offset + cap.cap_len as u32);
@@ -1741,7 +2166,7 @@ mod tests {
         assert_eq!(id, PciCapabilityId::VendorSpecific);
         assert_eq!(cap.cap_len as usize, size_of::<VirtioPciCap>() + 2);
         assert_eq!(cap.cfg_type, PciCapabilityType::Isr as u8);
-        assert_eq!(cap.pci_bar, 0);
+        assert_eq!(cap.pci_bar, bar);
         assert_eq!(u32::from(cap.offset), ISR_CONFIG_BAR_OFFSET);
         assert_eq!(u32::from(cap.length), ISR_CONFIG_SIZE);
         assert_eq!(next as u32, isr_cap_offset + cap.cap_len as u32);
@@ -1753,7 +2178,7 @@ mod tests {
         assert_eq!(id, PciCapabilityId::VendorSpecific);
         assert_eq!(cap.cap_len as usize, size_of::<VirtioPciCap>() + 2);
         assert_eq!(cap.cfg_type, PciCapabilityType::Device as u8);
-        assert_eq!(cap.pci_bar, 0);
+        assert_eq!(cap.pci_bar, bar);
         assert_eq!(u32::from(cap.offset), DEVICE_CONFIG_BAR_OFFSET);
         assert_eq!(u32::from(cap.length), DEVICE_CONFIG_SIZE);
         assert_eq!(next as u32, device_config_cap_offset + cap.cap_len as u32);
@@ -1767,7 +2192,7 @@ mod tests {
             size_of::<VirtioPciNotifyCap>() + 2
         );
         assert_eq!(cap.cap.cfg_type, PciCapabilityType::Notify as u8);
-        assert_eq!(cap.cap.pci_bar, 0);
+        assert_eq!(cap.cap.pci_bar, bar);
         assert_eq!(u32::from(cap.cap.offset), NOTIFICATION_BAR_OFFSET);
         assert_eq!(u32::from(cap.cap.length), NOTIFICATION_SIZE);
         assert_eq!(
@@ -1782,7 +2207,7 @@ mod tests {
         assert_eq!(id, PciCapabilityId::VendorSpecific);
         assert_eq!(cap.cap.cap_len as usize, size_of::<VirtioPciCfgCap>() + 2);
         assert_eq!(cap.cap.cfg_type, PciCapabilityType::Pci as u8);
-        assert_eq!(cap.cap.pci_bar, 0);
+        assert_eq!(cap.cap.pci_bar, bar);
         assert_eq!(u32::from(cap.cap.offset), 0);
         assert_eq!(u32::from(cap.cap.length), 0);
         assert_eq!(
@@ -1796,6 +2221,10 @@ mod tests {
         let (id, next, _cap) = read_msix_cap(&mut locked_virtio_pci_device, msix_cap_offset);
         assert_eq!(id, PciCapabilityId::MsiX);
         assert_eq!(next, 0);
+        let table = locked_virtio_pci_device.read_config_register((msix_cap_offset / 4 + 1) as u16);
+        let pba = locked_virtio_pci_device.read_config_register((msix_cap_offset / 4 + 2) as u16);
+        assert_eq!(table & 7, u32::from(bar));
+        assert_eq!(pba & 7, u32::from(bar));
     }
 
     fn cap_pci_cfg_read(device: &mut VirtioPciDevice, bar_offset: u32, length: u32) -> u32 {
