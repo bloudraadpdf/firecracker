@@ -221,17 +221,18 @@ impl DeviceManager {
         let mut legacy_devices = PortIODeviceManager {
             stdio_serial: serial,
             i8042,
-            acpi_power: Arc::new(Mutex::new(crate::devices::legacy::acpi::AcpiPower::new(
-                vcpus_exit_evt
-                    .try_clone()
-                    .map_err(DeviceManagerCreateError::EventFd)?,
-            ))),
-            acpi_timer: Arc::new(Mutex::new(
-                crate::devices::legacy::acpi::AcpiTimer::default(),
+            acpi_power: Arc::new(Mutex::new(
+                crate::devices::legacy::acpi::AcpiPower::new(
+                    vcpus_exit_evt
+                        .try_clone()
+                        .map_err(DeviceManagerCreateError::EventFd)?,
+                )
+                .map_err(DeviceManagerCreateError::EventFd)?,
             )),
             cmos: Arc::new(Mutex::new(crate::devices::legacy::cmos::Cmos::default())),
         };
         legacy_devices.register_devices(vm)?;
+        event_manager.add_subscriber(legacy_devices.acpi_power.clone());
         Ok(legacy_devices)
     }
 
@@ -620,6 +621,9 @@ pub struct DevicesState {
     /// Firmware RTC registers and wall-clock adjustment.
     #[cfg(target_arch = "x86_64")]
     pub cmos_state: Option<crate::devices::legacy::cmos::Cmos>,
+    /// Conventional ACPI timer and PM1 registers.
+    #[cfg(target_arch = "x86_64")]
+    pub power_state: Option<crate::devices::legacy::acpi::AcpiPowerState>,
 }
 
 /// Errors for (de)serialization of the devices.
@@ -718,6 +722,11 @@ impl<'a> Persist<'a> for DeviceManager {
                 .legacy_devices
                 .as_ref()
                 .map(|legacy| legacy.cmos.lock().expect("Poisoned lock").clone()),
+            #[cfg(target_arch = "x86_64")]
+            power_state: self
+                .legacy_devices
+                .as_ref()
+                .map(|legacy| legacy.acpi_power.lock().expect("Poisoned lock").save()),
         }
     }
 
@@ -742,6 +751,16 @@ impl<'a> Persist<'a> for DeviceManager {
         #[cfg(target_arch = "x86_64")]
         if let Some(cmos) = &state.cmos_state {
             *legacy_devices.cmos.lock().expect("Poisoned lock") = cmos.clone();
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        if let Some(power) = &state.power_state {
+            legacy_devices
+                .acpi_power
+                .lock()
+                .expect("Poisoned lock")
+                .restore(power)
+                .map_err(DeviceManagerCreateError::EventFd)?;
         }
 
         // Restore MMIO platform devices
@@ -831,21 +850,7 @@ pub(crate) mod tests {
         let virtio_devices = VirtioDevices::Mmio(MMIOVirtioDevices::new());
 
         #[cfg(target_arch = "x86_64")]
-        let legacy_devices = PortIODeviceManager {
-            stdio_serial: Arc::new(Mutex::new(
-                SerialDevice::new(None, SerialOut::new(SerialOutInner::Sink, None), None).unwrap(),
-            )),
-            i8042: Arc::new(Mutex::new(
-                I8042Device::new(EventFd::new(libc::EFD_NONBLOCK).unwrap()).unwrap(),
-            )),
-            acpi_power: Arc::new(Mutex::new(crate::devices::legacy::acpi::AcpiPower::new(
-                EventFd::new(libc::EFD_NONBLOCK).unwrap(),
-            ))),
-            cmos: Arc::new(Mutex::new(crate::devices::legacy::cmos::Cmos::default())),
-            acpi_timer: Arc::new(Mutex::new(
-                crate::devices::legacy::acpi::AcpiTimer::default(),
-            )),
-        };
+        let legacy_devices = PortIODeviceManager::for_tests();
 
         DeviceManager {
             mmio_platform_devices,

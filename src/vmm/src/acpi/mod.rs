@@ -74,7 +74,11 @@ impl AcpiTableWriter<'_> {
     {
         let addr = resource_allocator
             .system_memory
-            .allocate(table.len().try_into().unwrap(), 1, AllocPolicy::FirstMatch)?
+            .allocate(
+                table.len().try_into().unwrap(),
+                table.alignment(),
+                AllocPolicy::FirstMatch,
+            )?
             .start();
 
         table
@@ -124,6 +128,11 @@ impl AcpiTableWriter<'_> {
             (1 << FADT_F_HW_REDUCED_ACPI) | (1 << FADT_F_PWR_BUTTON) | (1 << FADT_F_SLP_BUTTON),
         );
         setup_arch_fadt(&mut fadt);
+        #[cfg(target_arch = "x86_64")]
+        {
+            let facs_addr = self.write_acpi_table(resource_allocator, &mut acpi_tables::Facs)?;
+            fadt.set_facs(facs_addr);
+        }
         self.write_acpi_table(resource_allocator, &mut fadt)
     }
 
@@ -229,6 +238,47 @@ mod tests {
     struct MockSdt(Vec<u8>);
 
     #[test]
+    fn test_conventional_fadt_and_aligned_facs() {
+        let vmm = default_vmm();
+        let mut writer = AcpiTableWriter {
+            mem: vmm.vm.as_kvm().unwrap().guest_memory(),
+        };
+        let mut allocator = vmm.vm.as_kvm().unwrap().resource_allocator();
+        writer
+            .write_acpi_table(&mut allocator, &mut MockSdt(vec![0; 3]))
+            .unwrap();
+        let address = writer.build_fadt(&mut allocator, 0xf1000).unwrap();
+        let mut table = [0u8; 276];
+        writer
+            .mem
+            .read_slice(&mut table, vm_memory::GuestAddress(address))
+            .unwrap();
+        assert_eq!(
+            table.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte)),
+            0
+        );
+        let flags = u32::from_le_bytes(table[112..116].try_into().unwrap());
+        assert_eq!(flags & (1 << 20), 0);
+        assert_ne!(flags & (1 << 8), 0);
+        assert_eq!(u16::from_le_bytes(table[46..48].try_into().unwrap()), 3);
+        assert_eq!(u32::from_le_bytes(table[56..60].try_into().unwrap()), 0x602);
+        assert_eq!(u32::from_le_bytes(table[64..68].try_into().unwrap()), 0x606);
+        assert_eq!(u32::from_le_bytes(table[76..80].try_into().unwrap()), 0x608);
+        assert_eq!(&table[88..92], &[4, 2, 0, 4]);
+        let facs_address = u64::from(u32::from_le_bytes(table[36..40].try_into().unwrap()));
+        assert_ne!(facs_address, 0);
+        assert_eq!(facs_address % 64, 0);
+        assert_eq!(u64::from_le_bytes(table[132..140].try_into().unwrap()), 0);
+        let mut facs = [0u8; 64];
+        writer
+            .mem
+            .read_slice(&mut facs, vm_memory::GuestAddress(facs_address))
+            .unwrap();
+        assert_eq!(&facs[..8], b"FACS\x40\0\0\0");
+        assert_eq!(facs[32], 2);
+    }
+
+    #[test]
     fn test_madt_declares_legacy_pic() {
         let vmm = default_vmm();
         let mut writer = AcpiTableWriter {
@@ -241,15 +291,19 @@ mod tests {
                 super::apic_addr(),
             )
             .unwrap();
-        let mut table = [0u8; 64];
+        let mut table = [0u8; 74];
         writer
             .mem
             .read_slice(&mut table, vm_memory::GuestAddress(address))
             .unwrap();
         assert_eq!(&table[..4], b"APIC");
-        assert_eq!(u32::from_le_bytes(table[4..8].try_into().unwrap()), 64);
+        assert_eq!(u32::from_le_bytes(table[4..8].try_into().unwrap()), 74);
         assert_eq!(u32::from_le_bytes(table[40..44].try_into().unwrap()), 1);
-        assert_eq!(table.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte)), 0);
+        assert_eq!(&table[64..], &[2, 10, 0, 3, 3, 0, 0, 0, 15, 0]);
+        assert_eq!(
+            table.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte)),
+            0
+        );
     }
 
     impl Sdt for MockSdt {

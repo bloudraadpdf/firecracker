@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use acpi_tables::aml::AmlError;
 use acpi_tables::{Aml, aml};
 
-use crate::devices::legacy::acpi::{AcpiPower, AcpiTimer, POWER_PORT, TIMER_PORT};
+use crate::devices::legacy::acpi::{AcpiPower, PORT_COUNT, POWER_PORT, SCI_GSI};
 use crate::devices::legacy::cmos::{CMOS_PORT, Cmos};
 use crate::devices::legacy::{I8042Device, SerialDevice};
 use crate::vstate::bus::BusError;
@@ -35,8 +35,6 @@ pub struct PortIODeviceManager {
     pub i8042: Arc<Mutex<I8042Device>>,
     /// ACPI reset and shutdown registers.
     pub acpi_power: Arc<Mutex<AcpiPower>>,
-    /// ACPI PM timer used by CloudHv firmware.
-    pub acpi_timer: Arc<Mutex<AcpiTimer>>,
     /// Firmware CMOS real-time clock.
     pub cmos: Arc<Mutex<Cmos>>,
 }
@@ -58,11 +56,39 @@ impl PortIODeviceManager {
     /// i8042 keyboard data register size.
     const I8042_KDB_DATA_REGISTER_SIZE: u64 = 0x5;
 
+    #[cfg(test)]
+    pub(crate) fn for_tests() -> Self {
+        use vmm_sys_util::eventfd::EventFd;
+
+        use crate::devices::legacy::serial::{SerialOut, SerialOutInner};
+
+        Self {
+            stdio_serial: Arc::new(Mutex::new(
+                SerialDevice::new(None, SerialOut::new(SerialOutInner::Sink, None), None).unwrap(),
+            )),
+            i8042: Arc::new(Mutex::new(
+                I8042Device::new(EventFd::new(libc::EFD_NONBLOCK).unwrap()).unwrap(),
+            )),
+            acpi_power: Arc::new(Mutex::new(
+                AcpiPower::new(EventFd::new(libc::EFD_NONBLOCK).unwrap()).unwrap(),
+            )),
+            cmos: Arc::new(Mutex::new(Cmos::default())),
+        }
+    }
+
     /// Register supported legacy devices.
     pub fn register_devices(&mut self, vm: &KvmVm) -> Result<(), LegacyDeviceError> {
         let io_bus = &vm.pio_bus;
-        io_bus.insert(self.acpi_power.clone(), POWER_PORT, 2)?;
-        io_bus.insert(self.acpi_timer.clone(), TIMER_PORT, 4)?;
+        io_bus.insert(
+            self.acpi_power.clone(),
+            POWER_PORT,
+            PORT_COUNT.try_into().unwrap(),
+        )?;
+        let power = self.acpi_power.lock().expect("Poisoned lock");
+        vm.register_level_irq(&power.sci_evt, &power.resample_evt, SCI_GSI)
+            .map_err(|e| {
+                LegacyDeviceError::EventFd(std::io::Error::from_raw_os_error(e.errno()))
+            })?;
         io_bus.insert(self.cmos.clone(), CMOS_PORT, 2)?;
         io_bus.insert(
             self.stdio_serial.clone(),
@@ -112,13 +138,7 @@ impl PortIODeviceManager {
                             POWER_PORT.try_into().unwrap(),
                             POWER_PORT.try_into().unwrap(),
                             1,
-                            2,
-                        ),
-                        &aml::Io::new(
-                            TIMER_PORT.try_into().unwrap(),
-                            TIMER_PORT.try_into().unwrap(),
-                            1,
-                            4,
+                            PORT_COUNT.try_into().unwrap(),
                         ),
                     ]),
                 )?,
@@ -184,39 +204,14 @@ impl PortIODeviceManager {
 
 #[cfg(test)]
 mod tests {
-    use libc::EFD_NONBLOCK;
-    use vm_superio::Serial;
-    use vmm_sys_util::eventfd::EventFd;
-
     use super::*;
-    use crate::devices::legacy::serial::{SerialOut, SerialOutInner};
-    use crate::devices::legacy::{EventFdTrigger, SerialEventsWrapper};
     use crate::vstate::vm::tests::setup_vm_with_memory;
 
     #[test]
     fn test_register_legacy_devices() {
         let vm = setup_vm_with_memory(0x1000);
         vm.setup_irqchip().unwrap();
-        let mut ldm = PortIODeviceManager {
-            stdio_serial: Arc::new(Mutex::new(SerialDevice {
-                serial: Serial::with_events(
-                    EventFdTrigger::new(EventFd::new(EFD_NONBLOCK).unwrap()),
-                    SerialEventsWrapper {
-                        buffer_ready_event_fd: None,
-                    },
-                    SerialOut::new(SerialOutInner::Sink, None),
-                ),
-                input: None,
-            })),
-            i8042: Arc::new(Mutex::new(
-                I8042Device::new(EventFd::new(libc::EFD_NONBLOCK).unwrap()).unwrap(),
-            )),
-            acpi_power: Arc::new(Mutex::new(AcpiPower::new(
-                EventFd::new(libc::EFD_NONBLOCK).unwrap(),
-            ))),
-            acpi_timer: Arc::new(Mutex::new(AcpiTimer::default())),
-            cmos: Arc::new(Mutex::new(Cmos::default())),
-        };
+        let mut ldm = PortIODeviceManager::for_tests();
         ldm.register_devices(&vm).unwrap();
     }
 }

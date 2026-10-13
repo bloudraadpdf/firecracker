@@ -9,6 +9,7 @@ use vm_memory::{GuestAddress, GuestMemory, GuestMemoryError};
 pub mod aml;
 pub mod arm;
 pub mod dsdt;
+pub mod facs;
 pub mod fadt;
 pub mod madt;
 pub mod mcfg;
@@ -17,6 +18,7 @@ pub mod xsdt;
 
 pub use aml::Aml;
 pub use dsdt::Dsdt;
+pub use facs::Facs;
 pub use fadt::Fadt;
 pub use madt::Madt;
 pub use mcfg::Mcfg;
@@ -120,6 +122,11 @@ impl SdtHeader {
 
 /// A trait for functionality around System Descriptor Tables.
 pub trait Sdt {
+    /// Required physical alignment of the table.
+    fn alignment(&self) -> u64 {
+        1
+    }
+
     /// Get the length of the table
     fn len(&self) -> usize;
 
