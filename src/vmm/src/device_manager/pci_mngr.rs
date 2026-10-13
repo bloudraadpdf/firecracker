@@ -772,6 +772,16 @@ mod tests {
 
     #[test]
     fn test_device_manager_persistence() {
+        device_manager_persistence(crate::pci::PciTransportMode::Modern);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_transitional_device_manager_persistence() {
+        device_manager_persistence(crate::pci::PciTransportMode::Transitional);
+    }
+
+    fn device_manager_persistence(mode: crate::pci::PciTransportMode) {
         // These need to survive so the restored blocks find them.
         let _block_files;
         let _pmem_files;
@@ -783,7 +793,7 @@ mod tests {
         // Set up a vmm with one of each device, and get the serialized DeviceStates.
         {
             let mut event_manager = EventManager::new().expect("Unable to create EventManager");
-            let mut vmm = default_vmm_with_pci();
+            let mut vmm = default_vmm_with_pci_mode(mode);
             let mut cmdline = default_kernel_cmdline();
 
             // Add a balloon device.

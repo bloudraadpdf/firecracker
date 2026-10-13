@@ -282,6 +282,8 @@ pub enum VirtioPciDeviceError {
     InvalidRestoreState(u8, u8),
     /// Restored MSI-X vector count ({0}) does not match the expected count ({1}) for this device
     UnexpectedMsixVectorCount(usize, usize),
+    /// Restored queue vector assignments ({0}) do not match the queue count ({1}).
+    UnexpectedQueueVectorCount(usize, usize),
     /// Could not activate restored device: {0}
     Activate(#[from] ActivateError),
 }
@@ -638,11 +640,28 @@ impl VirtioPciDevice {
         {
             return Err(PciConfigurationError::InvalidBarIdx(bar_index).into());
         }
+        // Expecting one vector per queue, plus one for the configuration
+        let num_queues = device.lock().expect("Poisoned lock").queues().len();
+        let expected_num_vectors = num_queues + 1;
+        if state.pci_dev_state.msix_queues.len() != num_queues {
+            return Err(VirtioPciDeviceError::UnexpectedQueueVectorCount(
+                state.pci_dev_state.msix_queues.len(),
+                num_queues,
+            ));
+        }
+        for &vector in state
+            .pci_dev_state
+            .msix_queues
+            .iter()
+            .chain(std::iter::once(&state.pci_dev_state.msix_config))
+        {
+            if vector != VIRTQ_MSI_NO_VECTOR && usize::from(vector) >= expected_num_vectors {
+                return Err(InterruptError::InvalidVectorIndex(usize::from(vector)).into());
+            }
+        }
         let msix_config = MsixConfig::from_state(state.msix_state, vm.clone(), state.sbdf)?;
         let vectors = msix_config.vectors.clone();
 
-        // Expecting one vector per queue, plus one for the configuration
-        let expected_num_vectors = device.lock().expect("Poisoned lock").queues().len() + 1;
         if vectors.vectors.len() != expected_num_vectors {
             return Err(VirtioPciDeviceError::UnexpectedMsixVectorCount(
                 vectors.vectors.len(),
@@ -2537,6 +2556,50 @@ mod tests {
                 ),
                 Err(super::VirtioPciDeviceError::InvalidIoBar)
             ));
+        }
+    }
+
+    #[test]
+    fn test_restore_rejects_invalid_vector_assignments() {
+        check_restored_vector_assignments(crate::pci::PciTransportMode::Modern);
+        #[cfg(target_arch = "x86_64")]
+        check_restored_vector_assignments(crate::pci::PciTransportMode::Transitional);
+    }
+
+    fn check_restored_vector_assignments(mode: crate::pci::PciTransportMode) {
+        let vmm = create_vmm_with_pci_mode(mode);
+        let device = get_virtio_device(&vmm);
+        let device = device.lock().unwrap();
+        for case in 0..7 {
+            let mut state = device.state();
+            match case {
+                0 => state.pci_dev_state.msix_queues.clear(),
+                1 => state
+                    .pci_dev_state
+                    .msix_queues
+                    .push(super::VIRTQ_MSI_NO_VECTOR),
+                2 => state.pci_dev_state.msix_queues[0] = 2,
+                3 => state.pci_dev_state.msix_config = 2,
+                4..=6 => {
+                    let vector = [0, 1, super::VIRTQ_MSI_NO_VECTOR][case - 4];
+                    state.pci_dev_state.msix_queues[0] = vector;
+                    state.pci_dev_state.msix_config = vector;
+                }
+                _ => unreachable!(),
+            }
+            let vm = crate::builder::tests::default_vmm();
+            kvm_vm(&vm).resource_allocator().pci_transport = mode;
+            assert_eq!(
+                VirtioPciDevice::new_from_state(
+                    "invalid".into(),
+                    kvm_vm(&vm),
+                    device.virtio_device(),
+                    state,
+                )
+                .is_err(),
+                case < 4,
+                "Incorrect restore result for vector assignment case {case} on {mode:?}"
+            );
         }
     }
 
