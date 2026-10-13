@@ -413,6 +413,21 @@ impl Queue {
         }
     }
 
+    /// Configure a stopped queue using the legacy PCI page-frame register.
+    pub fn configure_legacy_pci(&mut self, page_frame: u32) {
+        *self = Self::new(self.max_size);
+        if page_frame == 0 {
+            return;
+        }
+        self.desc_table_address = GuestAddress(u64::from(page_frame) << 12);
+        self.avail_ring_address =
+            GuestAddress(self.desc_table_address.0 + self.desc_table_size() as u64);
+        self.used_ring_address = GuestAddress(
+            (self.avail_ring_address.0 + self.avail_ring_size() as u64).next_multiple_of(4096),
+        );
+        self.ready = true;
+    }
+
     fn desc_table_size(&self) -> usize {
         std::mem::size_of::<Descriptor>() * usize::from(self.size)
     }
@@ -1334,6 +1349,48 @@ mod tests {
     use crate::devices::virtio::test_utils::{VirtQueue, default_mem};
     use crate::test_utils::{multi_region_mem, single_region_mem};
     use crate::vstate::memory::GuestAddress;
+
+    #[test]
+    fn legacy_pci_queue_processes_contiguous_rings() {
+        let mem = default_mem();
+        let mut queue = Queue::new(128);
+        queue.configure_legacy_pci(1);
+        mem.write_obj(
+            Descriptor {
+                addr: 0x8000,
+                len: 512,
+                flags: 0,
+                next: 0,
+            },
+            GuestAddress(0x1000),
+        )
+        .unwrap();
+        mem.write_obj(1u16, GuestAddress(0x1802)).unwrap();
+        mem.write_obj(0u16, GuestAddress(0x1804)).unwrap();
+        queue.initialize(&mem).unwrap();
+        let descriptor = queue.pop().unwrap().unwrap();
+        assert_eq!(descriptor.addr, GuestAddress(0x8000));
+        assert_eq!(descriptor.len, 512);
+        queue.add_used(descriptor.index, 512).unwrap();
+        queue.advance_used_ring_idx();
+        assert_eq!(mem.read_obj::<u16>(GuestAddress(0x2002)).unwrap(), 1);
+        assert_eq!(mem.read_obj::<u32>(GuestAddress(0x2004)).unwrap(), 0);
+        assert_eq!(mem.read_obj::<u32>(GuestAddress(0x2008)).unwrap(), 512);
+        queue.configure_legacy_pci(0);
+        assert_eq!(queue, Queue::new(128));
+    }
+
+    #[test]
+    fn legacy_pci_queue_address_uses_all_pfn_bits() {
+        let mut queue = Queue::new(32768);
+        queue.size = 1;
+        queue.configure_legacy_pci(u32::MAX);
+        assert_eq!(queue.size, 32768);
+        assert!(queue.ready);
+        assert_eq!(queue.desc_table_address.0, 0x0fff_ffff_f000);
+        assert_eq!(queue.avail_ring_address.0, 0x1000_0007_f000);
+        assert_eq!(queue.used_ring_address.0, 0x1000_0009_0000);
+    }
 
     #[test]
     fn test_checked_new_descriptor_chain() {
