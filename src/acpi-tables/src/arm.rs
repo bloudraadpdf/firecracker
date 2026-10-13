@@ -158,7 +158,7 @@ mod tests {
                 assert_eq!(&cpu[..2], &[11, 80]);
                 assert_eq!(
                     u32::from_le_bytes(cpu[8..12].try_into().unwrap()),
-                    index as u32
+                    u32::try_from(index).unwrap()
                 );
                 assert_eq!(
                     u32::from_le_bytes(cpu[20..24].try_into().unwrap()),
