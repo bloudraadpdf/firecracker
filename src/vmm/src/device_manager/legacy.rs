@@ -129,6 +129,7 @@ impl PortIODeviceManager {
             "_SB_.PRES".try_into()?,
             vec![
                 &aml::Name::new("_HID".try_into()?, &aml::EisaName::new("PNP0C02")?)?,
+                &aml::Name::new("_UID".try_into()?, &"POWER")?,
                 &aml::Name::new(
                     "_CRS".try_into()?,
                     &aml::ResourceTemplate::new(vec![&aml::Io::new(
@@ -221,6 +222,15 @@ impl PortIODeviceManager {
 mod tests {
     use super::*;
     use crate::vstate::vm::tests::setup_vm_with_memory;
+
+    #[test]
+    fn power_reservation_has_unique_id() {
+        let mut bytes = Vec::new();
+        PortIODeviceManager::append_aml_bytes(&mut bytes).unwrap();
+        let end = bytes.windows(4).position(|name| name == b"RTC0").unwrap();
+        let uid = b"\x08_UID\x0dPOWER\0";
+        assert!(bytes[..end].windows(uid.len()).any(|entry| entry == uid));
+    }
 
     #[test]
     fn test_register_legacy_devices() {
