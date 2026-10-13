@@ -11,7 +11,10 @@ use std::cmp;
 use std::fmt::{Debug, Formatter};
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{Arc, Barrier, Mutex, Weak};
+
+use event_manager::{EventOps, Events, MutEventSubscriber};
+use vmm_sys_util::epoll::EventSet;
 
 use kvm_ioctls::{IoEventAddress, NoDatamatch};
 use serde::{Deserialize, Serialize};
@@ -33,6 +36,7 @@ use crate::pci::configuration::{
     BAR0_REG_IDX, BarPrefetchable, Bars, NUM_BAR_REGS, PciCapability, PciConfiguration,
     PciConfigurationError, PciConfigurationState,
 };
+use crate::pci::intx::{PCI_INTX_GSI, PciIntxGroup};
 use crate::pci::msix::{MsixCap, MsixConfig, MsixConfigState};
 use crate::pci::{
     PciCapabilityId, PciClassCode, PciDevice, PciMassStorageSubclass, PciNetworkControllerSubclass,
@@ -247,6 +251,7 @@ const VIRTIO_PCI_DEVICE_ID_BASE: u16 = 0x1040; // Add to device type to get devi
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VirtioPciDeviceState {
+    pub interrupt_status: u32,
     pub legacy_interface: bool,
     pub io_bar_address: Option<u16>,
     pub sbdf: PciSBDF,
@@ -267,6 +272,8 @@ pub enum VirtioPciDeviceError {
     InvalidBarAddress(u64),
     /// Restored legacy I/O BAR does not match the device or the PCI platform.
     InvalidIoBar,
+    /// Restored PCI interrupt status is invalid: {0:#x}.
+    InvalidInterruptStatus(u32),
     /// Error creating MSI configuration: {0}
     Msi(#[from] InterruptError),
     /// Invalid PCI configuration state: {0}
@@ -286,6 +293,7 @@ pub struct VirtioPciDevice {
 
     // The subscriber ID returned by the EventManager
     pub sub_id: Option<event_manager::SubscriberId>,
+    pub interrupt_sub_id: Option<event_manager::SubscriberId>,
 
     // SBDF assigned to the device
     pub sbdf: PciSBDF,
@@ -337,6 +345,53 @@ impl Debug for VirtioPciDevice {
 }
 
 impl VirtioPciDevice {
+    pub(crate) fn attach_intx(
+        &mut self,
+        group: Arc<Mutex<PciIntxGroup>>,
+    ) -> Result<(), InterruptError> {
+        let interrupt = self.virtio_interrupt.as_ref().unwrap();
+        let slot = self.sbdf.device();
+        group
+            .lock()
+            .unwrap()
+            .bind(slot, interrupt.status.clone(), self.intx_masked())?;
+        *interrupt.intx.lock().unwrap() = Some((group, slot));
+        if (self.configuration.read_reg(15) >> 8) & 0xff == 0 {
+            self.configuration
+                .set_interrupt_line(u8::try_from(PCI_INTX_GSI).unwrap());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn detach_intx(&mut self) -> Result<(), InterruptError> {
+        if let Some((group, slot)) = self
+            .virtio_interrupt
+            .as_ref()
+            .unwrap()
+            .intx
+            .lock()
+            .unwrap()
+            .take()
+        {
+            group.lock().unwrap().unbind(slot)?;
+        }
+        Ok(())
+    }
+
+    fn intx_masked(&self) -> bool {
+        self.configuration.read_reg(COMMAND_REG) & (1 << 10) != 0
+            || self.msix_config.lock().unwrap().enabled
+    }
+
+    fn update_intx_mask(&self) {
+        let interrupt = self.virtio_interrupt.as_ref().unwrap();
+        if let Some((group, slot)) = &*interrupt.intx.lock().unwrap()
+            && let Err(err) = group.lock().unwrap().mask(*slot, self.intx_masked())
+        {
+            error!("Failed to update PCI INTx mask: {err}");
+        }
+    }
+
     fn legacy_device_id(
         mode: crate::pci::PciTransportMode,
         device_type: VirtioDeviceType,
@@ -480,7 +535,7 @@ impl VirtioPciDevice {
         device: Arc<Mutex<dyn VirtioDevice>>,
         msix_vectors: Arc<MsixVectorGroup>,
         sbdf: PciSBDF,
-    ) -> Self {
+    ) -> Result<Self, VirtioPciDeviceError> {
         let num_queues = device.lock().expect("Poisoned lock").queues().len();
         assert_eq!(msix_vectors.vectors.len(), num_queues + 1);
 
@@ -498,18 +553,25 @@ impl VirtioPciDevice {
             msix_config: VIRTQ_MSI_NO_VECTOR,
             msix_queues: vec![VIRTQ_MSI_NO_VECTOR; num_queues],
         });
-        let interrupt = Arc::new(VirtioInterruptMsix::new(
-            msix_config.clone(),
-            virtio_common_config.msix_config.clone(),
-            virtio_common_config.msix_queues.clone(),
-            msix_vectors,
-        ));
+        let interrupt = Arc::new(
+            VirtioInterruptMsix::new(
+                msix_config.clone(),
+                virtio_common_config.msix_config.clone(),
+                virtio_common_config.msix_queues.clone(),
+                msix_vectors,
+            )
+            .with_forwarding(
+                !vm.resource_allocator().pci_transport.is_modern(),
+                num_queues,
+            )?,
+        );
 
-        VirtioPciDevice {
+        Ok(VirtioPciDevice {
             legacy_interface: false,
             io_bar_address: legacy_id.map(|_| 0),
             id,
             sub_id: None,
+            interrupt_sub_id: None,
             sbdf,
             configuration: pci_config,
             common_config: virtio_common_config,
@@ -522,7 +584,7 @@ impl VirtioPciDevice {
             bars: Bars::default(),
             msix_config,
             msix_config_cap_offset: 0,
-        }
+        })
     }
 
     pub fn new_from_state(
@@ -620,18 +682,35 @@ impl VirtioPciDevice {
             )?,
         };
 
-        let interrupt = Arc::new(VirtioInterruptMsix::new(
-            msix_config.clone(),
-            virtio_common_config.msix_config.clone(),
-            virtio_common_config.msix_queues.clone(),
-            vectors,
-        ));
+        let interrupt = Arc::new(
+            VirtioInterruptMsix::new(
+                msix_config.clone(),
+                virtio_common_config.msix_config.clone(),
+                virtio_common_config.msix_queues.clone(),
+                vectors,
+            )
+            .with_forwarding(
+                !vm.resource_allocator().pci_transport.is_modern(),
+                expected_num_vectors - 1,
+            )?,
+        );
+        if state.interrupt_status & !3 != 0
+            || (vm.resource_allocator().pci_transport.is_modern() && state.interrupt_status != 0)
+        {
+            return Err(VirtioPciDeviceError::InvalidInterruptStatus(
+                state.interrupt_status,
+            ));
+        }
+        interrupt
+            .status
+            .store(state.interrupt_status, Ordering::Release);
 
         let virtio_pci_device = VirtioPciDevice {
             legacy_interface: state.legacy_interface,
             io_bar_address: state.io_bar_address,
             id,
             sub_id: None,
+            interrupt_sub_id: None,
             sbdf: state.sbdf,
             configuration: pci_config,
             common_config: virtio_common_config,
@@ -896,6 +975,7 @@ impl VirtioPciDevice {
             return false;
         }
         device.drain_queue_events();
+        self.virtio_interrupt.as_ref().unwrap().reset_interrupt();
         self.device_activated.store(false, Ordering::Release);
         self.common_config.driver_status = INIT;
         self.common_config.queue_select = 0;
@@ -1023,6 +1103,9 @@ impl VirtioPciDevice {
         }
         registers[14..16].copy_from_slice(&self.common_config.queue_select.to_le_bytes());
         registers[18] = self.common_config.driver_status;
+        if offset == 19 && data.len() == 1 {
+            registers[19] = self.virtio_interrupt.as_ref().unwrap().read_isr();
+        }
         registers[20..22].copy_from_slice(
             &self
                 .common_config
@@ -1256,12 +1339,18 @@ impl VirtioPciDevice {
         }
 
         let msix_config = Arc::new(Mutex::new(MsixConfig::new(msix_vectors.clone(), self.sbdf)));
-        let interrupt = Arc::new(VirtioInterruptMsix::new(
+        let mut interrupt = VirtioInterruptMsix::new(
             msix_config.clone(),
             self.common_config.msix_config.clone(),
             self.common_config.msix_queues.clone(),
             msix_vectors,
-        ));
+        );
+        let previous = self.virtio_interrupt.as_ref().unwrap();
+        previous.reset_interrupt();
+        interrupt.status = previous.status.clone();
+        interrupt.intx = previous.intx.clone();
+        interrupt.forward_events = previous.forward_events.clone();
+        let interrupt = Arc::new(interrupt);
 
         // Dropping the previous virtio_interrupt and msix_config releases the
         // last references to the old MsixVectorGroup, whose Drop unregisters
@@ -1283,10 +1372,17 @@ impl VirtioPciDevice {
         let msg_ctl = msg_ctl & !((1 << 15) | (1 << 14)); // clear Enable + Function Mask
         self.configuration
             .write_config_register(reg_idx, 2, &msg_ctl.to_le_bytes());
+        self.update_intx_mask();
     }
 
     pub fn state(&self) -> VirtioPciDeviceState {
         VirtioPciDeviceState {
+            interrupt_status: self
+                .virtio_interrupt
+                .as_ref()
+                .unwrap()
+                .status
+                .load(Ordering::Acquire),
             legacy_interface: self.legacy_interface,
             io_bar_address: self.io_bar_address,
             sbdf: self.sbdf,
@@ -1310,7 +1406,12 @@ impl VirtioPciDevice {
     }
 }
 
+type IntxBinding = Arc<Mutex<Option<(Arc<Mutex<PciIntxGroup>>, u8)>>>;
+
 pub struct VirtioInterruptMsix {
+    status: Arc<AtomicU32>,
+    intx: IntxBinding,
+    forward_events: Arc<Vec<EventFd>>,
     msix_config: Arc<Mutex<MsixConfig>>,
     config_vector: Arc<AtomicU16>,
     queues_vectors: Arc<Mutex<Vec<u16>>>,
@@ -1335,6 +1436,9 @@ impl VirtioInterruptMsix {
         vectors: Arc<MsixVectorGroup>,
     ) -> Self {
         VirtioInterruptMsix {
+            status: Arc::new(AtomicU32::new(0)),
+            intx: Arc::new(Mutex::new(None)),
+            forward_events: Arc::new(Vec::new()),
             msix_config,
             config_vector,
             queues_vectors,
@@ -1343,8 +1447,121 @@ impl VirtioInterruptMsix {
     }
 }
 
+impl VirtioInterruptMsix {
+    fn with_forwarding(mut self, enabled: bool, queues: usize) -> Result<Self, InterruptError> {
+        if enabled {
+            self.forward_events = Arc::new(
+                (0..queues)
+                    .map(|_| EventFd::new(libc::EFD_NONBLOCK))
+                    .collect::<Result<_, _>>()?,
+            );
+        }
+        Ok(self)
+    }
+
+    fn reset_interrupt(&self) {
+        let _ = self.read_isr();
+        for event in self.forward_events.iter() {
+            let _ = event.read();
+        }
+    }
+
+    fn read_isr(&self) -> u8 {
+        let status = if let Some((group, slot)) = &*self.intx.lock().unwrap() {
+            match group.lock().unwrap().clear(*slot) {
+                Ok(status) => status,
+                Err(err) => {
+                    error!("Failed to clear PCI ISR: {err}");
+                    0
+                }
+            }
+        } else {
+            self.status.swap(0, Ordering::AcqRel)
+        };
+        u8::try_from(status & 3).unwrap()
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct PciInterruptForwarder {
+    device: Weak<Mutex<VirtioPciDevice>>,
+    events: Arc<Vec<EventFd>>,
+}
+
+impl PciInterruptForwarder {
+    pub fn new(device: &Arc<Mutex<VirtioPciDevice>>) -> Option<Self> {
+        let events = device
+            .lock()
+            .unwrap()
+            .virtio_interrupt
+            .as_ref()
+            .unwrap()
+            .forward_events
+            .clone();
+        if events.is_empty() {
+            None
+        } else {
+            Some(Self {
+                device: Arc::downgrade(device),
+                events,
+            })
+        }
+    }
+}
+
+impl MutEventSubscriber for PciInterruptForwarder {
+    fn init(&mut self, ops: &mut EventOps) {
+        for (index, event) in self.events.iter().enumerate() {
+            if let Err(err) = ops.add(Events::with_data(
+                event,
+                u32::try_from(index).unwrap(),
+                EventSet::IN,
+            )) {
+                error!("Failed to register PCI interrupt forwarder: {err}");
+            }
+        }
+    }
+
+    fn process(&mut self, event: Events, _ops: &mut EventOps) {
+        let index = usize::try_from(event.data()).unwrap();
+        if !event.event_set().contains(EventSet::IN) {
+            return;
+        }
+        let Some(fd) = self.events.get(index) else {
+            return;
+        };
+        if fd.read().is_err() {
+            return;
+        }
+        if let Some(device) = self.device.upgrade() {
+            let interrupt = {
+                let device = device.lock().unwrap();
+                if !device.device_activated.load(Ordering::Acquire) {
+                    return;
+                }
+                device.virtio_interrupt.as_ref().unwrap().clone()
+            };
+            if let Err(err) =
+                interrupt.trigger(VirtioInterruptType::Queue(u16::try_from(index).unwrap()))
+            {
+                error!("Failed to forward PCI interrupt: {err}");
+            }
+        }
+    }
+}
+
 impl VirtioInterrupt for VirtioInterruptMsix {
     fn trigger(&self, int_type: VirtioInterruptType) -> Result<(), InterruptError> {
+        if !self.msix_config.lock().unwrap().enabled {
+            if let Some((group, slot)) = &*self.intx.lock().unwrap() {
+                let bits = match int_type {
+                    VirtioInterruptType::Config => 2,
+                    VirtioInterruptType::Queue(_) => 1,
+                };
+                return group.lock().unwrap().raise(*slot, bits);
+            }
+            return Ok(());
+        }
         let vector = match int_type {
             VirtioInterruptType::Config => self.config_vector.load(Ordering::Acquire),
             VirtioInterruptType::Queue(queue_index) => *self
@@ -1375,6 +1592,11 @@ impl VirtioInterrupt for VirtioInterruptMsix {
     }
 
     fn notifier(&self, int_type: VirtioInterruptType) -> Option<&EventFd> {
+        if let VirtioInterruptType::Queue(index) = int_type
+            && let Some(event) = self.forward_events.get(usize::from(index))
+        {
+            return Some(event);
+        }
         let vector = match int_type {
             VirtioInterruptType::Config => self.config_vector.load(Ordering::Acquire),
             VirtioInterruptType::Queue(queue_index) => *self
@@ -1388,7 +1610,7 @@ impl VirtioInterrupt for VirtioInterruptMsix {
     }
 
     fn status(&self) -> Arc<AtomicU32> {
-        Arc::new(AtomicU32::new(0))
+        self.status.clone()
     }
 
     #[cfg(test)]
@@ -1428,6 +1650,7 @@ impl PciDevice for VirtioPciDevice {
                 .write_msg_ctl_register(offset, data);
             self.configuration
                 .write_config_register(reg_idx, offset, data);
+            self.update_intx_mask();
             None
         } else if in_pci_cfg {
             let offset = (reg_idx * 4 + u16::from(offset) - self.cap_pci_cfg_info.offset) as usize;
@@ -1445,6 +1668,7 @@ impl PciDevice for VirtioPciDevice {
             if !mem_enabled_before && self.memory_space_enabled() {
                 self.maybe_relocate_bar();
             }
+            self.update_intx_mask();
             None
         }
     }
@@ -1469,7 +1693,19 @@ impl PciDevice for VirtioPciDevice {
             self.read_cap_pci_cfg(offset, &mut data);
             u32::from_le_bytes(data)
         } else {
-            self.configuration.read_reg(reg_idx)
+            let mut value = self.configuration.read_reg(reg_idx);
+            if reg_idx == COMMAND_REG
+                && self
+                    .virtio_interrupt
+                    .as_ref()
+                    .unwrap()
+                    .status
+                    .load(Ordering::Acquire)
+                    != 0
+            {
+                value |= 1 << 19;
+            }
+            value
         }
     }
 
@@ -1490,9 +1726,10 @@ impl PciDevice for VirtioPciDevice {
                 ..u64::from(ISR_CONFIG_BAR_OFFSET + ISR_CONFIG_SIZE))
                 .contains(&o) =>
             {
-                // We don't actually support legacy INT#x interrupts for VirtIO PCI devices
-                warn!("pci: read access to unsupported ISR status field");
                 data.fill(0);
+                if data.len() == 1 {
+                    data[0] = self.virtio_interrupt.as_ref().unwrap().read_isr();
+                }
             }
             o if (u64::from(DEVICE_CONFIG_BAR_OFFSET)
                 ..u64::from(DEVICE_CONFIG_BAR_OFFSET + DEVICE_CONFIG_SIZE))
@@ -1565,8 +1802,7 @@ impl PciDevice for VirtioPciDevice {
                 ..u64::from(ISR_CONFIG_BAR_OFFSET + ISR_CONFIG_SIZE))
                 .contains(&o) =>
             {
-                // We don't actually support legacy INT#x interrupts for VirtIO PCI devices
-                warn!("pci: access to unsupported ISR status field");
+                // ISR status is read-only.
             }
             o if (u64::from(DEVICE_CONFIG_BAR_OFFSET)
                 ..u64::from(DEVICE_CONFIG_BAR_OFFSET + DEVICE_CONFIG_SIZE))
@@ -1748,6 +1984,7 @@ mod tests {
         let device = get_virtio_device(&vmm);
         let mut device = device.lock().unwrap();
         assert_eq!(device.read_config_register(0), 0x1005_1af4);
+        assert_eq!((device.read_config_register(15) >> 8) & 0xff, 1);
         assert_eq!(device.read_config_register(2) & 0xff, 0);
         assert_eq!(device.read_config_register(11), 0x0004_1af4);
         assert_eq!(device.read_config_register(BAR0_REG_IDX) & 3, 1);
@@ -1816,6 +2053,125 @@ mod tests {
         command(false);
         vm.pio_bus.read(new_base + 12, &mut value).unwrap();
         assert_eq!(value, [0xff; 2]);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_intx_isr_masking_forwarding_and_reset() {
+        use crate::devices::virtio::transport::{VirtioInterrupt, VirtioInterruptType};
+        use event_manager::SubscriberOps;
+        let vmm = create_vmm_with_pci_mode(crate::pci::PciTransportMode::Transitional);
+        let device = get_virtio_device(&vmm);
+        let base = enable_legacy_ports(&device);
+        let irq = device
+            .lock()
+            .unwrap()
+            .virtio_interrupt
+            .as_ref()
+            .unwrap()
+            .clone();
+        for kind in [VirtioInterruptType::Queue(0), VirtioInterruptType::Config] {
+            irq.trigger(kind).unwrap();
+        }
+        assert_eq!(device.lock().unwrap().state().interrupt_status, 3);
+        assert_ne!(
+            device.lock().unwrap().read_config_register(COMMAND_REG) & (1 << 19),
+            0
+        );
+        device
+            .lock()
+            .unwrap()
+            .write_config_register(COMMAND_REG, 0, &0x401u16.to_le_bytes());
+        let mut isr = [0];
+        device.lock().unwrap().read_bar(base, 19, &mut isr);
+        assert_eq!(isr, [3]);
+        assert_eq!(irq.status().load(Ordering::Acquire), 0);
+        irq.trigger(VirtioInterruptType::Queue(0)).unwrap();
+        assert_eq!(device.lock().unwrap().state().interrupt_status, 1);
+        device
+            .lock()
+            .unwrap()
+            .read_bar(0, u64::from(ISR_CONFIG_BAR_OFFSET), &mut isr);
+        assert_eq!(isr, [1]);
+        device.lock().unwrap().read_bar(base, 19, &mut isr);
+        assert_eq!(isr, [0]);
+
+        device
+            .lock()
+            .unwrap()
+            .write_bar(base, 8, &0x10u32.to_le_bytes());
+        device
+            .lock()
+            .unwrap()
+            .write_bar(base, 16, &0u16.to_le_bytes());
+        let mut events = crate::EventManager::new().unwrap();
+        events.add_subscriber(Arc::new(Mutex::new(
+            super::PciInterruptForwarder::new(&device).unwrap(),
+        )));
+        irq.notifier(VirtioInterruptType::Queue(0))
+            .unwrap()
+            .write(1)
+            .unwrap();
+        assert_eq!(events.run_with_timeout(100).unwrap(), 1);
+        device.lock().unwrap().read_bar(base, 19, &mut isr);
+        assert_eq!(isr, [1]);
+        let msix_control = device.lock().unwrap().msix_config_cap_offset / 4;
+        device
+            .lock()
+            .unwrap()
+            .write_config_register(msix_control, 2, &0xc000u16.to_le_bytes());
+        device
+            .lock()
+            .unwrap()
+            .write_bar(base, 22, &0u16.to_le_bytes());
+        irq.notifier(VirtioInterruptType::Queue(0))
+            .unwrap()
+            .write(1)
+            .unwrap();
+        assert_eq!(events.run_with_timeout(100).unwrap(), 1);
+        let mut pba = [0; 8];
+        irq.msix_config.lock().unwrap().read_pba(0, &mut pba);
+        assert_eq!(u64::from_le_bytes(pba) & 1, 1);
+        assert_eq!(irq.status().load(Ordering::Acquire), 0);
+        irq.notifier(VirtioInterruptType::Queue(0))
+            .unwrap()
+            .write(1)
+            .unwrap();
+        device.lock().unwrap().write_bar(base, 18, &[0]);
+        events.run_with_timeout(0).unwrap();
+        assert_eq!(irq.status().load(Ordering::Acquire), 0);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_pending_intx_restores_and_clears() {
+        use crate::devices::virtio::transport::{VirtioInterrupt, VirtioInterruptType};
+        let vmm = create_vmm_with_pci_mode(crate::pci::PciTransportMode::Transitional);
+        let device = get_virtio_device(&vmm);
+        let device = device.lock().unwrap();
+        device
+            .virtio_interrupt
+            .as_ref()
+            .unwrap()
+            .trigger(VirtioInterruptType::Config)
+            .unwrap();
+        let state = bitcode::deserialize(&bitcode::serialize(&device.state()).unwrap()).unwrap();
+        let vm = crate::vstate::vm::tests::setup_vm_with_memory(1 << 20);
+        vm.setup_irqchip().unwrap();
+        vm.resource_allocator().pci_transport = crate::pci::PciTransportMode::Transitional;
+        let vm = Arc::new(vm);
+        let group = Arc::new(Mutex::new(
+            crate::pci::intx::PciIntxGroup::new(vm.clone()).unwrap(),
+        ));
+        let mut restored =
+            VirtioPciDevice::new_from_state("rng".into(), &vm, device.virtio_device(), state)
+                .unwrap();
+        restored.attach_intx(group).unwrap();
+        assert_eq!(restored.state().interrupt_status, 2);
+        let mut isr = [0];
+        restored.read_bar(restored.io_bar_address().unwrap(), 19, &mut isr);
+        assert_eq!(isr, [2]);
+        assert_eq!(restored.state().interrupt_status, 0);
     }
 
     #[cfg(target_arch = "x86_64")]

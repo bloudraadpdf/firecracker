@@ -9,6 +9,8 @@
 pub mod bus;
 /// PCI configuration space handling
 pub mod configuration;
+/// Shared PCI INTx interrupt delivery.
+pub mod intx;
 /// MSI-X logic
 pub mod msix;
 

@@ -372,6 +372,11 @@ impl PciConfiguration {
         }
     }
 
+    /// Advertise the interrupt line and read-only INTA pin.
+    pub fn set_interrupt_line(&mut self, line: u8) {
+        self.registers[15] = u32::from(line) | (1 << 8);
+    }
+
     /// Create a type 0 PCI configuration from snapshot state
     pub fn type0_from_state(state: PciConfigurationState) -> Result<Self, PciConfigurationError> {
         let reg_len = state.registers.len();

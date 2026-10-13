@@ -28,7 +28,8 @@ use crate::devices::virtio::rng::persist::{EntropyConstructorArgs, EntropyState}
 #[cfg(target_arch = "x86_64")]
 use crate::devices::virtio::transport::pci::device::LEGACY_IO_BAR_SIZE;
 use crate::devices::virtio::transport::pci::device::{
-    CAPABILITY_BAR_SIZE, VirtioPciDevice, VirtioPciDeviceError, VirtioPciDeviceState,
+    CAPABILITY_BAR_SIZE, PciInterruptForwarder, VirtioPciDevice, VirtioPciDeviceError,
+    VirtioPciDeviceState,
 };
 use crate::devices::virtio::vsock::persist::{
     VsockConstructorArgs, VsockState, VsockUdsConstructorArgs,
@@ -37,6 +38,7 @@ use crate::devices::virtio::vsock::{Vsock, VsockUnixBackend};
 use crate::logger::{debug, warn};
 use crate::pci::PciSBDF;
 use crate::pci::bus::PciRootError;
+use crate::pci::intx::PciIntxGroup;
 use crate::resources::VmResources;
 use crate::snapshot::Persist;
 use crate::vmm_config::memory_hotplug::MemoryHotplugConfig;
@@ -47,6 +49,8 @@ use crate::vstate::vm::KvmVm;
 
 #[derive(Debug)]
 pub struct PciDevices {
+    intx: Option<Arc<Mutex<PciIntxGroup>>>,
+    intx_sub_id: Option<event_manager::SubscriberId>,
     /// PCIe segment of the VMM. We currently support a single PCIe segment.
     pub pci_segment: PciSegment,
     /// All VirtIO PCI devices of the system
@@ -71,11 +75,24 @@ pub enum PciManagerError {
 
 impl PciDevices {
     pub fn new(vm: &Arc<KvmVm>) -> Result<Self, PciManagerError> {
-        // Currently we don't assign any IRQs to PCI devices. We will be using MSI-X interrupts
-        // only.
-        let pci_segment = PciSegment::new(0, vm, &[0u8; 32])?;
+        #[cfg(target_arch = "x86_64")]
+        let intx = if vm.resource_allocator().pci_transport.is_modern() {
+            None
+        } else {
+            Some(Arc::new(Mutex::new(PciIntxGroup::new(vm.clone())?)))
+        };
+        #[cfg(target_arch = "aarch64")]
+        let intx: Option<Arc<Mutex<PciIntxGroup>>> = None;
+        let irq = if intx.is_some() {
+            u8::try_from(crate::pci::intx::PCI_INTX_GSI).unwrap()
+        } else {
+            0
+        };
+        let pci_segment = PciSegment::new(0, vm, &[irq; 32])?;
 
         Ok(Self {
+            intx,
+            intx_sub_id: None,
             pci_segment,
             virtio_devices: HashMap::new(),
         })
@@ -90,6 +107,16 @@ impl PciDevices {
         virtio_device: Arc<Mutex<VirtioPciDevice>>,
         event_manager: &mut EventManager,
     ) -> Result<(), PciManagerError> {
+        if let Some(group) = &self.intx {
+            if self.intx_sub_id.is_none() {
+                self.intx_sub_id = Some(event_manager.add_subscriber(group.clone()));
+            }
+            virtio_device.lock().unwrap().attach_intx(group.clone())?;
+            if let Some(forwarder) = PciInterruptForwarder::new(&virtio_device) {
+                let id = event_manager.add_subscriber(Arc::new(Mutex::new(forwarder)));
+                virtio_device.lock().unwrap().interrupt_sub_id = Some(id);
+            }
+        }
         let (bar_address, io_bar_address) = {
             let mut device = virtio_device.lock().unwrap();
 
@@ -147,7 +174,7 @@ impl PciDevices {
 
         // Create the transport
         let mut virtio_device =
-            VirtioPciDevice::new(id.clone(), vm, device, Arc::new(msix_vectors), sbdf);
+            VirtioPciDevice::new(id.clone(), vm, device, Arc::new(msix_vectors), sbdf)?;
 
         // Don't hold the resource allocator lock across attach_common()
         // below: a device access holds the bus lock and can take the allocator
@@ -232,6 +259,14 @@ impl PciDevices {
             .lock()
             .expect("Poisoned lock")
             .free_bars(&mut vm.resource_allocator());
+
+        {
+            let mut device = pci_device_arc.lock().unwrap();
+            device.detach_intx()?;
+            if let Some(id) = device.interrupt_sub_id.take() {
+                let _ = event_manager.remove_subscriber(id);
+            }
+        }
 
         // Ensure no other references to the device remain, so it is freed when
         // this function returns.
