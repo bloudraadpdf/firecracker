@@ -5,12 +5,13 @@ use std::mem::size_of;
 
 use acpi_tables::fadt::IAPC_BOOT_ARG_FLAGS_VGA_NOT_PRESENT;
 use acpi_tables::madt::{IoAPIC, LocalAPIC};
-use acpi_tables::{Fadt, aml};
+use acpi_tables::{Aml, Fadt, GenericAddressStructure, aml};
 use vm_memory::GuestAddress;
 use zerocopy::IntoBytes;
 
 use crate::arch::x86_64::layout;
 use crate::device_manager::legacy::PortIODeviceManager;
+use crate::devices::legacy::acpi::POWER_PORT;
 
 #[inline(always)]
 pub(crate) fn setup_interrupt_controllers(nr_vcpus: u8) -> Vec<u8> {
@@ -31,10 +32,19 @@ pub(crate) fn setup_arch_fadt(fadt: &mut Fadt) {
     // More info here:
     // https://uefi.org/specs/ACPI/6.5/05_ACPI_Software_Programming_Model.html?highlight=0a06#ia-pc-boot-architecture-flags
     fadt.setup_iapc_flags(1 << IAPC_BOOT_ARG_FLAGS_VGA_NOT_PRESENT);
+    let control = GenericAddressStructure::new(1, 8, 0, 1, POWER_PORT);
+    let status = GenericAddressStructure::new(1, 8, 0, 1, POWER_PORT + 1);
+    fadt.set_reset(control, 1);
+    fadt.set_sleep_registers(control, status);
 }
 
 #[inline(always)]
 pub(crate) fn setup_arch_dsdt(dsdt_data: &mut Vec<u8>) -> Result<(), aml::AmlError> {
+    aml::Name::new(
+        "_S5_".try_into()?,
+        &aml::Package::new(vec![&5u8, &0u8, &0u8, &0u8]),
+    )?
+    .append_aml_bytes(dsdt_data)?;
     PortIODeviceManager::append_aml_bytes(dsdt_data)
 }
 

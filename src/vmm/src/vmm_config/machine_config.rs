@@ -113,6 +113,10 @@ pub struct MachineConfig {
     /// Enables or disabled SMT.
     #[serde(default)]
     pub smt: bool,
+    /// Expose Hyper-V enlightenments for Windows guests (x86_64 only).
+    #[cfg(target_arch = "x86_64")]
+    #[serde(default)]
+    pub hyperv: bool,
     /// A CPU template that it is used to filter the CPU features exposed to the guest.
     // FIXME: once support for static CPU templates is removed, this field can be dropped altogether
     #[serde(
@@ -167,6 +171,8 @@ impl Default for MachineConfig {
             vcpu_count: 1,
             mem_size_mib: DEFAULT_MEM_SIZE_MIB,
             smt: false,
+            #[cfg(target_arch = "x86_64")]
+            hyperv: false,
             cpu_template: None,
             track_dirty_pages: false,
             huge_pages: HugePageConfig::None,
@@ -194,6 +200,10 @@ pub struct MachineConfigUpdate {
     /// Enables or disabled SMT.
     #[serde(default)]
     pub smt: Option<bool>,
+    /// Enable or disable Hyper-V enlightenments (x86_64 only).
+    #[cfg(target_arch = "x86_64")]
+    #[serde(default)]
+    pub hyperv: Option<bool>,
     /// A CPU template that it is used to filter the CPU features exposed to the guest.
     #[serde(default)]
     pub cpu_template: Option<StaticCpuTemplate>,
@@ -224,6 +234,8 @@ impl From<MachineConfig> for MachineConfigUpdate {
             vcpu_count: Some(cfg.vcpu_count),
             mem_size_mib: Some(cfg.mem_size_mib),
             smt: Some(cfg.smt),
+            #[cfg(target_arch = "x86_64")]
+            hyperv: Some(cfg.hyperv),
             cpu_template: cfg.static_template(),
             track_dirty_pages: Some(cfg.track_dirty_pages),
             huge_pages: Some(cfg.huge_pages),
@@ -291,6 +303,8 @@ impl MachineConfig {
             vcpu_count,
             mem_size_mib,
             smt,
+            #[cfg(target_arch = "x86_64")]
+            hyperv: update.hyperv.unwrap_or(self.hyperv),
             cpu_template,
             track_dirty_pages: update.track_dirty_pages.unwrap_or(self.track_dirty_pages),
             huge_pages: page_config,
@@ -304,6 +318,35 @@ impl MachineConfig {
 mod tests {
     use crate::cpu_config::templates::{CpuTemplateType, CustomCpuTemplate, StaticCpuTemplate};
     use crate::vmm_config::machine_config::MachineConfig;
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn hyperv_put_and_patch() {
+        use super::MachineConfigUpdate;
+
+        let put: MachineConfig =
+            serde_json::from_str(r#"{"vcpu_count":2,"mem_size_mib":2048}"#).unwrap();
+        assert!(!put.hyperv);
+        let enable: MachineConfigUpdate = serde_json::from_str(r#"{"hyperv":true}"#).unwrap();
+        assert!(!enable.is_empty());
+        let enabled = put.update(&enable).unwrap();
+        assert!(enabled.hyperv);
+        assert!(
+            enabled
+                .update(&MachineConfigUpdate::default())
+                .unwrap()
+                .hyperv
+        );
+        let disable: MachineConfigUpdate = serde_json::from_str(r#"{"hyperv":false}"#).unwrap();
+        assert!(!enabled.update(&disable).unwrap().hyperv);
+        assert!(!enabled.update(&put.into()).unwrap().hyperv);
+        let encoded = serde_json::to_string(&enabled).unwrap();
+        assert!(
+            serde_json::from_str::<MachineConfig>(&encoded)
+                .unwrap()
+                .hyperv
+        );
+    }
 
     // Ensure the special (de)serialization logic for the cpu_template field works:
     // only static cpu templates can be specified via the machine-config endpoint, but

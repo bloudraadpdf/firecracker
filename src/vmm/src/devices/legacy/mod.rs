@@ -6,6 +6,10 @@
 // found in the THIRD-PARTY file.
 
 //! Implements legacy devices (UART, RTC etc).
+#[cfg(target_arch = "x86_64")]
+pub mod acpi;
+#[cfg(target_arch = "x86_64")]
+pub mod cmos;
 mod i8042;
 #[cfg(target_arch = "aarch64")]
 pub mod rtc_pl031;
