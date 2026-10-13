@@ -174,7 +174,7 @@ impl PendingRequest {
                 }
             }
             (Ok(transferred_data_len), RequestType::GetDeviceID) => {
-                Status::from_data(self.data_len, transferred_data_len, true)
+                Status::from_data(VIRTIO_BLK_ID_BYTES, transferred_data_len, true)
             }
             (_, RequestType::Unsupported(op)) => Status::Unsupported { op },
             (Err(err), _) => Status::IoErr {
@@ -238,6 +238,7 @@ pub struct Request {
     pub status_addr: GuestAddress,
     sector: u64,
     data_addr: GuestAddress,
+    data_segments: Vec<(GuestAddress, u32)>,
 }
 
 impl Request {
@@ -256,28 +257,18 @@ impl Request {
             r#type: RequestType::from(request_header.request_type),
             sector: request_header.sector,
             data_addr: GuestAddress(0),
+            data_segments: Vec::new(),
             data_len: 0,
             status_addr: GuestAddress(0),
         };
 
-        let data_desc;
-        let status_desc;
-        let desc = avail_desc
+        let mut desc = avail_desc
             .next_descriptor()
             .ok_or(VirtioBlockError::DescriptorChainTooShort)?;
 
-        if !desc.has_next() {
-            status_desc = desc;
-            // Only flush requests are allowed to skip the data descriptor.
-            if req.r#type != RequestType::Flush {
-                return Err(VirtioBlockError::DescriptorChainTooShort);
-            }
-        } else {
-            data_desc = desc;
-            status_desc = data_desc
-                .next_descriptor()
-                .ok_or(VirtioBlockError::DescriptorChainTooShort)?;
-
+        let mut has_data = false;
+        while desc.flags & crate::devices::virtio::queue::VIRTQ_DESC_F_NEXT != 0 {
+            let data_desc = desc;
             if data_desc.is_write_only() && req.r#type == RequestType::Out {
                 return Err(VirtioBlockError::UnexpectedWriteOnlyDescriptor);
             }
@@ -288,8 +279,27 @@ impl Request {
                 return Err(VirtioBlockError::UnexpectedReadOnlyDescriptor);
             }
 
-            req.data_addr = data_desc.addr;
-            req.data_len = data_desc.len;
+            if has_data {
+                if req.data_segments.is_empty() {
+                    req.data_segments.push((req.data_addr, req.data_len));
+                }
+                req.data_segments.push((data_desc.addr, data_desc.len));
+            } else {
+                req.data_addr = data_desc.addr;
+                has_data = true;
+            }
+            req.data_len = req
+                .data_len
+                .checked_add(data_desc.len)
+                .filter(|length| *length < u32::MAX)
+                .ok_or(VirtioBlockError::InvalidDataLength)?;
+            desc = data_desc
+                .next_descriptor()
+                .ok_or(VirtioBlockError::DescriptorChainTooShort)?;
+        }
+        let status_desc = desc;
+        if !has_data && req.r#type != RequestType::Flush {
+            return Err(VirtioBlockError::DescriptorChainTooShort);
         }
 
         // check request validity
@@ -369,6 +379,43 @@ impl Request {
         block_metrics: &BlockDeviceMetrics,
     ) -> ProcessingResult {
         let pending = self.to_pending_request(desc_idx);
+        if !self.data_segments.is_empty() {
+            match self.r#type {
+                RequestType::In | RequestType::Out => {
+                    let result = disk.file_engine.transfer_vectored(
+                        self.r#type == RequestType::Out,
+                        self.offset(),
+                        mem,
+                        &self.data_segments,
+                        pending,
+                    );
+                    return Self::finish_submission(result, mem, block_metrics);
+                }
+                RequestType::GetDeviceID => {
+                    let mut remaining = disk.image_id.as_slice();
+                    for (addr, len) in &self.data_segments {
+                        let count = remaining.len().min(*len as usize);
+                        if let Err(err) = mem.write_slice(&remaining[..count], *addr) {
+                            return ProcessingResult::Executed(pending.finish(
+                                mem,
+                                Err(IoErr::GetId(err)),
+                                block_metrics,
+                            ));
+                        }
+                        remaining = &remaining[count..];
+                        if remaining.is_empty() {
+                            break;
+                        }
+                    }
+                    return ProcessingResult::Executed(pending.finish(
+                        mem,
+                        Ok(VIRTIO_BLK_ID_BYTES),
+                        block_metrics,
+                    ));
+                }
+                _ => (),
+            }
+        }
         let res = match self.r#type {
             RequestType::In => {
                 let _metric = block_metrics.read_agg.record_latency_metrics();
@@ -393,6 +440,14 @@ impl Request {
             }
         };
 
+        Self::finish_submission(res, mem, block_metrics)
+    }
+
+    fn finish_submission(
+        res: Result<block_io::FileEngineOk, block_io::RequestError<block_io::BlockIoError>>,
+        mem: &GuestMemoryMmap,
+        block_metrics: &BlockDeviceMetrics,
+    ) -> ProcessingResult {
         match res {
             Ok(block_io::FileEngineOk::Submitted) => ProcessingResult::Submitted,
             Ok(block_io::FileEngineOk::Executed(res)) => {
@@ -509,6 +564,21 @@ mod tests {
 
             assert_eq!(request.status_addr.raw_value(), self.status_desc.addr.get());
         }
+    }
+
+    #[test]
+    fn multiple_data_descriptors_use_final_status_byte() {
+        let mem = default_mem();
+        let queue = VirtQueue::new(GuestAddress(0), &mem, 16);
+        let chain = RequestDescriptorChain::new(&queue);
+        chain.set_header(RequestHeader::new(VIRTIO_BLK_T_IN, 0));
+        queue.dtable[1].set(0x2000, 512, VIRTQ_DESC_F_NEXT | VIRTQ_DESC_F_WRITE, 2);
+        queue.dtable[2].set(0x3000, 512, VIRTQ_DESC_F_NEXT | VIRTQ_DESC_F_WRITE, 3);
+        queue.dtable[3].set(0x4000, 1, VIRTQ_DESC_F_WRITE, 0);
+        let mut q = queue.create_queue();
+        let request = Request::parse(&q.pop().unwrap().unwrap(), &mem, NUM_DISK_SECTORS).unwrap();
+        assert_eq!(request.status_addr, GuestAddress(0x4000));
+        assert_eq!(request.data_len, 1024);
     }
 
     #[test]
@@ -834,6 +904,7 @@ mod tests {
             status_addr,
             sector: sector & (NUM_DISK_SECTORS - sectors_len),
             data_addr,
+            data_segments: Vec::new(),
         };
         let mut request_header = RequestHeader::new(virtio_request_id, request.sector);
 
