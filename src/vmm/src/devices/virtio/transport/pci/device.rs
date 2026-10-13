@@ -250,6 +250,8 @@ pub struct VirtioPciDeviceState {
 
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum VirtioPciDeviceError {
+    /// Restored BAR address {0:#x} is outside the selected PCI aperture or misaligned.
+    InvalidBarAddress(u64),
     /// Error creating MSI configuration: {0}
     Msi(#[from] InterruptError),
     /// Invalid PCI configuration state: {0}
@@ -351,10 +353,10 @@ impl VirtioPciDevice {
     /// This must happen only during the creation of a brand new VM. When a VM is restored from a
     /// known state, the BARs are already created with the right content, therefore we don't need
     /// to go through this codepath.
-    pub fn allocate_bars(&mut self, mmio64_allocator: &mut AddressAllocator) {
+    pub fn allocate_bars(&mut self, pci_allocator: &mut AddressAllocator) {
         // Allocate the virtio-pci capability BAR.
         // See http://docs.oasis-open.org/virtio/virtio/v1.0/cs04/virtio-v1.0-cs04.html#x1-740004
-        self.bar_address = mmio64_allocator
+        self.bar_address = pci_allocator
             .allocate(
                 CAPABILITY_BAR_SIZE,
                 CAPABILITY_BAR_SIZE,
@@ -372,14 +374,14 @@ impl VirtioPciDevice {
     }
 
     /// Free the PCI BAR of the VirtIO device.
-    pub fn free_bars(&mut self, mmio64_allocator: &mut AddressAllocator) {
+    pub fn free_bars(&mut self, pci_allocator: &mut AddressAllocator) {
         let bar_end = self
             .bar_address
             .checked_add(CAPABILITY_BAR_SIZE - 1)
             .expect("virtio-pci BAR end address overflows");
         let range =
             RangeInclusive::new(self.bar_address, bar_end).expect("Invalid virtio-pci BAR range");
-        mmio64_allocator
+        pci_allocator
             .free(&range)
             .expect("virtio-pci BAR is not allocated");
         self.bar_address = 0;
@@ -440,6 +442,19 @@ impl VirtioPciDevice {
         device: Arc<Mutex<dyn VirtioDevice>>,
         state: VirtioPciDeviceState,
     ) -> Result<Self, VirtioPciDeviceError> {
+        {
+            let mut allocator = vm.resource_allocator();
+            let window = allocator.pci_memory();
+            if !state.bar_address.is_multiple_of(CAPABILITY_BAR_SIZE)
+                || state.bar_address < window.base()
+                || state
+                    .bar_address
+                    .checked_add(CAPABILITY_BAR_SIZE - 1)
+                    .is_none_or(|end| end > window.end())
+            {
+                return Err(VirtioPciDeviceError::InvalidBarAddress(state.bar_address));
+            }
+        }
         let msix_config = MsixConfig::from_state(state.msix_state, vm.clone(), state.sbdf)?;
         let vectors = msix_config.vectors.clone();
 
@@ -720,7 +735,7 @@ impl VirtioPciDevice {
         }
 
         // Try to allocate the new range from the resource allocator.
-        let new_range = match self.vm.resource_allocator().mmio64_memory.allocate(
+        let new_range = match self.vm.resource_allocator().pci_memory().allocate(
             CAPABILITY_BAR_SIZE,
             CAPABILITY_BAR_SIZE,
             AllocPolicy::ExactMatch(new_base),
@@ -738,7 +753,7 @@ impl VirtioPciDevice {
             error!("Failed to add notification ioeventfds at {new_base:#x}: {err:?}");
             // set_notification_ioevents() might leave some ioeventfds
             // registered in case of failure. Do not return the possibly
-            // "poisoned" address range to the mmio64_allocator.
+            // "poisoned" address range to the pci_allocator.
             return;
         }
 
@@ -753,7 +768,7 @@ impl VirtioPciDevice {
                 error!("Failed to remove notification ioeventfds at {new_base:#x}: {err:?}");
                 // As above, only release the old range if it has no ioeventfds left.
             } else {
-                let _ = self.vm.resource_allocator().mmio64_memory.free(&new_range);
+                let _ = self.vm.resource_allocator().pci_memory().free(&new_range);
             }
             return;
         }
@@ -769,7 +784,7 @@ impl VirtioPciDevice {
                 .checked_add(CAPABILITY_BAR_SIZE - 1)
                 .expect("BAR end address overflows");
             let old_range = RangeInclusive::new(old_base, old_end).expect("Invalid BAR range");
-            let _ = self.vm.resource_allocator().mmio64_memory.free(&old_range);
+            let _ = self.vm.resource_allocator().pci_memory().free(&old_range);
         }
 
         self.bar_address = new_base;
@@ -1245,7 +1260,6 @@ mod tests {
     use super::{EventFd, IoEventAddress, KvmVm, NoDatamatch, PciCapabilityType, VirtioPciDevice};
     use crate::Vmm;
     use crate::arch::{MEM_64BIT_DEVICES_SIZE, MEM_64BIT_DEVICES_START};
-    use crate::builder::tests::default_vmm_with_pci;
     use crate::device_manager::tests::pci_devices;
     use crate::devices::virtio::device::VirtioDeviceType;
     use crate::devices::virtio::generated::virtio_config::VIRTIO_F_VERSION_1;
@@ -1266,7 +1280,11 @@ mod tests {
     use crate::rate_limiter::RateLimiter;
 
     fn create_vmm_with_virtio_pci_device() -> Vmm {
-        let mut vmm = default_vmm_with_pci();
+        create_vmm_with_pci_mode(crate::pci::PciTransportMode::Modern)
+    }
+
+    fn create_vmm_with_pci_mode(mode: crate::pci::PciTransportMode) -> Vmm {
+        let mut vmm = crate::builder::tests::default_vmm_with_pci_mode(mode);
         let entropy = Arc::new(Mutex::new(Entropy::new(RateLimiter::default()).unwrap()));
         let mut event_manager = crate::EventManager::new().unwrap();
         vmm.device_manager
@@ -1463,7 +1481,7 @@ mod tests {
     }
 
     fn allocate_bar_range(vmm: &Vmm, base: u64) -> Result<RangeInclusive, vm_allocator::Error> {
-        kvm_vm(vmm).resource_allocator().mmio64_memory.allocate(
+        kvm_vm(vmm).resource_allocator().pci_memory().allocate(
             CAPABILITY_BAR_SIZE,
             CAPABILITY_BAR_SIZE,
             AllocPolicy::ExactMatch(base),
@@ -1484,9 +1502,15 @@ mod tests {
 
     #[test]
     fn test_bar_relocation() {
-        let vmm = create_vmm_with_virtio_pci_device();
+        bar_relocation(crate::pci::PciTransportMode::Modern);
+        #[cfg(target_arch = "x86_64")]
+        bar_relocation(crate::pci::PciTransportMode::Transitional);
+    }
+
+    fn bar_relocation(mode: crate::pci::PciTransportMode) {
+        let vmm = create_vmm_with_pci_mode(mode);
         let device = get_virtio_device(&vmm);
-        let old_base = MEM_64BIT_DEVICES_START;
+        let old_base = device.lock().unwrap().bar_address();
         let new_base = old_base + CAPABILITY_BAR_SIZE;
 
         {
@@ -1524,6 +1548,27 @@ mod tests {
         // registration at the new notify address and accepts one at the old.
         register_probe_ioevent(&vmm, new_base).unwrap_err();
         register_probe_ioevent(&vmm, old_base).unwrap();
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_transitional_bar_stays_in_low_aperture() {
+        let vmm = create_vmm_with_pci_mode(crate::pci::PciTransportMode::Transitional);
+        let device = get_virtio_device(&vmm);
+        let mut device = device.lock().unwrap();
+        let base = device.bar_address();
+        assert!(base + CAPABILITY_BAR_SIZE <= 1 << 32);
+        write_bar_base(&mut device, MEM_64BIT_DEVICES_START);
+        set_memory_space_enable(&mut device, true);
+        assert_eq!(device.bar_address(), base);
+        for invalid in [MEM_64BIT_DEVICES_START, base + 1, u64::MAX] {
+            let mut state = device.state();
+            state.bar_address = invalid;
+            assert!(matches!(
+                VirtioPciDevice::new_from_state("bad".into(), kvm_vm(&vmm), device.virtio_device(), state),
+                Err(super::VirtioPciDeviceError::InvalidBarAddress(addr)) if addr == invalid
+            ));
+        }
     }
 
     #[test]

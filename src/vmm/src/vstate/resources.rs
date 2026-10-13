@@ -7,6 +7,7 @@ use vm_allocator::AddressAllocator;
 pub use vm_allocator::AllocPolicy;
 
 use crate::arch;
+use crate::pci::PciTransportMode;
 use crate::snapshot::Persist;
 
 /// Helper function to allocate many ids from an id allocator
@@ -41,6 +42,8 @@ fn allocate_many_ids(
 /// * Memory allocations in the MMIO address space
 #[derive(Debug, Clone)]
 pub struct ResourceAllocator {
+    /// PCI platform and BAR allocation window.
+    pub pci_transport: PciTransportMode,
     /// Allocator for legacy device interrupt lines
     pub gsi_legacy_allocator: IdAllocator,
     /// Allocator for PCI device GSIs
@@ -80,6 +83,7 @@ impl ResourceAllocator {
         // It is fine for us to unwrap the following since we know we are passing valid ranges for
         // all allocators
         Self {
+            pci_transport: PciTransportMode::default(),
             gsi_legacy_allocator: legacy_gsi_allocator(),
             gsi_msi_allocator: IdAllocator::new(arch::GSI_MSI_START, arch::GSI_MSI_END).unwrap(),
             mmio32_memory: AddressAllocator::new(
@@ -99,6 +103,15 @@ impl ResourceAllocator {
             .unwrap(),
             system_memory: AddressAllocator::new(arch::SYSTEM_MEM_START, arch::SYSTEM_MEM_SIZE)
                 .unwrap(),
+        }
+    }
+
+    /// Memory window used for PCI capability BARs, including relocation.
+    pub fn pci_memory(&mut self) -> &mut AddressAllocator {
+        match self.pci_transport {
+            PciTransportMode::Modern => &mut self.mmio64_memory,
+            #[cfg(target_arch = "x86_64")]
+            PciTransportMode::Transitional => &mut self.mmio32_memory,
         }
     }
 
@@ -127,6 +140,8 @@ impl ResourceAllocator {
 /// snapshots cannot provide allocator state that disagrees with the devices.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResourceAllocatorState {
+    /// PCI platform and BAR allocation window.
+    pub pci_transport: PciTransportMode,
     /// Allocator for memory in the 32-bit MMIO address space
     pub mmio32_memory: AddressAllocator,
     /// Allocator for memory in the 64-bit MMIO address space
@@ -150,6 +165,7 @@ impl<'a> Persist<'a> for ResourceAllocator {
 
     fn save(&self) -> Self::State {
         ResourceAllocatorState {
+            pci_transport: self.pci_transport,
             mmio32_memory: self.mmio32_memory.clone(),
             mmio64_memory: self.mmio64_memory.clone(),
             past_mmio64_memory: self.past_mmio64_memory.clone(),
@@ -162,6 +178,7 @@ impl<'a> Persist<'a> for ResourceAllocator {
         state: &Self::State,
     ) -> Result<Self, Self::Error> {
         Ok(ResourceAllocator {
+            pci_transport: state.pci_transport,
             gsi_legacy_allocator: legacy_gsi_allocator(),
             gsi_msi_allocator: IdAllocator::new(arch::GSI_MSI_START, arch::GSI_MSI_END)?,
             mmio32_memory: state.mmio32_memory.clone(),
@@ -279,6 +296,32 @@ mod tests {
         use super::super::{AllocPolicy, ResourceAllocator};
         use crate::arch::{self, GSI_LEGACY_NUM, GSI_MSI_NUM};
         use crate::snapshot::Persist;
+
+        #[cfg(target_arch = "x86_64")]
+        #[test]
+        fn transitional_pci_allocation_survives_restore() {
+            use crate::pci::PciTransportMode;
+            let mut allocator = ResourceAllocator::new();
+            allocator.pci_transport = PciTransportMode::Transitional;
+            let range = allocator
+                .pci_memory()
+                .allocate(0x80000, 0x80000, AllocPolicy::FirstMatch)
+                .unwrap();
+            assert!(range.end() < 1 << 32);
+            let bytes = bitcode::serialize(&allocator.save()).unwrap();
+            let mut restored =
+                ResourceAllocator::restore((), &bitcode::deserialize(&bytes).unwrap()).unwrap();
+            assert_eq!(restored.pci_transport, PciTransportMode::Transitional);
+            restored
+                .pci_memory()
+                .allocate(0x80000, 0x80000, AllocPolicy::ExactMatch(range.start()))
+                .unwrap_err();
+            restored.pci_memory().free(&range).unwrap();
+            restored
+                .pci_memory()
+                .allocate(0x80000, 0x80000, AllocPolicy::ExactMatch(range.start()))
+                .unwrap();
+        }
 
         #[test]
         fn test_allocate_irq() {

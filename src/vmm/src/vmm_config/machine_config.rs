@@ -4,6 +4,8 @@ use std::fmt::Debug;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::pci::PciTransportMode;
+
 use crate::cpu_config::templates::{CpuTemplateType, CustomCpuTemplate, StaticCpuTemplate};
 
 /// The default memory size of the VM, in MiB.
@@ -106,6 +108,9 @@ impl From<HugePageConfig> for Option<memfd::HugetlbSize> {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MachineConfig {
+    /// Virtio PCI platform; non-default modes require PCI to be enabled.
+    #[serde(default, skip_serializing_if = "PciTransportMode::is_modern")]
+    pub pci_transport: PciTransportMode,
     /// Number of vcpu to start.
     pub vcpu_count: u8,
     /// The memory size in MiB.
@@ -168,6 +173,7 @@ where
 impl Default for MachineConfig {
     fn default() -> Self {
         Self {
+            pci_transport: PciTransportMode::default(),
             vcpu_count: 1,
             mem_size_mib: DEFAULT_MEM_SIZE_MIB,
             smt: false,
@@ -191,6 +197,9 @@ impl Default for MachineConfig {
 #[derive(Clone, Default, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MachineConfigUpdate {
+    /// Update the virtio PCI platform.
+    #[serde(default)]
+    pub pci_transport: Option<PciTransportMode>,
     /// Number of vcpu to start.
     #[serde(default)]
     pub vcpu_count: Option<u8>,
@@ -231,6 +240,7 @@ impl MachineConfigUpdate {
 impl From<MachineConfig> for MachineConfigUpdate {
     fn from(cfg: MachineConfig) -> Self {
         MachineConfigUpdate {
+            pci_transport: Some(cfg.pci_transport),
             vcpu_count: Some(cfg.vcpu_count),
             mem_size_mib: Some(cfg.mem_size_mib),
             smt: Some(cfg.smt),
@@ -300,6 +310,7 @@ impl MachineConfig {
         };
 
         Ok(MachineConfig {
+            pci_transport: update.pci_transport.unwrap_or(self.pci_transport),
             vcpu_count,
             mem_size_mib,
             smt,
@@ -318,6 +329,56 @@ impl MachineConfig {
 mod tests {
     use crate::cpu_config::templates::{CpuTemplateType, CustomCpuTemplate, StaticCpuTemplate};
     use crate::vmm_config::machine_config::MachineConfig;
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn transitional_pci_configuration_is_accepted() {
+        let config: MachineConfig = serde_json::from_str(
+            r#"{"vcpu_count":1,"mem_size_mib":512,"pci_transport":"transitional"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(config).unwrap()["pci_transport"],
+            "transitional"
+        );
+    }
+
+    #[test]
+    fn pci_mode_defaults_and_patch_validation() {
+        use super::{MachineConfigUpdate, PciTransportMode};
+        let config = MachineConfig::default();
+        assert!(config.pci_transport.is_modern());
+        assert!(
+            serde_json::to_value(&config)
+                .unwrap()
+                .get("pci_transport")
+                .is_none()
+        );
+        serde_json::from_str::<MachineConfigUpdate>(r#"{"pci_transport":"unknown"}"#).unwrap_err();
+        let transitional =
+            serde_json::from_str::<MachineConfigUpdate>(r#"{"pci_transport":"transitional"}"#);
+        #[cfg(target_arch = "aarch64")]
+        transitional.unwrap_err();
+        #[cfg(target_arch = "x86_64")]
+        {
+            let update = transitional.unwrap();
+            assert!(!update.is_empty());
+            let changed = config.update(&update).unwrap();
+            assert_eq!(changed.pci_transport, PciTransportMode::Transitional);
+            assert_eq!(
+                changed.update(&MachineConfigUpdate::default()).unwrap(),
+                changed
+            );
+        }
+        let update = MachineConfigUpdate {
+            pci_transport: Some(PciTransportMode::Modern),
+            ..Default::default()
+        };
+        assert_eq!(
+            config.update(&update).unwrap().pci_transport,
+            PciTransportMode::Modern
+        );
+    }
 
     #[cfg(target_arch = "x86_64")]
     #[test]
