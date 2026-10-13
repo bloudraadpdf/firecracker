@@ -39,7 +39,10 @@ pub(crate) fn setup_arch_fadt(fadt: &mut Fadt) {
 }
 
 #[inline(always)]
-pub(crate) fn setup_arch_dsdt(dsdt_data: &mut Vec<u8>) -> Result<(), aml::AmlError> {
+pub(crate) fn setup_arch_dsdt(
+    dsdt_data: &mut Vec<u8>,
+    _: &crate::device_manager::DeviceManager,
+) -> Result<(), aml::AmlError> {
     aml::Name::new(
         "_S5_".try_into()?,
         &aml::Package::new(vec![&5u8, &0u8, &0u8, &0u8]),

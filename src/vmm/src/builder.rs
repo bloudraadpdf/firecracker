@@ -212,7 +212,11 @@ pub fn build_microvm_for_boot(
 
     let guest_memory = kvm_vm.guest_memory();
     let entry_point = load_kernel(&boot_config.kernel_file, guest_memory)?;
-    let initrd = InitrdConfig::from_config(boot_config, guest_memory)?;
+    #[cfg(target_arch = "aarch64")]
+    if entry_point.protocol == crate::arch::BootProtocol::FirmwareBoot {
+        crate::arch::aarch64::reserve_firmware_memory(&kvm_vm)?;
+    }
+    let initrd = InitrdConfig::from_config(boot_config, guest_memory, entry_point.protocol)?;
 
     if !vm_resources.pci_enabled {
         boot_cmdline.insert("pci", "off")?;
