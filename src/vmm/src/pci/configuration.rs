@@ -45,7 +45,9 @@ pub const BAR0_REG_IDX: u16 = 4;
 /// Number of BAR registers
 pub const NUM_BAR_REGS: u8 = 6;
 
-/// Type representing information about single BAR register
+/// Type representing information about a single BAR register.
+/// I/O BARs use bit 0 = 1, reserve bit 1, and encode the address in bits 31:2.
+/// Memory BARs use the following layout:
 ///  31                                                 4  3    2  1  0
 /// +---------------------------------------------------+----+---+----+
 /// |                                                   |    |    |   |
@@ -77,10 +79,14 @@ impl Bar {
     pub fn used(&self) -> bool {
         !(self.encoded_addr == 0 && self.encoded_size == 0)
     }
+    /// Is this an I/O BAR
+    pub fn is_io(&self) -> bool {
+        self.encoded_addr & 1 != 0
+    }
     /// Is this a 64bit BAR
     /// Must be called only on lower register of the BAR
     pub fn is_64bit(&self) -> bool {
-        (self.encoded_addr & 0b100) == 0b100
+        self.encoded_addr & 0b111 == 0b100
     }
 }
 
@@ -94,6 +100,11 @@ pub enum BarPrefetchable {
     Yes = 1,
 }
 
+enum Bar32Kind {
+    Memory(BarPrefetchable),
+    Io,
+}
+
 /// Type to handle basic interactions with BARs region
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
 pub struct Bars {
@@ -103,9 +114,22 @@ pub struct Bars {
 impl Bars {
     /// Set a BAR slot as a single 32bit bar
     pub fn set_bar_32(&mut self, bar_idx: u8, addr: u32, size: u32, prefetchable: BarPrefetchable) {
-        assert_ne!(size, 0);
+        self.set_bar_32_kind(bar_idx, addr, size, Bar32Kind::Memory(prefetchable));
+    }
+
+    /// Set a BAR slot as an I/O BAR.
+    pub fn set_bar_io(&mut self, bar_idx: u8, addr: u32, size: u32) {
+        self.set_bar_32_kind(bar_idx, addr, size, Bar32Kind::Io);
+    }
+
+    fn set_bar_32_kind(&mut self, bar_idx: u8, addr: u32, size: u32, kind: Bar32Kind) {
+        let (flags, minimum_size) = match kind {
+            Bar32Kind::Memory(prefetchable) => ((prefetchable as u32) << 3, 16),
+            Bar32Kind::Io => (1, 4),
+        };
+        assert!(size >= minimum_size);
         assert!(size.is_power_of_two());
-        assert!(addr & 0b1111 == 0);
+        assert_eq!(addr & (size - 1), 0);
         addr.checked_add(size - 1).unwrap();
         assert!(bar_idx < NUM_BAR_REGS);
 
@@ -114,8 +138,7 @@ impl Bars {
         assert_eq!(self.bars[bar_idx as usize].encoded_size, 0);
 
         let size = encode_32_bits_bar_size(size);
-        let prefetchable = (prefetchable as u32) << 3;
-        self.bars[bar_idx as usize].encoded_addr = addr | prefetchable;
+        self.bars[bar_idx as usize].encoded_addr = addr | flags;
         self.bars[bar_idx as usize].encoded_size = size;
     }
 
@@ -193,7 +216,8 @@ impl Bars {
         assert!(self.bar_idx_valid(bar_idx));
         let bar = &self.bars[bar_idx as usize];
         assert!(!bar.is_64bit());
-        u64::from(bar.encoded_addr & !0b1111)
+        let flags = if bar.is_io() { 0b11 } else { 0b1111 };
+        u64::from(bar.encoded_addr & !flags)
     }
 
     /// Get the address of the 64bit bar
@@ -1077,5 +1101,63 @@ mod tests {
         assert_eq!(bars.get_bar_addr_64(0), 0x1_0000_0000);
         assert_eq!(bars.get_bar_size_64(0), 0x1000);
         assert!(bars.bars[0].is_64bit());
+    }
+
+    #[test]
+    fn io_bar_address_bits_do_not_change_its_type() {
+        let mut bars = Bars::default();
+        bars.bars[0] = Bar {
+            encoded_addr: 0x1005,
+            encoded_size: 0xffff_fffc,
+        };
+        assert!(!bars.bars[0].is_64bit());
+        assert!(bars.bar_idx_valid(1));
+        assert_eq!(bars.get_bar_addr(0), 0x1004);
+        assert_eq!(bars.get_bar_size(0), 4);
+        bars.set_bar_64(1, 0x1_0000_0000, 0x1000, BarPrefetchable::No);
+        bars.write(0, 0, &u32::MAX.to_le_bytes());
+        assert_eq!(bars.bars[0].encoded_addr, 0xffff_fffd);
+        bars.write(0, 0, &[0x0c]);
+        bars.write(0, 1, &[0x20, 0, 0]);
+        assert_eq!(bars.get_bar_addr(0), 0x200c);
+        assert_eq!(bars.bars[0].encoded_addr & 3, 1);
+        assert_eq!(bars.get_bar_addr(1), 0x1_0000_0000);
+    }
+
+    #[test]
+    fn io_bar_sizing_and_relocation_preserve_flags() {
+        let mut bars = Bars::default();
+        bars.set_bar_io(0, 0x3000, 0x100);
+        bars.set_bar_32(1, 0x100000, 0x1000, BarPrefetchable::Yes);
+        assert!(bars.bars[0].is_io());
+        assert!(!bars.bars[1].is_io());
+        bars.write(0, 0, &u32::MAX.to_le_bytes());
+        let mut probe = [0u8; 4];
+        bars.read(0, 0, &mut probe);
+        assert_eq!(u32::from_le_bytes(probe), 0xffff_ff01);
+        bars.write(0, 0, &0x35fcu32.to_le_bytes());
+        assert_eq!(bars.get_bar_addr(0), 0x3500);
+        assert_eq!(bars.get_bar_size(0), 0x100);
+        assert_eq!(bars.bars[0].encoded_addr, 0x3501);
+        assert_eq!(bars.get_bar_addr(1), 0x100000);
+    }
+
+    #[test]
+    fn io_bar_rejects_invalid_layout() {
+        for (index, address, size) in [
+            (0, 0x1000, 0),
+            (0, 0x1000, 2),
+            (0, 0x1000, 6),
+            (0, 0x1001, 4),
+            (0, 0x1010, 0x100),
+            (NUM_BAR_REGS, 0x1000, 0x100),
+        ] {
+            assert!(
+                std::panic::catch_unwind(|| {
+                    Bars::default().set_bar_io(index, address, size);
+                })
+                .is_err()
+            );
+        }
     }
 }
