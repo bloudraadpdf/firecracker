@@ -60,3 +60,47 @@ All five installed guests passed the matrix in [the console guide](windows-conso
 Owned VMs, bridges and temporary mounts are stopped. Disposable RAM snapshots,
 generated ISOs, obsolete binaries and compiler caches were removed. Installed
 test disks, final firmware, logs, digests and screenshots remain for reuse.
+
+## Native viewer input follow-up
+
+The original matrix did not establish native macOS Screen Sharing compatibility
+or absolute pointer alignment. The follow-up must close those gaps before the
+console is described as complete.
+
+- [x] Reproduce native RFB version and authentication failures.
+- [x] Add RFB 3.3/3.7 negotiation and optional VNC authentication with regression tests.
+- [x] Add explicit Mac Command-to-Windows mapping and semantic Shift handling.
+- [x] Synchronise guest keyboard lock LEDs and reliably release held input.
+- [x] Replace relative-pointer conversion with a stock-driver USB HID absolute mouse.
+- [x] Validate bounded UHCI DMA, PCI relocation, interrupt and pause/restore state.
+- [x] Verify native RFB keyboard, modifiers, lock keys and pointer targets; retain
+      WebSocket protocol regression coverage.
+- [x] Repeat cold boot, reconnect and full/diff restore input checks on XP,
+      Windows 7, Windows 10, Windows 11 and Server 2025.
+- [x] Run VMM/bridge regression checks, review/refine commits and remove scratch artifacts.
+
+The follow-up also checks the AMZNC10C device warning. The unmodified signed
+AWS null-driver package installs on Windows 10 and Server 2025. Windows 10
+reports `AWS VMClock Device` with `ConfigManagerErrorCode=0`. This establishes
+recognition only; it does not establish Windows consumption of VMClock counters.
+
+## Minimal input devices
+
+- [x] Remove the redundant PS/2 mouse, auxiliary IRQ and ACPI/firmware device.
+- [x] Retain the PS/2 keyboard and one USB HID absolute mouse.
+- [x] Reject obsolete relative-input requests and test USB-not-ready handling.
+- [x] Repeat guest enumeration, keyboard, pointer and snapshot checks with format 23.
+- [x] Fix and retest numeric keypad keysyms independently of Num Lock.
+
+The input refinement is split into VMM/input, bridge and UEFI commits, followed
+by documentation. Snapshot format 23 rejects earlier input-state layouts.
+Duplication recheck reports 606 clones and 6,691 lines. New USB matches are
+small PCI address/interrupt patterns and test fixtures; no pointer or keyboard
+implementation is duplicated. Obsolete binaries, redundant PPM copies and
+roughly 5 GiB of compiler caches were removed. The user desktop and its SSH
+tunnel remain intentional live resources.
+
+The original five installation runs and browser Setup check remain the
+installation evidence. The USB-only refinement repeats installed-guest input
+and restore checks, plus the preboot UEFI protocol probe; it does not claim
+five fresh installations or a fresh browser Setup run.

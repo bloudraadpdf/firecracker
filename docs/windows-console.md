@@ -1,8 +1,8 @@
 # AMD64 installation console (experimental)
 
-The optional console adds VGA/VBE graphics, PS/2 input and read-only ATAPI
-installation media to Firecracker. It does not require guest networking or
-vsock. See the validation matrix below and the
+The optional console adds VGA/VBE graphics, PS/2 keyboard input, a USB HID
+pointer and read-only ATAPI installation media to Firecracker. It does not
+require guest networking or vsock. See the validation matrix below and the
 [execution plan](windows-console-plan.md).
 
 ```text
@@ -14,13 +14,15 @@ remote browser or VNC viewer
              |
       private Unix socket
              |
-     Firecracker event loop
-       |       |       |
-      VGA    PS/2    ATAPI ---- read-only ISO
-       |       |       |
-       +--- Windows ---+
-                 |
-            virtio disk
+       Firecracker event loop
+        |       |       |       |
+       VGA     PS/2   USB HID  ATAPI -- read-only ISO
+        |       |       |       |
+        +-------+---+---+-------+
+                    |
+                 Windows
+                    |
+                virtio disk
 ```
 
 ## Configure
@@ -157,8 +159,9 @@ disk when firmware would otherwise select installation media again.
 ## State and platform limits
 
 Console snapshots contain display memory and registers, keyboard/mouse
-queues, held input, PCI state, optical transfer state and media identity.
-The snapshot format is 21.0.0. Display state adds about 16 MiB; the bounded
+queues, held input, pending releases, keyboard LEDs and pending lock updates,
+USB controller/HID state, PCI state, optical transfer state and media identity.
+The snapshot format is 23.0.0. Display state adds about 16 MiB; the bounded
 snapshot reader accepts at most 32 MiB. The guest disk remains a separate
 artifact, as with ordinary Firecracker snapshots.
 
@@ -168,9 +171,10 @@ or Secure Boot; it does not qualify Windows 11 editions that require them.
 
 The console reserves the VGA aperture at `0xa0000..0xbffff` and platform
 table memory at 32..33 MiB. The IDE interrupt uses PCI GSI16 in native mode
-and IRQ14 in compatibility mode; the PS/2 mouse uses IRQ12. The optional ISA
+and IRQ14 in compatibility mode. USB shares PCI GSI16. The PS/2 keyboard
+uses IRQ1; no auxiliary mouse or IRQ12 is exposed. The optional ISA
 discovery node and IDE function use experimental PCI device IDs `1d0f:fc02`
-and `1d0f:fc01`. These are fork-local identifiers,
+and `1d0f:fc01`; the USB controller uses `1d0f:fc03`. These are fork-local identifiers,
 not claims of an assigned hardware product ID.
 
 The PCI root advertises the legacy VGA memory aperture as a read/write
@@ -200,11 +204,26 @@ the VM retains that backing until its descriptors close. Both full and
 differential snapshots copy all VRAM into device state while the VM is paused;
 VRAM does not depend on ordinary guest RAM's dirty-page tracking.
 
-Input uses a US keyboard layout and a standard three-button relative PS/2 mouse.
+Input uses a US keyboard layout. A USB UHCI controller exposes an absolute HID
+mouse with three buttons and vertical scrolling through Windows built-in drivers.
+The PS/2 controller supplies only the keyboard. The bridge sends pointer input
+after USB enumeration and ignores it while USB is not ready. UEFI firmware
+supports the same absolute tablet; the SeaBIOS text interface uses the keyboard.
+USB state, keyboard lock state and pending releases are included in snapshots.
+This requires no guest networking, vsock channel or separate pointer driver.
+
+The bridge uses the guest keyboard LEDs to preserve printable ASCII case and
+punctuation with Caps Lock and Num Lock. It waits at most 100 ms for a pending
+lock acknowledgement before sending another non-lock key press. Disconnect
+releases are retried if the guest input queue is full, including after restore.
+Arbitrary guest keyboard layouts and Unicode text injection are not implemented.
+See the [bridge protocol](../tools/windows/console/README.md#behaviour-and-limits)
+for the input-state and absolute-pointer requests.
+
 Buffered input retains the scan-code format selected when injected, as in
 [QEMU](https://github.com/qemu/qemu/blob/master/hw/input/ps2.c). The controller
 does not model serial-clock timing.
-Clipboard, audio, wheel input and absolute pointer input are not implemented.
+Clipboard sharing and audio are not implemented.
 Port `0x92` and the i8042 output port record A20 requests, but KVM does not
 provide the CPU address wrapping used by an A20-disabled software emulator.
 
@@ -255,3 +274,56 @@ transports. The existing Server 2025 Core image also booted and restored
 from both snapshot types; SAC accepted commands, reported increasing uptime
 and completed ACPI S5 shutdown. These format-21 checks supplement the earlier
 [headless networking and Tokoloshe proxy validation](windows.md).
+
+
+## Native viewer and minimal-device follow-up
+
+The final console exposes one PS/2 keyboard and one USB absolute HID mouse.
+The PS/2 auxiliary device, its IRQ12 and its ACPI/UEFI descriptions are removed.
+The local protocol rejects obsolete relative-pointer requests. Pointer events
+are ignored until USB is configured; keyboard input remains independent.
+
+Native macOS Screen Sharing uses the `rfb-macos` bridge mode with a private
+VNC password file over SSH. Command maps to the Windows key and Option to Alt.
+RFB 3.3, 3.7 and 3.8 authentication is covered by protocol tests. Printable
+keypad digits and navigation no longer depend on the guest's Num Lock state.
+The bridge queries keyboard LEDs and pending lock transitions in the VMM;
+this state and deferred input releases survive snapshots.
+
+Format-23 revalidation uses the native musl `firecracker-usb-fifth` build and
+`cloudhv-console-usb-v4.fd` (SeaBIOS for XP). The firmware SHA-256 is
+`b5a2d30c310d2027d83ed3536ba75d28e2c507dfe5830bb1e9372a50f9c8badd`.
+All five guests enumerate one mouse, with no PS/2 pointing device. XP,
+Windows 7 and Windows 10 also have explicit one-keyboard enumeration evidence.
+
+| Guest | Cold input | Full restore input | Differential restore input |
+|---|---|---|---|
+| XP x86 | Pass | Pass | Pass |
+| Windows 7 x64 | Pass | Pass | Pass |
+| Windows 10 x64 | Pass | Pass | Pass |
+| Windows 11 x64 | Pass | Pass | Pass |
+| Server 2025 x64 | Pass | Pass | Pass |
+
+Checks cover mixed-case input, restored lock state, disconnect release,
+absolute clicks and wheel scrolling. Windows 10's three upward wheel ticks
+scroll nine lines. Server reports exact cursor coordinates `(123,234)` after
+full restore and `(777,555)` after differential restore. Numeric keypad input
+is verified with Num Lock both off and on. Server's present-device error count
+is zero after installation of the signed VMClock null package.
+
+The UEFI absolute-pointer protocol probe also passes without an OS; its
+[source and procedure](../resources/firmware/cloudhv-console/tests/README.md)
+are retained.
+
+The final VMM suite passes 989 tests; the bridge passes 29 tests. AMD64 and
+ARM64 strict VMM Clippy, bridge Clippy and formatting pass. Headless Linux
+passes format-23 cold/full/differential checks with modern and transitional
+PCI transports. These results supplement
+the earlier installation matrix; the five complete installations were not
+repeated for the USB-only refinement.
+
+XP still reports missing drivers for VMClock (`AMZNC10C`), the ACPI GED
+(`ACPI0013`), VM generation counter (`VMGENCTR`) and VGA (`1234:1111`). These
+are separate from input-device enumeration. The tested keyboard and USB mouse
+use inbox drivers. The AWS VMClock null package has been verified on Windows
+10 and Server 2025, not XP or Windows 7.
