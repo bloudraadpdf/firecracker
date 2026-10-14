@@ -997,20 +997,12 @@ impl VirtioPciDevice {
             return false;
         }
         device.drain_queue_events();
-        self.virtio_interrupt.as_ref().unwrap().reset_interrupt();
+        self.reset_interrupt_assignments();
         self.device_activated.store(false, Ordering::Release);
         self.common_config.driver_status = INIT;
         self.common_config.queue_select = 0;
         self.common_config.device_feature_select = 0;
         self.common_config.driver_feature_select = 0;
-        self.common_config
-            .msix_config
-            .store(VIRTQ_MSI_NO_VECTOR, Ordering::Release);
-        self.common_config
-            .msix_queues
-            .lock()
-            .unwrap()
-            .fill(VIRTQ_MSI_NO_VECTOR);
         true
     }
 
@@ -1328,73 +1320,17 @@ impl VirtioPciDevice {
         self.set_notification_ioevents(vm, self.bar_address, false)
     }
 
-    /// Tear down the MSI-X configuration. Used on device reset.
-    fn reset_msix(&mut self) {
-        let (num_vectors, vm) = {
-            let msix_config = self.msix_config.lock().expect("Poisoned lock");
-            (
-                msix_config.vectors.num_vectors(),
-                msix_config.vectors.vm.clone(),
-            )
-        };
-
-        // Build a fresh MSI-X vector group and configuration.
-        let msix_vectors = match KvmVm::create_msix_group(vm.clone(), num_vectors) {
-            Ok(vectors) => Arc::new(vectors),
-            Err(err) => {
-                error!("Failed to recreate MSI-X vector group on reset: {err:?}");
-                return;
-            }
-        };
-
+    fn reset_interrupt_assignments(&self) {
+        self.virtio_interrupt.as_ref().unwrap().reset_interrupt();
         self.common_config
             .msix_config
             .store(VIRTQ_MSI_NO_VECTOR, Ordering::Release);
-        for vector in self
-            .common_config
+        self.common_config
             .msix_queues
             .lock()
-            .expect("Poisoned lock")
-            .iter_mut()
-        {
-            *vector = VIRTQ_MSI_NO_VECTOR;
-        }
-
-        let msix_config = Arc::new(Mutex::new(MsixConfig::new(msix_vectors.clone(), self.sbdf)));
-        let mut interrupt = VirtioInterruptMsix::new(
-            msix_config.clone(),
-            self.common_config.msix_config.clone(),
-            self.common_config.msix_queues.clone(),
-            msix_vectors,
-        );
-        let previous = self.virtio_interrupt.as_ref().unwrap();
-        previous.reset_interrupt();
-        interrupt.status = previous.status.clone();
-        interrupt.intx = previous.intx.clone();
-        interrupt.forward_events = previous.forward_events.clone();
-        let interrupt = Arc::new(interrupt);
-
-        // Dropping the previous virtio_interrupt and msix_config releases the
-        // last references to the old MsixVectorGroup, whose Drop unregisters
-        // the irqfds, removes the GSI routes from the routing table and frees
-        // the GSIs.
-        self.virtio_interrupt = Some(interrupt);
-        self.msix_config = msix_config;
-
-        // Flush the updated routing table
-        if let Err(err) = vm.set_gsi_routes() {
-            error!("Failed to update GSI routes after MSI-X reset: {err:?}");
-        }
-
-        // Clear the MSI-X Enable and Function Mask bits in the guest-visible
-        // PCI capability so config-space reads stay consistent with the
-        // freshly-reset MsixConfig.
-        let reg_idx = self.msix_config_cap_offset / 4;
-        let msg_ctl = (self.configuration.read_reg(reg_idx) >> 16) as u16;
-        let msg_ctl = msg_ctl & !((1 << 15) | (1 << 14)); // clear Enable + Function Mask
-        self.configuration
-            .write_config_register(reg_idx, 2, &msg_ctl.to_le_bytes());
-        self.update_intx_mask();
+            .unwrap()
+            .fill(VIRTQ_MSI_NO_VECTOR);
+        self.msix_config.lock().unwrap().pba_entries.fill(0);
     }
 
     pub fn state(&self) -> VirtioPciDeviceState {
@@ -1895,7 +1831,8 @@ impl PciDevice for VirtioPciDevice {
                 self.common_config.device_feature_select = 0;
                 self.common_config.driver_feature_select = 0;
 
-                self.reset_msix();
+                self.device.lock().unwrap().drain_queue_events();
+                self.reset_interrupt_assignments();
             } else {
                 error!("Attempt to reset device when not implemented in underlying device");
                 // The virtio spec does not specify what to do if reset fails.
@@ -3524,9 +3461,23 @@ mod tests {
 
     #[test]
     fn test_reset_and_reinitialization() {
+        use crate::devices::virtio::transport::{VirtioInterrupt, VirtioInterruptType};
+
         let vmm = create_vmm_with_virtio_pci_device();
         let device = get_virtio_device(&vmm);
         let mut locked = device.lock().unwrap();
+
+        let msix_control = locked.msix_config_cap_offset / 4;
+        locked.write_config_register(msix_control, 2, &0xc000u16.to_le_bytes());
+        let table = [0xfee00000u32, 0, 0x40, 0];
+        for (index, value) in table.iter().enumerate() {
+            locked.write_bar(
+                0,
+                u64::from(super::MSIX_TABLE_BAR_OFFSET) + index as u64 * 4,
+                &value.to_le_bytes(),
+            );
+        }
+        let capability = locked.read_config_register(msix_control);
 
         // Full initialization sequence.
         write_driver_status(&mut locked, ACKNOWLEDGE);
@@ -3539,10 +3490,43 @@ mod tests {
         assert!(locked.device_activated.load(Ordering::SeqCst));
 
         // Write 0 to device_status to request a reset.
+        locked.write_bar(0, COMMON_CFG + MSIX_CONFIG, &0u16.to_le_bytes());
+        locked.write_bar(0, COMMON_CFG + QUEUE_MSIX_VECTOR, &1u16.to_le_bytes());
+        locked
+            .virtio_interrupt
+            .as_ref()
+            .unwrap()
+            .trigger(VirtioInterruptType::Config)
+            .unwrap();
+        assert_eq!(locked.msix_config.lock().unwrap().pba_entries, [1]);
         write_driver_status(&mut locked, 0);
         assert_eq!(read_driver_status(&mut locked), 0);
         // Device should be deactivated after successful reset.
         assert!(!locked.device_activated.load(Ordering::SeqCst));
+        assert_eq!(locked.read_config_register(msix_control), capability);
+        for (index, expected) in table.iter().enumerate() {
+            let mut value = [0; 4];
+            locked.read_bar(
+                0,
+                u64::from(super::MSIX_TABLE_BAR_OFFSET) + index as u64 * 4,
+                &mut value,
+            );
+            assert_eq!(u32::from_le_bytes(value), *expected);
+        }
+        assert_eq!(
+            locked.common_config.msix_config.load(Ordering::Acquire),
+            0xffff
+        );
+        assert!(
+            locked
+                .common_config
+                .msix_queues
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|vector| *vector == 0xffff)
+        );
+        assert_eq!(locked.msix_config.lock().unwrap().pba_entries, [0]);
 
         // Re-initialization should succeed after a successful reset.
         write_driver_status(&mut locked, ACKNOWLEDGE);
