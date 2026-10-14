@@ -98,3 +98,51 @@ After resume, heartbeat reads and S5 must succeed. For a failure test, stop
 only the variable helper during the heartbeat: the next read must stop the
 VMM with GenericError exit 1. Remove snapshot RAM and disposable private keys
 after preserving the logs and public digests.
+
+## Physical presence
+
+Use the same disposable directory and the physical-presence firmware patch.
+Never submit a clear against an installed guest's TPM. Build the host submission
+client with `rustc --edition=2024 ppi-submit.rs -o ppi-submit`.
+
+After a clean probe shutdown, start the variable helper alone. Run
+`./ppi-submit vars.sock 5`, then wait for the helper to exit. This sends cold
+initialisation followed by PPI function 2 through the normal helper interface.
+Start both helpers and the VM again. The firmware must show the clear warning
+before launching the EFI application.
+
+Press Escape to reject the request. The application must report:
+
+```text
+ppi-flags=700E2
+ppi-flags-write=8000000000000008
+ppi-request=0
+ppi-last=5
+ppi-response=FFFFFFF0
+```
+
+Submit operation 5 again and press F12 at the prompt. The VMM exits on the
+firmware reset. Restart with the same closed TPM and variable stores. The
+application must report pending request 0, last request 5 and response 0, then
+shut down. The TPM remains usable after the clear.
+
+For the combined-operation regression, provision another disposable store with
+`Tcg2PhysicalPresenceFlags=0x10` and request 14. Use the GUID
+`aeb9c5c1-94f1-4d02-bfd9-4602db2d3c54`, attributes 7, a four-byte little-endian
+flags value and the 16-byte request structure documented in the helper README.
+The clear bit is absent; the turn-on bit is present. A confirmation prompt is
+still required by TCG PPI 1.30 Table 2. Escape must produce last request 14 and
+response `0xfffffff0`. This catches the pinned EDK2 library's clear-only
+confirmation test.
+
+A separately provisioned unsupported request 17 must be consumed with BIOS
+failure `0xfffffff1`, without a confirmation prompt or TPM action. Provisioning
+these fixtures is a host test operation; do not edit a live store or expose
+flag-changing operations through the guest interface.
+
+The signed probe also defines owner-authorised NV index `0x01500020` once in
+its disposable TPM. A separate nonvolatile UEFI marker prevents recreation.
+Before clear and after rejected clear, `nv-read-public` must be 0. After accepted
+clear it must be `18B` (`TPM_RC_HANDLE` for the first handle). This verifies the
+TPM effect independently of the writable PPI result variable. Never run this
+probe against an installed or production TPM.
