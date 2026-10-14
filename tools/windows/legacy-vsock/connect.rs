@@ -4,25 +4,22 @@
 #![no_std]
 #![no_main]
 use core::ptr;
+#[path = "../egress/win32.rs"]
+mod win32;
+use win32::{ExitProcess, GetLastError, GetStdHandle, WriteFile};
 #[cfg(xp_matrix)]
 mod xp_matrix;
 
-#[link(
-    name = "kernel32",
-    kind = "raw-dylib",
-    import_name_type = "undecorated"
+#[cfg_attr(
+    target_arch = "x86",
+    link(
+        name = "kernel32",
+        kind = "raw-dylib",
+        import_name_type = "undecorated"
+    )
 )]
+#[cfg_attr(not(target_arch = "x86"), link(name = "kernel32", kind = "raw-dylib"))]
 unsafe extern "system" {
-    fn GetLastError() -> u32;
-    fn GetStdHandle(which: u32) -> usize;
-    fn WriteFile(
-        handle: usize,
-        data: *const u8,
-        len: u32,
-        written: *mut u32,
-        overlap: *mut u8,
-    ) -> i32;
-    fn ExitProcess(code: u32) -> !;
     fn CreateFileW(
         name: *const u16,
         access: u32,
@@ -44,7 +41,11 @@ unsafe extern "system" {
     ) -> i32;
     fn CloseHandle(handle: usize) -> i32;
 }
-#[link(name = "ws2_32", kind = "raw-dylib", import_name_type = "undecorated")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(name = "ws2_32", kind = "raw-dylib", import_name_type = "undecorated")
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "ws2_32", kind = "raw-dylib"))]
 unsafe extern "system" {
     fn WSAStartup(version: u16, data: *mut u8) -> i32;
     fn WSACleanup() -> i32;
