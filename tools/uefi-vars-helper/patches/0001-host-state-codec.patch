@@ -1,0 +1,122 @@
+--- a/var-service-vars.c
++++ b/var-service-vars.c
+@@ -6,7 +6,6 @@
+ #include "qemu/osdep.h"
+ #include "qemu/error-report.h"
+ #include "system/dma.h"
+-#include "migration/vmstate.h"
+ 
+ #include "hw/uefi/var-service.h"
+ #include "hw/uefi/var-service-api.h"
+@@ -23,29 +22,8 @@
+      EFI_VARIABLE_APPEND_WRITE)
+ 
+ 
+-const VMStateDescription vmstate_uefi_time = {
+-    .name = "uefi-time",
+-    .fields = (VMStateField[]) {
+-        VMSTATE_UINT16(year, efi_time),
+-        VMSTATE_UINT8(month, efi_time),
+-        VMSTATE_UINT8(day, efi_time),
+-        VMSTATE_UINT8(hour, efi_time),
+-        VMSTATE_UINT8(minute, efi_time),
+-        VMSTATE_UINT8(second, efi_time),
+-        VMSTATE_UINT32(nanosecond, efi_time),
+-        VMSTATE_END_OF_LIST()
+-    },
+-};
+-
+-static int uefi_vars_pre_load(void *opaque)
+-{
+-    uefi_variable *var = opaque;
+-
+-    /* clear digest which is optional in the live migration data stream */
+-    var->digest = NULL;
+-    var->digest_size = 0;
+-    return 0;
+-}
++
++
+ 
+ static int uefi_vars_post_load(void *opaque, int version_id)
+ {
+@@ -61,47 +39,10 @@
+     return 0;
+ }
+ 
+-static bool uefi_vars_digest_is_needed(void *opaque)
+-{
+-    uefi_variable *var = opaque;
+-
+-    if ((var->attributes & EFI_VARIABLE_TIME_BASED_AUTHENTICATED_WRITE_ACCESS)
+-        && !uefi_vars_is_sb_any(var)) {
+-        return true;
+-    }
+-    return false;
+-}
+-
+-const VMStateDescription vmstate_uefi_variable_digest = {
+-    .name = "uefi-variable-digest",
+-    .needed = uefi_vars_digest_is_needed,
+-    .fields = (VMStateField[]) {
+-        VMSTATE_UINT32(digest_size, uefi_variable),
+-        VMSTATE_VBUFFER_ALLOC_UINT32(digest, uefi_variable,
+-                                     0, NULL, digest_size),
+-        VMSTATE_END_OF_LIST()
+-    },
+-};
+-
+-const VMStateDescription vmstate_uefi_variable = {
+-    .name = "uefi-variable",
+-    .pre_load = uefi_vars_pre_load,
+-    .post_load = uefi_vars_post_load,
+-    .fields = (VMStateField[]) {
+-        VMSTATE_UINT8_ARRAY_V(guid.data, uefi_variable, sizeof(QemuUUID), 0),
+-        VMSTATE_UINT32(name_size, uefi_variable),
+-        VMSTATE_UINT32(data_size, uefi_variable),
+-        VMSTATE_UINT32(attributes, uefi_variable),
+-        VMSTATE_VBUFFER_ALLOC_UINT32(name, uefi_variable, 0, NULL, name_size),
+-        VMSTATE_VBUFFER_ALLOC_UINT32(data, uefi_variable, 0, NULL, data_size),
+-        VMSTATE_STRUCT(time, uefi_variable, 0, vmstate_uefi_time, efi_time),
+-        VMSTATE_END_OF_LIST()
+-    },
+-    .subsections = (const VMStateDescription * const []) {
+-        &vmstate_uefi_variable_digest,
+-        NULL
+-    }
+-};
++
++
++
++
+ 
+ uefi_variable *uefi_vars_find_variable(uefi_vars_state *uv, QemuUUID guid,
+                                        const uint16_t *name, uint64_t name_size)
+--- a/var-service-policy.c
++++ b/var-service-policy.c
+@@ -9,7 +9,6 @@
+ #include "qemu/osdep.h"
+ #include "qemu/error-report.h"
+ #include "system/dma.h"
+-#include "migration/vmstate.h"
+ 
+ #include "hw/uefi/var-service.h"
+ #include "hw/uefi/var-service-api.h"
+@@ -31,16 +30,7 @@
+     return rc;
+ }
+ 
+-const VMStateDescription vmstate_uefi_var_policy = {
+-    .name = "uefi-var-policy",
+-    .post_load = uefi_var_policy_post_load,
+-    .fields = (VMStateField[]) {
+-        VMSTATE_UINT32(entry_size, uefi_var_policy),
+-        VMSTATE_VBUFFER_ALLOC_UINT32(entry, uefi_var_policy,
+-                                     0, NULL, entry_size),
+-        VMSTATE_END_OF_LIST()
+-    },
+-};
++
+ 
+ static gboolean wildcard_str_equal(uefi_var_policy *pol,
+                                    uefi_variable *var)

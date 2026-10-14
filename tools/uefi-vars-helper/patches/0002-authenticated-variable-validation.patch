@@ -1,0 +1,90 @@
+--- a/var-service-vars.c
++++ b/var-service-vars.c
+@@ -467,6 +467,9 @@
+     uefi_trace_variable(__func__, va->guid, name, va->name_size);
+ 
+     old_var = uefi_vars_find_variable(uv, va->guid, name, va->name_size);
++    if (old_var && (old_var->attributes & EFI_VARIABLE_TIME_BASED_AUTHENTICATED_WRITE_ACCESS) && !va->data_size) {
++        return uefi_vars_mm_error(mhdr, mvar, EFI_SECURITY_VIOLATION);
++    }
+     if (va->data_size) {
+         new_var = add_variable(uv, va->guid, name, va->name_size,
+                                va->attributes);
+@@ -484,7 +487,7 @@
+             }
+             if (old_var && new_var) {
+                 if ((va->attributes & EFI_VARIABLE_APPEND_WRITE) == 0 &&
+-                    uefi_time_compare(&old_var->time, &new_var->time) > 0) {
++                    uefi_time_compare(&old_var->time, &new_var->time) >= 0) {
+                     trace_uefi_vars_security_violation("time check failed");
+                     mvar->status = EFI_SECURITY_VIOLATION;
+                     goto rollback;
+@@ -530,6 +533,9 @@
+             goto rollback;
+         }
+         append_write(old_var, new_var);
++        if (uefi_time_compare(&old_var->time, &new_var->time) > 0) {
++            new_var->time = old_var->time;
++        }
+     }
+ 
+     /* check storage space */
+--- a/var-service-policy.c
++++ b/var-service-policy.c
+@@ -35,7 +35,7 @@
+ static gboolean wildcard_str_equal(uefi_var_policy *pol,
+                                    uefi_variable *var)
+ {
+-    return uefi_str_equal_ex(pol->name, pol->name_size,
++    return !pol->name_size || uefi_str_equal_ex(pol->name, pol->name_size,
+                              var->name, var->name_size,
+                              true);
+ }
+@@ -81,7 +81,7 @@
+     unsigned int i;
+ 
+     if (pol->entry_size != pe->size ||
+-        pe->offset_to_name >= pe->size) {
++        pe->offset_to_name > pe->size) {
+         return -1;
+     }
+ 
+--- a/var-service-auth.c
++++ b/var-service-auth.c
+@@ -233,6 +233,11 @@
+     }
+     memcpy(&auth, data, sizeof(auth));
+ 
++    if (auth.timestamp.pad1 || auth.timestamp.nanosecond ||
++        auth.timestamp.timezone || auth.timestamp.daylight || auth.timestamp.pad2) {
++        return EFI_SECURITY_VIOLATION;
++    }
++
+     if (auth.hdr_length < (sizeof(auth) - sizeof(auth.timestamp))) {
+         return EFI_SECURITY_VIOLATION;
+     }
+@@ -279,6 +284,13 @@
+ efi_status uefi_vars_check_secure_boot(uefi_vars_state *uv, uefi_variable *var)
+ {
+     uint8_t *value = var->data;
++    if (qemu_uuid_is_equal(&var->guid, &EfiGlobalVariable) &&
++        (uefi_str_equal(var->name, var->name_size, name_sb, sizeof(name_sb)) ||
++         uefi_str_equal(var->name, var->name_size, name_sigs_support, sizeof(name_sigs_support)) ||
++         uefi_str_equal(var->name, var->name_size, name_vk, sizeof(name_vk)) ||
++         uefi_str_equal(var->name, var->name_size, name_vk_nv, sizeof(name_vk_nv)))) {
++        return EFI_WRITE_PROTECTED;
++    }
+ 
+     if (uefi_vars_is_sb_any(var)) {
+         if (var->attributes != sigdb_attrs) {
+--- a/var-service-pkcs7.c
++++ b/var-service-pkcs7.c
+@@ -80,7 +80,7 @@
+         pkcs7->data[4] == 0x06 &&
+         pkcs7->data[5] == 0x09 &&
+         memcmp(pkcs7->data + 6, signed_data_oid, sizeof(signed_data_oid)) == 0 &&
+-        pkcs7->data[15] == 0x0a &&
++        pkcs7->data[15] == 0xa0 &&
+         pkcs7->data[16] == 0x82) {
+         return;
+     }
