@@ -10,7 +10,7 @@ Implementation checklist:
 - [x] Pin and preserve the upstream engine, notices and reproducible build inputs.
 - [x] Add bounded IPC and persistent state without replacing upstream authentication.
 - [x] Test authentication failures, replay, policy locks and checkpoint consistency.
-- [ ] Enable the console firmware client and test signed and unsigned EFI images.
+- [x] Enable the console firmware client and test signed and unsigned EFI images.
 - [ ] Verify standard Windows 11 installation and measured boot.
 
 ## Boundary
