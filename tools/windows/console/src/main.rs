@@ -30,6 +30,12 @@ struct Frame {
     pixels: Vec<u8>,
 }
 
+struct InputState {
+    absolute_pointer: bool,
+    leds: u8,
+    pending_leds: u8,
+}
+
 impl Backend {
     fn request(&self, op: u8, payload: &[u8]) -> io::Result<(UnixStream, [u8; 16])> {
         if payload.len() > 7 {
@@ -54,6 +60,24 @@ impl Backend {
             return Err(invalid("console rejected input"));
         }
         Ok(())
+    }
+
+    fn input_state(&self) -> io::Result<InputState> {
+        let (_, response) = self.request(5, &[])?;
+        if &response[..4] != b"FCA1"
+            || (response[9] & !7 != 0 || response[10] & !6 != 0 || response[11..] != [0; 5])
+        {
+            return Err(invalid("invalid pointer capability response"));
+        }
+        let status = u32::from_le_bytes(response[4..8].try_into().unwrap());
+        match (status, response[8]) {
+            (0, ready @ 0..=1) => Ok(InputState {
+                absolute_pointer: ready != 0,
+                leds: response[9],
+                pending_leds: response[10],
+            }),
+            _ => Err(invalid("invalid pointer capability response")),
+        }
     }
 
     fn frame(&self) -> io::Result<Frame> {
@@ -115,10 +139,22 @@ fn configure(stream: &TcpStream) -> io::Result<()> {
     stream.set_write_timeout(Some(TIMEOUT))
 }
 
+fn authenticate_console(
+    stream: &mut (impl Read + Write),
+    guard: &mut SessionGuard,
+    password: Option<&rfb::Password>,
+) -> io::Result<()> {
+    rfb::handshake(stream, password)?;
+    guard.input_active = true;
+    guard.backend.input(3, &[])
+}
+
 fn listen(
     address: SocketAddr,
     backend: Backend,
     auth: Option<websocket::Auth>,
+    password: Option<rfb::Password>,
+    mapping: rfb::KeyboardMapping,
     busy: Arc<AtomicBool>,
 ) -> io::Result<()> {
     if !address.ip().is_loopback() {
@@ -146,18 +182,21 @@ fn listen(
             busy: busy.clone(),
         };
         let auth = auth.clone();
+        let password = password.clone();
         std::thread::spawn(move || {
             let result = (|| {
                 configure(&stream)?;
+                let transport = stream.try_clone()?;
                 if let Some(auth) = auth {
                     let mut socket = websocket::accept(stream, &auth)?;
-                    guard.input_active = true;
-                    guard.backend.input(3, &[])?;
-                    rfb::serve(&mut socket, &guard.backend)
+                    authenticate_console(&mut socket, &mut guard, None)?;
+                    transport.set_read_timeout(None)?;
+                    rfb::serve(&mut socket, &guard.backend, mapping)
                 } else {
-                    guard.input_active = true;
-                    guard.backend.input(3, &[])?;
-                    rfb::serve(&mut { stream }, &guard.backend)
+                    let mut stream = stream;
+                    authenticate_console(&mut stream, &mut guard, password.as_ref())?;
+                    transport.set_read_timeout(None)?;
+                    rfb::serve(&mut stream, &guard.backend, mapping)
                 }
             })();
             if let Err(error) = result {
@@ -170,7 +209,7 @@ fn listen(
 
 fn run() -> io::Result<()> {
     let mut args = std::env::args_os().skip(1);
-    let socket = args.next().ok_or_else(|| invalid("usage: firecracker-console SOCKET rfb ADDRESS | SOCKET websocket ADDRESS TOKEN_FILE ORIGIN | WEB_DIR assets ADDRESS"))?;
+    let socket = args.next().ok_or_else(|| invalid("usage: firecracker-console SOCKET rfb|rfb-macos ADDRESS [PASSWORD_FILE] | SOCKET websocket ADDRESS TOKEN_FILE ORIGIN | WEB_DIR assets ADDRESS"))?;
     let mode = args.next().ok_or_else(|| invalid("missing mode"))?;
     let backend = Backend(PathBuf::from(&socket));
     if mode == "screenshot" {
@@ -229,7 +268,18 @@ fn run() -> io::Result<()> {
         }
         return assets::serve(address, PathBuf::from(socket));
     }
-    let auth = if mode == "rfb" {
+    let mut password = None;
+    let mapping = if mode == "rfb-macos" {
+        rfb::KeyboardMapping::MacOs
+    } else {
+        rfb::KeyboardMapping::Standard
+    };
+    let auth = if mode == "rfb" || mode == "rfb-macos" {
+        if let Some(path) = args.next() {
+            password = Some(rfb::Password::new(
+                std::fs::read_to_string(path)?.trim_end(),
+            )?);
+        }
         None
     } else if mode == "websocket" {
         let token_file = args.next().ok_or_else(|| invalid("missing token file"))?;
@@ -244,7 +294,7 @@ fn run() -> io::Result<()> {
         Some(websocket::Auth::new(token, origin)?)
     } else {
         return Err(invalid(
-            "mode must be rfb, websocket, assets, screenshot, key, release or eject",
+            "mode must be rfb, rfb-macos, websocket, assets, screenshot, key, release or eject",
         ));
     };
     if args.next().is_some() {
@@ -254,6 +304,8 @@ fn run() -> io::Result<()> {
         address,
         Backend(PathBuf::from(socket)),
         auth,
+        password,
+        mapping,
         Arc::new(AtomicBool::new(false)),
     )
 }
@@ -272,69 +324,85 @@ mod tests {
 
     #[test]
     fn rfb_drives_frame_keyboard_and_mouse_over_unix_protocol() {
-        let path = PathBuf::from(format!("console-test-{}.sock", std::process::id()));
-        let listener = UnixListener::bind(&path).unwrap();
-        let backend = Backend(path.clone());
-        let host = std::thread::spawn(move || {
-            let mut requests = Vec::new();
-            for _ in 0..5 {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut request = [0; 12];
-                stream.read_exact(&mut request).unwrap();
-                assert_eq!(&request[..4], b"FCC1");
-                requests.push(request);
-                if request[4] == 0 {
-                    let mut response = b"FCF1".to_vec();
-                    for value in [2u32, 1, 8] {
-                        response.extend(value.to_le_bytes());
+        for ready in [false, true] {
+            let path = PathBuf::from(format!("console-test-{}.sock", std::process::id()));
+            let listener = UnixListener::bind(&path).unwrap();
+            let backend = Backend(path.clone());
+            let host = std::thread::spawn(move || {
+                let mut requests = Vec::new();
+                for _ in 0..if ready { 8 } else { 6 } {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let mut request = [0; 12];
+                    stream.read_exact(&mut request).unwrap();
+                    assert_eq!(&request[..4], b"FCC1");
+                    requests.push(request);
+                    if request[4] == 0 {
+                        let mut response = b"FCF1".to_vec();
+                        for value in [2u32, 1, 8] {
+                            response.extend(value.to_le_bytes());
+                        }
+                        response.extend([3, 2, 1, 0, 6, 5, 4, 0]);
+                        stream.write_all(&response).unwrap();
+                    } else {
+                        let mut response = [0; 16];
+                        response[..4].copy_from_slice(b"FCA1");
+                        if request[4] == 5 {
+                            response[8] = u8::from(ready);
+                        }
+                        stream.write_all(&response).unwrap();
                     }
-                    response.extend([3, 2, 1, 0, 6, 5, 4, 0]);
-                    stream.write_all(&response).unwrap();
-                } else {
-                    let mut response = [0; 16];
-                    response[..4].copy_from_slice(b"FCA1");
-                    stream.write_all(&response).unwrap();
                 }
+                requests
+            });
+            let tcp = TcpListener::bind("127.0.0.1:0").unwrap();
+            let mut client = TcpStream::connect(tcp.local_addr().unwrap()).unwrap();
+            configure(&client).unwrap();
+            let (mut server, _) = tcp.accept().unwrap();
+            let session = std::thread::spawn(move || {
+                rfb::handshake(&mut server, None)?;
+                rfb::serve(&mut server, &backend, rfb::KeyboardMapping::Standard)
+            });
+            let mut version = [0; 12];
+            client.read_exact(&mut version).unwrap();
+            assert_eq!(&version, b"RFB 003.008\n");
+            client.write_all(&version).unwrap();
+            let mut security = [0; 2];
+            client.read_exact(&mut security).unwrap();
+            assert_eq!(security, [1, 1]);
+            client.write_all(&[1]).unwrap();
+            let mut result = [0; 4];
+            client.read_exact(&mut result).unwrap();
+            assert_eq!(result, [0; 4]);
+            client.write_all(&[1]).unwrap();
+            let mut init = [0; 24];
+            client.read_exact(&mut init).unwrap();
+            assert_eq!(&init[..4], &[0, 2, 0, 1]);
+            let length = u32::from_be_bytes(init[20..24].try_into().unwrap());
+            let mut name = vec![0; length as usize];
+            client.read_exact(&mut name).unwrap();
+            client.write_all(&[3, 0, 0, 0, 0, 0, 0, 2, 0, 1]).unwrap();
+            let mut update = [0; 24];
+            client.read_exact(&mut update).unwrap();
+            assert_eq!(&update[16..], &[3, 2, 1, 0, 6, 5, 4, 0]);
+            client.write_all(&[4, 1, 0, 0, 0, 0, 0, 0x61]).unwrap();
+            client.write_all(&[5, 1, 0, 10, 0, 20]).unwrap();
+            client.write_all(&[5, 4, 0, 15, 0, 18]).unwrap();
+            let requests = host.join().unwrap();
+            assert_eq!(&requests[3][4..8], &[1, 0x1c, 0, 1]);
+            if ready {
+                assert_eq!(&requests[5][4..11], &[6, 1, 255, 127, 0, 0, 0]);
+                assert_eq!(&requests[7][4..11], &[6, 2, 255, 127, 0, 0, 0]);
+            } else {
+                assert!(
+                    requests
+                        .iter()
+                        .all(|request| request[4] != 2 && request[4] != 6)
+                );
             }
-            requests
-        });
-        let tcp = TcpListener::bind("127.0.0.1:0").unwrap();
-        let mut client = TcpStream::connect(tcp.local_addr().unwrap()).unwrap();
-        configure(&client).unwrap();
-        let (mut server, _) = tcp.accept().unwrap();
-        let session = std::thread::spawn(move || rfb::serve(&mut server, &backend));
-        let mut version = [0; 12];
-        client.read_exact(&mut version).unwrap();
-        assert_eq!(&version, b"RFB 003.008\n");
-        client.write_all(&version).unwrap();
-        let mut security = [0; 2];
-        client.read_exact(&mut security).unwrap();
-        assert_eq!(security, [1, 1]);
-        client.write_all(&[1]).unwrap();
-        let mut result = [0; 4];
-        client.read_exact(&mut result).unwrap();
-        assert_eq!(result, [0; 4]);
-        client.write_all(&[1]).unwrap();
-        let mut init = [0; 24];
-        client.read_exact(&mut init).unwrap();
-        assert_eq!(&init[..4], &[0, 2, 0, 1]);
-        let length = u32::from_be_bytes(init[20..24].try_into().unwrap());
-        let mut name = vec![0; length as usize];
-        client.read_exact(&mut name).unwrap();
-        client.write_all(&[3, 0, 0, 0, 0, 0, 0, 2, 0, 1]).unwrap();
-        let mut update = [0; 24];
-        client.read_exact(&mut update).unwrap();
-        assert_eq!(&update[16..], &[3, 2, 1, 0, 6, 5, 4, 0]);
-        client.write_all(&[4, 1, 0, 0, 0, 0, 0, 0x61]).unwrap();
-        client.write_all(&[5, 1, 0, 10, 0, 20]).unwrap();
-        client.write_all(&[5, 4, 0, 15, 0, 18]).unwrap();
-        let requests = host.join().unwrap();
-        assert_eq!(&requests[2][4..8], &[1, 0x1c, 0, 1]);
-        assert_eq!(&requests[3][4..10], &[2, 1, 0, 0, 0, 0]);
-        assert_eq!(&requests[4][4..10], &[2, 2, 5, 0, 2, 0]);
-        drop(client);
-        assert!(session.join().unwrap().is_err());
-        std::fs::remove_file(path).unwrap();
+            drop(client);
+            assert!(session.join().unwrap().is_err());
+            std::fs::remove_file(path).unwrap();
+        }
     }
     #[test]
     fn disconnect_releases_keys_before_another_client_can_connect() {

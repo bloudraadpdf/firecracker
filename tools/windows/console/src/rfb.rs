@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{Backend, Frame, invalid, keys};
+use des::cipher::{BlockEncrypt, KeyInit};
 use std::io::{self, Read, Write};
 
 const DEFAULT_FORMAT: [u8; 16] = [32, 24, 0, 1, 0, 255, 0, 255, 0, 255, 16, 8, 0, 0, 0, 0];
@@ -108,19 +109,110 @@ fn update(
     stream.flush()
 }
 
-pub fn serve(stream: &mut (impl Read + Write), backend: &Backend) -> io::Result<()> {
+#[derive(Clone)]
+pub struct Password([u8; 8]);
+
+impl Password {
+    pub fn new(value: &str) -> io::Result<Self> {
+        if value.is_empty() || value.len() > 8 || !value.bytes().all(|b| b.is_ascii_graphic()) {
+            return Err(invalid(
+                "VNC password must contain 1..8 printable ASCII characters",
+            ));
+        }
+        let mut key = [0; 8];
+        for (out, byte) in key.iter_mut().zip(value.bytes()) {
+            *out = byte.reverse_bits();
+        }
+        Ok(Self(key))
+    }
+
+    fn response(&self, mut challenge: [u8; 16]) -> [u8; 16] {
+        let cipher = des::Des::new(&self.0.into());
+        for block in challenge.as_chunks_mut::<8>().0 {
+            cipher.encrypt_block(block.into());
+        }
+        challenge
+    }
+}
+
+pub(crate) fn handshake(
+    stream: &mut (impl Read + Write),
+    password: Option<&Password>,
+) -> io::Result<()> {
     stream.write_all(b"RFB 003.008\n")?;
     stream.flush()?;
-    if read::<12>(stream)? != *b"RFB 003.008\n" {
-        return Err(invalid("RFB 3.8 required"));
+    let version = read::<12>(stream)?;
+    let security = if password.is_some() { 2u8 } else { 1 };
+    match &version {
+        b"RFB 003.003\n" => stream.write_all(&u32::from(security).to_be_bytes())?,
+        b"RFB 003.007\n" | b"RFB 003.008\n" => {
+            stream.write_all(&[1, security])?;
+            stream.flush()?;
+            if read::<1>(stream)? != [security] {
+                return Err(invalid("invalid RFB security selection"));
+            }
+        }
+        _ => return Err(invalid("unsupported RFB version")),
     }
-    stream.write_all(&[1, 1])?;
-    stream.flush()?;
-    if read::<1>(stream)? != [1] {
-        return Err(invalid("invalid RFB security selection"));
+    if let Some(password) = password {
+        let mut challenge = [0; 16];
+        getrandom::fill(&mut challenge).map_err(io::Error::other)?;
+        stream.write_all(&challenge)?;
+        stream.flush()?;
+        let response = read::<16>(stream)?;
+        let expected = password.response(challenge);
+        if response
+            .iter()
+            .zip(expected)
+            .fold(0, |diff, (a, b)| diff | a ^ b)
+            != 0
+        {
+            stream.write_all(&1u32.to_be_bytes())?;
+            if version == *b"RFB 003.008\n" {
+                let reason = b"Authentication failed";
+                stream.write_all(&(reason.len() as u32).to_be_bytes())?;
+                stream.write_all(reason)?;
+            }
+            stream.flush()?;
+            return Err(invalid("VNC authentication failed"));
+        }
     }
-    stream.write_all(&[0; 4])?;
-    stream.flush()?;
+    if password.is_some() || version == *b"RFB 003.008\n" {
+        stream.write_all(&[0; 4])?;
+    }
+    stream.flush()
+}
+
+fn absolute_axis(position: u16, extent: u16) -> u16 {
+    let maximum = extent.saturating_sub(1);
+    if maximum == 0 {
+        return 0;
+    }
+    (u32::from(position.min(maximum)) * 32767 / u32::from(maximum)) as u16
+}
+
+#[derive(Clone, Copy, Default)]
+pub enum KeyboardMapping {
+    #[default]
+    Standard,
+    MacOs,
+}
+
+impl KeyboardMapping {
+    fn keysym(self, value: u32) -> u32 {
+        match (self, value) {
+            (Self::MacOs, 0xffe9) => 0xffeb,
+            (Self::MacOs, 0xffea) => 0xffec,
+            _ => value,
+        }
+    }
+}
+
+pub fn serve(
+    stream: &mut (impl Read + Write),
+    backend: &Backend,
+    mapping: KeyboardMapping,
+) -> io::Result<()> {
     read::<1>(stream)?;
     let frame = backend.frame()?;
     stream.write_all(&frame.width.to_be_bytes())?;
@@ -133,7 +225,7 @@ pub fn serve(stream: &mut (impl Read + Write), backend: &Backend) -> io::Result<
     let mut size = (frame.width, frame.height);
     let mut format = PixelFormat::parse(DEFAULT_FORMAT)?;
     let mut resize = false;
-    let mut pointer = None;
+    let mut keyboard = keys::Keyboard::default();
     loop {
         match read::<1>(stream)?[0] {
             0 => {
@@ -178,26 +270,44 @@ pub fn serve(stream: &mut (impl Read + Write), backend: &Backend) -> io::Result<
                 if request[0] > 1 {
                     return Err(invalid("invalid key state"));
                 }
-                if let Some((code, extended)) =
-                    keys::set2(u32::from_be_bytes(request[3..].try_into().unwrap()))
-                {
-                    backend.input(1, &[code, u8::from(extended), request[0]])?;
+                let keysym = mapping.keysym(u32::from_be_bytes(request[3..].try_into().unwrap()));
+                let mut pending_leds = 0;
+                if request[0] != 0 {
+                    let state = backend.input_state()?;
+                    keyboard.set_leds(state.leds);
+                    pending_leds = state.pending_leds;
                 }
+                if request[0] != 0 && !matches!(keysym, 0xffe5 | 0xff7f) {
+                    let deadline =
+                        std::time::Instant::now() + std::time::Duration::from_millis(100);
+                    while pending_leds != 0 {
+                        if std::time::Instant::now() >= deadline {
+                            return Err(invalid("guest keyboard LED update timed out"));
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                        let state = backend.input_state()?;
+                        keyboard.set_leds(state.leds);
+                        pending_leds = state.pending_leds;
+                    }
+                }
+                keyboard.event(keysym, request[0] != 0, |code, extended, pressed| {
+                    backend.input(1, &[code, u8::from(extended), u8::from(pressed)])
+                })?;
             }
             5 => {
                 let request = read::<5>(stream)?;
                 let x = u16::from_be_bytes([request[1], request[2]]);
                 let y = u16::from_be_bytes([request[3], request[4]]);
-                let (old_x, old_y) = pointer.unwrap_or((x, y));
-                pointer = Some((x, y));
-                let dx = (i32::from(x) - i32::from(old_x)).clamp(-255, 255) as i16;
-                let dy = (i32::from(old_y) - i32::from(y)).clamp(-255, 255) as i16;
                 let buttons = request[0] & 1 | (request[0] & 2) << 1 | (request[0] & 4) >> 1;
-                let mut payload = [0; 5];
+                let mut payload = [0; 6];
                 payload[0] = buttons;
-                payload[1..3].copy_from_slice(&dx.to_le_bytes());
-                payload[3..5].copy_from_slice(&dy.to_le_bytes());
-                backend.input(2, &payload)?;
+                if backend.input_state()?.absolute_pointer {
+                    payload[1..3].copy_from_slice(&absolute_axis(x, size.0).to_le_bytes());
+                    payload[3..5].copy_from_slice(&absolute_axis(y, size.1).to_le_bytes());
+                    payload[5] =
+                        (i8::from(request[0] & 8 != 0) - i8::from(request[0] & 16 != 0)) as u8;
+                    backend.input(6, &payload)?;
+                }
             }
             6 => {
                 let header = read::<7>(stream)?;
@@ -215,6 +325,80 @@ pub fn serve(stream: &mut (impl Read + Write), backend: &Backend) -> io::Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn absolute_coordinates_cover_edges_and_clamp_outside_display() {
+        assert_eq!(absolute_axis(0, 800), 0);
+        assert_eq!(absolute_axis(799, 800), 32767);
+        assert_eq!(absolute_axis(600, 600), 32767);
+        assert_eq!(absolute_axis(32768, 0), 0);
+        assert_eq!(absolute_axis(1, 1), 0);
+        assert_eq!(absolute_axis(512, 1025), 16383);
+    }
+
+    #[test]
+    fn macos_command_mapping_is_explicit_and_preserves_option() {
+        for (keysym, standard, macos) in [
+            (0xffe9, (0x11, false), (0x1f, true)),
+            (0xffea, (0x11, true), (0x27, true)),
+            (0xffe7, (0x11, false), (0x11, false)),
+            (0xffe8, (0x11, true), (0x11, true)),
+            (0xffeb, (0x1f, true), (0x1f, true)),
+            (0xffec, (0x27, true), (0x27, true)),
+        ] {
+            assert_eq!(
+                keys::set2(KeyboardMapping::Standard.keysym(keysym)),
+                Some(standard)
+            );
+            assert_eq!(
+                keys::set2(KeyboardMapping::MacOs.keysym(keysym)),
+                Some(macos)
+            );
+        }
+    }
+    #[test]
+    fn security_handshake_versions() {
+        struct Stream {
+            input: io::Cursor<Vec<u8>>,
+            output: Vec<u8>,
+        }
+        impl Read for Stream {
+            fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+                self.input.read(bytes)
+            }
+        }
+        impl Write for Stream {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.output.write(bytes)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        for (version, selection, expected) in [
+            (b"RFB 003.003\n", &[][..], &[0, 0, 0, 1][..]),
+            (b"RFB 003.007\n", &[1][..], &[1, 1][..]),
+            (b"RFB 003.008\n", &[1][..], &[1, 1, 0, 0, 0, 0][..]),
+        ] {
+            let mut input = version.to_vec();
+            input.extend(selection);
+            input.push(1); // ClientInit must remain unread by the handshake.
+            let mut stream = Stream {
+                input: io::Cursor::new(input),
+                output: Vec::new(),
+            };
+            handshake(&mut stream, None).unwrap();
+            assert_eq!(&stream.output[..12], b"RFB 003.008\n");
+            assert_eq!(&stream.output[12..], expected);
+            assert_eq!(read::<1>(&mut stream).unwrap(), [1]);
+        }
+        for input in [b"RFB 003.009\n".to_vec(), b"RFB 003.008\n\x02".to_vec()] {
+            let mut stream = Stream {
+                input: io::Cursor::new(input),
+                output: Vec::new(),
+            };
+            assert!(handshake(&mut stream, None).is_err());
+        }
+    }
     #[test]
     fn pixel_layouts_and_validation() {
         let mut pixels = [3, 2, 1, 0];
@@ -256,3 +440,7 @@ mod tests {
         assert_eq!(size, (2, 2));
     }
 }
+
+#[cfg(test)]
+#[path = "rfb_auth_tests.rs"]
+mod auth_tests;

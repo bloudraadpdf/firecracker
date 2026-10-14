@@ -1,6 +1,146 @@
 // Copyright 2026 Bloudraad.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::io;
+
+/// Per-session US-layout modifier state, synchronised with guest PS/2 LEDs.
+#[derive(Default)]
+pub struct Keyboard {
+    explicit_shift: [bool; 2],
+    sent_shift: [bool; 2],
+    printable: Vec<(u8, u32)>,
+    leds: u8,
+    locks_pressed: u8,
+    shortcut_modifiers: u8,
+}
+
+impl Keyboard {
+    /// Update authoritative guest LEDs before translating a key.
+    pub fn set_leds(&mut self, leds: u8) {
+        self.leds = leds & 7;
+    }
+
+    fn semantic_shift(&self, keysym: u32) -> Option<bool> {
+        let shifted = match keysym {
+            0x41..=0x5a => Some(self.leds & 4 == 0),
+            0x61..=0x7a => Some(self.leds & 4 != 0),
+            0x21..=0x7e => Some(b"!@#$%^&*()_+{}|:\"~<>?".contains(&u8::try_from(keysym).unwrap())),
+            _ => None,
+        }?;
+        Some(if self.shortcut_modifiers != 0 {
+            self.explicit_shift.iter().any(|pressed| *pressed)
+        } else {
+            shifted
+        })
+    }
+
+    fn shift(
+        &mut self,
+        desired: [bool; 2],
+        emit: &mut impl FnMut(u8, bool, bool) -> io::Result<()>,
+    ) -> io::Result<()> {
+        for (index, code) in [0x12, 0x59].into_iter().enumerate() {
+            if self.sent_shift[index] != desired[index] {
+                emit(code, false, desired[index])?;
+                self.sent_shift[index] = desired[index];
+            }
+        }
+        Ok(())
+    }
+
+    fn desired_shift(&self, shifted: bool) -> [bool; 2] {
+        if !shifted {
+            [false; 2]
+        } else if self.explicit_shift.iter().any(|pressed| *pressed) {
+            self.explicit_shift
+        } else {
+            [true, false]
+        }
+    }
+
+    /// Emits physical key events while preserving the character carried by an RFB keysym.
+    pub fn event(
+        &mut self,
+        keysym: u32,
+        pressed: bool,
+        mut emit: impl FnMut(u8, bool, bool) -> io::Result<()>,
+    ) -> io::Result<()> {
+        let keysym = match keysym {
+            0x0100_0020..=0x0100_007e => keysym & 0xff,
+            0xffb0..=0xffb9 => keysym - 0xffb0 + u32::from(b'0'),
+            0xffae => u32::from(b'.'),
+            0xff95..=0xff9d => keysym - 0x45,
+            0xff9e => 0xff63,
+            0xff9f => 0xffff,
+            _ => keysym,
+        };
+        let Some((code, extended)) = set2(keysym) else {
+            return Ok(());
+        };
+        if matches!(keysym, 0xffe1 | 0xffe2) {
+            self.explicit_shift[usize::from(keysym == 0xffe2)] = pressed;
+            return self.shift(self.explicit_shift, &mut emit);
+        }
+        let modifier = match (code, extended) {
+            (0x14, false) => 1,
+            (0x14, true) => 2,
+            (0x11, false) => 4,
+            (0x11, true) => 8,
+            (0x1f, true) => 16,
+            (0x27, true) => 32,
+            _ => 0,
+        };
+        if modifier != 0 {
+            self.shift(self.explicit_shift, &mut emit)?;
+            emit(code, extended, pressed)?;
+            if pressed {
+                self.shortcut_modifiers |= modifier;
+            } else {
+                self.shortcut_modifiers &= !modifier;
+            }
+            return Ok(());
+        }
+        let lock = match keysym {
+            0xffe5 => 4,
+            0xff7f => 2,
+            0xff14 => 1,
+            _ => 0,
+        };
+        if lock != 0 {
+            if pressed && self.locks_pressed & lock != 0 {
+                return Ok(());
+            }
+            emit(code, extended, pressed)?;
+            if pressed {
+                self.locks_pressed |= lock;
+            } else {
+                self.locks_pressed &= !lock;
+            }
+            return Ok(());
+        }
+        let semantic_shift = self.semantic_shift(keysym);
+        if let Some(shifted) = semantic_shift.filter(|_| pressed) {
+            self.shift(self.desired_shift(shifted), &mut emit)?;
+            emit(code, extended, true)?;
+            self.printable.retain(|(held, _)| *held != code);
+            self.printable.push((code, keysym));
+        } else {
+            emit(code, extended, pressed)?;
+            if semantic_shift.is_some() {
+                self.printable.retain(|(held, _)| *held != code);
+                let desired = self
+                    .printable
+                    .last()
+                    .map_or(self.explicit_shift, |(_, keysym)| {
+                        self.desired_shift(self.semantic_shift(*keysym).unwrap())
+                    });
+                self.shift(desired, &mut emit)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// X11 keysyms to physical US-layout set-2 keys; modifiers remain separate events.
 pub fn set2(keysym: u32) -> Option<(u8, bool)> {
     let code = match keysym {
@@ -75,20 +215,9 @@ pub fn set2(keysym: u32) -> Option<(u8, bool)> {
         0xffc7 => 0x09,
         0xffc8 => 0x78,
         0xffc9 => 0x07,
-        0xffb0 | 0xff9e => 0x70,
-        0xffb1 | 0xff9c => 0x69,
-        0xffb2 | 0xff99 => 0x72,
-        0xffb3 | 0xff9b => 0x7a,
-        0xffb4 | 0xff96 => 0x6b,
-        0xffb5 | 0xff9d => 0x73,
-        0xffb6 | 0xff98 => 0x74,
-        0xffb7 | 0xff95 => 0x6c,
-        0xffb8 | 0xff97 => 0x75,
-        0xffb9 | 0xff9a => 0x7d,
         0xffaa => 0x7c,
         0xffab => 0x79,
         0xffad => 0x7b,
-        0xffae | 0xff9f => 0x71,
         0xff13 => return Some((0xe1, false)),
         0xff61 | 0xff15 => return Some((0xe0, false)),
         _ => {
@@ -123,6 +252,277 @@ pub fn set2(keysym: u32) -> Option<(u8, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guest_caps_lock_reverses_letter_shift_but_not_punctuation() {
+        for (leds, keysym, shifted) in [
+            (0, 'a', false),
+            (0, 'A', true),
+            (4, 'a', true),
+            (4, 'A', false),
+            (0, '!', true),
+            (4, '!', true),
+            (0, '1', false),
+            (4, '1', false),
+        ] {
+            let mut keyboard = Keyboard::default();
+            keyboard.set_leds(leds);
+            let mut output = Vec::new();
+            for pressed in [true, false] {
+                keyboard
+                    .event(u32::from(keysym), pressed, |code, extended, down| {
+                        output.push((code, extended, down));
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+            let physical = set2(u32::from(keysym)).unwrap();
+            let mut expected = Vec::new();
+            if shifted {
+                expected.push((0x12, false, true));
+            }
+            expected.extend([
+                (physical.0, physical.1, true),
+                (physical.0, physical.1, false),
+            ]);
+            if shifted {
+                expected.push((0x12, false, false));
+            }
+            assert_eq!(output, expected);
+        }
+    }
+
+    #[test]
+    fn lock_repeats_do_not_retoggle_or_predict_guest_state() {
+        let mut keyboard = Keyboard::default();
+        let mut output = Vec::new();
+        for pressed in [true, true, false] {
+            keyboard
+                .event(0xffe5, pressed, |code, _, down| {
+                    output.push((code, down));
+                    Ok(())
+                })
+                .unwrap();
+        }
+        assert_eq!(output, [(0x58, true), (0x58, false)]);
+        assert_eq!(keyboard.semantic_shift(u32::from('a')), Some(false));
+        keyboard.set_leds(4);
+        assert_eq!(keyboard.semantic_shift(u32::from('a')), Some(true));
+        let mut reconnected = Keyboard::default();
+        reconnected.set_leds(4);
+        assert_eq!(reconnected.semantic_shift(u32::from('a')), Some(true));
+    }
+
+    #[test]
+    fn keypad_characters_and_navigation_do_not_depend_on_num_lock() {
+        for leds in 0..=7 {
+            let mut keyboard = Keyboard::default();
+            keyboard.set_leds(leds);
+            let mut output = Vec::new();
+            for keysym in [0xffb1, 0xffae, 0xff9c, 0xff9f] {
+                for down in [true, false] {
+                    keyboard
+                        .event(keysym, down, |code, extended, down| {
+                            output.push((code, extended, down));
+                            Ok(())
+                        })
+                        .unwrap();
+                }
+            }
+            assert_eq!(
+                output,
+                [
+                    (0x16, false, true),
+                    (0x16, false, false),
+                    (0x49, false, true),
+                    (0x49, false, false),
+                    (0x69, true, true),
+                    (0x69, true, false),
+                    (0x71, true, true),
+                    (0x71, true, false),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn caps_lock_does_not_change_control_or_windows_shortcuts() {
+        for leds in [0, 4] {
+            let mut keyboard = Keyboard::default();
+            keyboard.set_leds(leds);
+            let mut output = Vec::new();
+            for (keysym, pressed) in [
+                (0xffe3, true),
+                (0xffe1, true),
+                (u32::from('S'), true),
+                (u32::from('S'), false),
+                (0xffe1, false),
+                (0xffe3, false),
+                (0xffeb, true),
+                (u32::from('r'), true),
+                (u32::from('r'), false),
+                (0xffeb, false),
+            ] {
+                keyboard
+                    .event(keysym, pressed, |code, extended, down| {
+                        output.push((code, extended, down));
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+            assert_eq!(
+                output,
+                [
+                    (0x14, false, true),
+                    (0x12, false, true),
+                    (0x1b, false, true),
+                    (0x1b, false, false),
+                    (0x12, false, false),
+                    (0x14, false, false),
+                    (0x1f, true, true),
+                    (0x2d, false, true),
+                    (0x2d, false, false),
+                    (0x1f, true, false),
+                ]
+            );
+        }
+    }
+
+    fn sequence(events: &[(u32, bool)]) -> Vec<(u8, bool, bool)> {
+        let mut keyboard = Keyboard::default();
+        let mut output = Vec::new();
+        for &(keysym, pressed) in events {
+            keyboard
+                .event(keysym, pressed, |code, extended, pressed| {
+                    output.push((code, extended, pressed));
+                    Ok(())
+                })
+                .unwrap();
+        }
+        output
+    }
+
+    #[test]
+    fn printable_keysyms_supply_missing_shift_and_preserve_repeats() {
+        assert_eq!(
+            sequence(&[
+                (u32::from('A'), true),
+                (u32::from('A'), true),
+                (u32::from('A'), false),
+                (u32::from('!'), true),
+                (u32::from('!'), false),
+                (u32::from(':'), true),
+                (u32::from(':'), false),
+            ]),
+            [
+                (0x12, false, true),
+                (0x1c, false, true),
+                (0x1c, false, true),
+                (0x1c, false, false),
+                (0x12, false, false),
+                (0x12, false, true),
+                (0x16, false, true),
+                (0x16, false, false),
+                (0x12, false, false),
+                (0x12, false, true),
+                (0x4c, false, true),
+                (0x4c, false, false),
+                (0x12, false, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn explicit_right_shift_is_restored_after_unshifted_character() {
+        assert_eq!(
+            sequence(&[
+                (0xffe2, true),
+                (u32::from('a'), true),
+                (u32::from('a'), false),
+                (u32::from('B'), true),
+                (u32::from('B'), false),
+                (0xffe2, false),
+            ]),
+            [
+                (0x59, false, true),
+                (0x59, false, false),
+                (0x1c, false, true),
+                (0x1c, false, false),
+                (0x59, false, true),
+                (0x32, false, true),
+                (0x32, false, false),
+                (0x59, false, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn two_explicit_shifts_remain_independent() {
+        assert_eq!(
+            sequence(&[
+                (0xffe1, true),
+                (0xffe2, true),
+                (0xffe1, false),
+                (u32::from('?'), true),
+                (u32::from('?'), false),
+                (0xffe2, false),
+            ]),
+            [
+                (0x12, false, true),
+                (0x59, false, true),
+                (0x12, false, false),
+                (0x4a, false, true),
+                (0x4a, false, false),
+                (0x59, false, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn overlapping_characters_keep_shift_until_the_last_release() {
+        assert_eq!(
+            sequence(&[
+                (u32::from('A'), true),
+                (u32::from('B'), true),
+                (u32::from('a'), false),
+                (u32::from('B'), false),
+            ]),
+            [
+                (0x12, false, true),
+                (0x1c, false, true),
+                (0x32, false, true),
+                (0x1c, false, false),
+                (0x32, false, false),
+                (0x12, false, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn unicode_ascii_alias_and_windows_shortcut_preserve_physical_keys() {
+        assert_eq!(
+            sequence(&[
+                (0x0100_0041, true),
+                (0x0100_0041, false),
+                (0xffeb, true),
+                (u32::from('r'), true),
+                (u32::from('r'), false),
+                (0xffeb, false),
+                (0x0100_20ac, true),
+                (0x0100_20ac, false),
+            ]),
+            [
+                (0x12, false, true),
+                (0x1c, false, true),
+                (0x1c, false, false),
+                (0x12, false, false),
+                (0x1f, true, true),
+                (0x2d, false, true),
+                (0x2d, false, false),
+                (0x1f, true, false),
+            ]
+        );
+    }
     #[test]
     fn text_modifiers_navigation_and_special_keys() {
         assert_eq!(set2(u32::from('A')), set2(u32::from('a')));
@@ -131,5 +531,17 @@ mod tests {
         assert_eq!(set2(0xff13), Some((0xe1, false)));
         assert_eq!(set2(0xff61), Some((0xe0, false)));
         assert_eq!(set2(0x10020ac), None);
+        for (keysym, code, extended) in [
+            (0xffaa, 0x7c, false),
+            (0xffab, 0x79, false),
+            (0xffad, 0x7b, false),
+            (0xffaf, 0x4a, true),
+            (0xff8d, 0x5a, true),
+        ] {
+            assert_eq!(
+                sequence(&[(keysym, true), (keysym, false)]),
+                [(code, extended, true), (code, extended, false)]
+            );
+        }
     }
 }

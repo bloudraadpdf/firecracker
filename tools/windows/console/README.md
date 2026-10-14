@@ -1,6 +1,6 @@
 # Firecracker remote console bridge
 
-This host process converts the local Firecracker console protocol into RFB 3.8.
+This host process converts the local Firecracker console protocol into RFB 3.3, 3.7 or 3.8.
 It runs outside the VMM sandbox. Guest networking and vsock are not used.
 
 ```text
@@ -33,9 +33,20 @@ build/cargo_target/debug/firecracker-console /run/vm/console.sock rfb 127.0.0.1:
 ```
 
 Forward that port through SSH and connect a VNC viewer to the forwarded port.
-The local RFB protocol uses security type None. The SSH connection or an
-external authenticated gateway supplies remote access control. The bridge
-rejects non-loopback bind addresses.
+Without a password file, RFB uses security type None. macOS Screen Sharing
+requires VNC password authentication. Supply an optional private password file:
+
+```sh
+build/cargo_target/debug/firecracker-console /run/vm/console.sock rfb 127.0.0.1:5900 /run/vm/vnc.password
+```
+
+The file must contain 1 to 8 printable ASCII characters, optionally followed by
+a newline. Enter that password in Screen Sharing. Use mode `rfb-macos` instead of `rfb`
+for its keyboard convention: Command becomes the Windows key and Option
+remains Alt. Other clients and the browser retain standard RFB key mappings. VNC authentication is a legacy
+DES challenge-response protocol, not transport encryption; retain the SSH tunnel.
+The bridge rejects non-loopback bind addresses. Authenticated sessions remain
+connected while idle; the 30-second read deadline applies to the handshake only.
 
 ## Browser console
 
@@ -99,22 +110,52 @@ replace gateway user authorisation. Browser assets are not in the VMM binary.
 - Raw framebuffer encoding, 32-bit RGB888 in either byte order, and DesktopSize.
 - Maximum framebuffer size: 32 MiB. Maximum refresh rate: about 30 Hz.
 - Keyboard mapping: US physical layout, function/navigation/keypad keys,
-  modifiers, Pause and Print Screen. Unicode text injection is not implemented.
-- Standard three-button relative PS/2 mouse. No wheel or absolute tablet.
+  modifiers, Pause and Print Screen. Printable ASCII keysyms retain their case
+  and punctuation through Shift, Caps Lock and Num Lock handling. Guest LED
+  state is queried before key presses, including after reconnect or restore.
+  Unicode text injection and automatic guest-layout detection are not implemented.
+- Three-button USB HID absolute pointer with vertical scrolling once the guest
+  or UEFI firmware has configured UHCI/HID. Pointer events are ignored until
+  USB is ready. There is no second mouse or relative-pointer fallback.
 - Clipboard input is consumed and discarded, with a 1 MiB bound.
-- Each connection has a 30-second read/write deadline. A silent client reconnects.
+- A 30-second read timeout bounds authentication and negotiation. After
+  authentication, idle sessions remain connected. Writes and local backend
+  requests retain a 30-second timeout.
 - Authenticated session disconnect and protocol errors send release-all to the
   VMM. Failed WebSocket authentication does not send guest input.
   Forced process termination cannot perform this exchange; the next successful
-  session sends release-all before use.
+  session sends release-all before use. If an input queue is full, the VMM
+  retains and retries pending releases before accepting new input. This pending
+  state survives snapshots.
 - No video compression, audio, clipboard sharing or guest file transfer.
 
 The host Unix protocol uses one request per connection. Each request is 12 bytes:
-`FCC1`, operation byte, then seven payload bytes. Operations are frame (0),
-key (1), relative mouse (2), release-all (3), and eject (4). This bridge does
-not expose eject to RFB clients. Frame replies are `FCF1`, little-endian u32
-width/height/byte count, then BGRA pixels. Input replies are `FCA1`, little-endian
-u32 status and eight zero bytes. Zero means success.
+`FCC1`, operation byte, then seven payload bytes. Unused payload bytes must be
+zero. Operations are frame (0), key (1), release-all (3),
+eject (4), input-state query (5), and absolute pointer (6). The bridge does not
+expose eject to RFB clients. Operation 2 is reserved and rejected.
+
+Frame replies are `FCF1`, little-endian u32 width/height/byte count, then BGRA
+pixels. Other replies are 16 bytes: `FCA1`, little-endian u32 status, then eight
+bytes. Status zero means success; nonzero means the request failed. Input
+acknowledgements have zero bytes after the status. Input-state replies use:
+
+| Response byte | Meaning |
+|---|---|
+| 8 | Absolute pointer ready: 0 or 1 |
+| 9 | Guest keyboard LEDs: Scroll Lock bit 0, Num Lock bit 1, Caps Lock bit 2 |
+| 10 | Pending Num Lock/Caps Lock LED acknowledgement, using the same bits |
+| 11..15 | Zero |
+
+The bridge waits up to 100 ms for a pending lock LED acknowledgement before a
+non-lock key press. It fails the session if the guest does not acknowledge;
+it does not guess the lock state. Key releases do not wait.
+
+Operation 6 uses request byte 5 for buttons (left bit 0, right bit 1, middle
+bit 2), bytes 6..7 for little-endian X, bytes 8..9 for little-endian Y, byte 10
+for signed vertical wheel movement, and byte 11 zero. Coordinates range from
+0 to 32767; wheel movement ranges from -127 to 127. Positive wheel movement
+scrolls up. The bridge scales RFB pixel coordinates to this absolute range.
 
 Tests cover binary WebSocket transport and authentication, RFB negotiation,
 frame clipping/resizing, pixel conversion, and keyboard/mouse requests against

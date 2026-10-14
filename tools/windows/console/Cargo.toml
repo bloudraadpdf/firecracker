@@ -10,3 +10,5 @@ publish = false
 [dependencies]
 tungstenite = { version = "=0.30.0", default-features = false, features = ["handshake"] }
 tiny_http = "=0.12.0"
+des = "=0.8.1"
+getrandom = "=0.4.3"
