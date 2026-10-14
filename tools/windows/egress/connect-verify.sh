@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 set -euo pipefail
 checker=$(realpath "$(dirname "$0")/assert-disk-closed.sh")
+secure_checker=$(realpath "$(dirname "$0")/verify-secure-state.sh")
 cd "${WINDOWS_CONNECT_BASE:?Set test directory}"
 prefix=${WINDOWS_CONNECT_PREFIX:?Set guest file prefix}
 tag=${WINDOWS_CONNECT_TAG:?Set guest marker tag}
@@ -36,6 +37,10 @@ ntfs-3g "$partition" mnt -o ro
 test ! -e mnt/hiberfil.sys
 iconv -f "$encoding" -t UTF-8 "mnt/$prefix-probe.log" > run/guest-transcript.txt
 cp "mnt/$prefix-data.bin" run/final-data.bin
+if [[ ${WINDOWS_SECURE_CHECKS:-0} = 1 ]]; then
+    cp mnt/Users/Public/fc-tpm-state.txt run/tpm-state.txt
+    bash "$secure_checker" run/guest-transcript.txt run/tpm-state.txt
+fi
 for iteration in 1 2 3; do
     test "$(grep -c "^${tag}_PASS iteration=$iteration" run/guest-transcript.txt)" = 1
     if [[ ${WINDOWS_SECURE_CHECKS:-0} = 1 ]]; then

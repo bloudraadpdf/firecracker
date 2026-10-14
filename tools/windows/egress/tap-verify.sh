@@ -44,6 +44,10 @@ if [[ "$tag" = XP ]]; then
 else
     cp "$base/mnt/Users/Public/fc-restore-data.bin" "$run/final-data.bin"
     cat "$base/mnt/Users/Public/fc-network.log" | iconv -f "$encoding" -t UTF-8 > "$run/final-guest.txt"
+    if [[ ${WINDOWS_SECURE_CHECKS:-0} = 1 ]]; then
+        cp "$base/mnt/Users/Public/fc-tpm-state.txt" "$run/tpm-state.txt"
+        bash "$(dirname "$0")/verify-secure-state.sh" "$run/final-guest.txt" "$run/tpm-state.txt"
+    fi
 
     for iteration in 1 2 3; do
         test "$(grep -c "^PASS ${tag}_NET iteration=$iteration " "$run/final-guest.txt")" = 1
