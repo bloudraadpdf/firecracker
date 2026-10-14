@@ -59,6 +59,8 @@ This DEBUG image passed the isolated EFI probe with a test-only PK/KEK/db:
 These checks used `tests/SecureBootProbe.c`, a separately signed application
 and an untrusted test CA. They do not establish Windows installation acceptance
 or a production trust policy. Never reuse the probe key for deployed guests.
+The [probe procedure](tests/README.md) gives the build, signing, provisioning
+and bounded execution commands.
 
 The RELEASE image digest is
 `c5e2208aa0c8a00ce45dc77d5c2aa24bad1cca92f9a6aab842a2d9766c90bc3e`.
