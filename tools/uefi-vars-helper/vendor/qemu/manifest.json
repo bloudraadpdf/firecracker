@@ -1,0 +1,18 @@
+{
+  "revision": "8ee6c77176cfee03be0ec7665b6652b2f31f1531",
+  "files": {
+    "COPYING": "dd3ce02338c3a48abb6ba59b48809f7108a8bd242cb0cc8be90daafa30707c28",
+    "include/qemu/queue.h": "7e9b631e83757ac14f0bc251860eeba82540ac1ac72d2d959681a00a50248f67",
+    "include/qemu/uuid.h": "501f807504ac16dd3310e48a6e07f09f01e27a80161b034a836410d37d534b1b",
+    "include/hw/uefi/var-service.h": "2e1086453e62b88ed1217dc6c5d26b7bf31df60030952a852ead97c3d1a44e7a",
+    "include/hw/uefi/var-service-edk2.h": "8a9d7e9fb7ad4a132fad1fc3dcaf22aab245898039513d658ff0dc92e6e3e8d2",
+    "include/hw/uefi/var-service-api.h": "87ad8d1f3ca028e0b2fde7d93794ae18149d855be9e32e10ea4d988238449990",
+    "hw/uefi/var-service-auth.c": "155fb9ae8f4dbf733f97927ef1b08048175908f024baa6b3794b212faac7c17c",
+    "hw/uefi/var-service-pkcs7.c": "e01fce43d75f37d20cbfb95771891aa5687bbc47a56f1354c430eda2f8248267",
+    "hw/uefi/var-service-policy.c": "38c661df982fe344fa5a97ff1323d5344ce1eb0e7f4874961bd8a6eeb37e7fb7",
+    "hw/uefi/var-service-siglist.c": "938815c0585ecb201a0e59188944ae0c2720f8cc3e1f1e528bf45bb3af07ce62",
+    "hw/uefi/var-service-utils.c": "efe6430c91750da8d6e9be5f22142d6ff8e346d01d37c8a2b3aea77781df1b6c",
+    "hw/uefi/var-service-vars.c": "f9f107092cd616df45ddcf31c044b5ab348c7e5c8c26269526c3d18c31bb47c7",
+    "hw/uefi/var-service-guid.c": "ec309c7c3799f94bddd524aebf4571dc9b87c14ee18b814c6192091e86a0b0fe"
+  }
+}
