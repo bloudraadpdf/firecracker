@@ -25,6 +25,8 @@ use crate::vstate::vm::KvmVm;
 
 pub struct PciSegment {
     pub(crate) pci_transport: PciTransportMode,
+    pub(crate) legacy_io_enabled: bool,
+    pub(crate) legacy_vga_enabled: bool,
     pub(crate) id: u16,
     pub(crate) pci_bus: Arc<Mutex<PciBus>>,
     // The MMIO bus only holds a weak reference to the device, so we need to keep
@@ -86,6 +88,8 @@ impl PciSegment {
 
         let segment = PciSegment {
             pci_transport: resource_allocator.pci_transport,
+            legacy_io_enabled: !resource_allocator.pci_transport.is_modern(),
+            legacy_vga_enabled: false,
             id,
             pci_bus,
             _pci_config_mmio: pci_config_mmio,
@@ -266,6 +270,12 @@ impl Aml for PciSegment {
             0x0d00u16
         };
         let io_window = aml::AddressSpace::new_io(io_start, 0xffffu16)?;
+        let vga_memory = aml::AddressSpace::new_memory(
+            aml::AddressSpaceCacheable::Cacheable,
+            true,
+            0xa0000u32,
+            0xbffffu32,
+        )?;
         let mem32 = aml::AddressSpace::new_memory(
             aml::AddressSpaceCacheable::NotCacheable,
             true,
@@ -283,12 +293,15 @@ impl Aml for PciSegment {
         if has_ports {
             resources.push(&config_ports);
         }
+        if has_ports && self.legacy_vga_enabled {
+            resources.push(&vga_memory);
+        }
         resources.push(&mem32);
         if self.pci_transport.is_modern() {
             resources.push(&mem64);
         }
         if has_ports {
-            if !self.pci_transport.is_modern() {
+            if self.legacy_io_enabled {
                 resources.push(&legacy_io_window);
             }
             resources.push(&io_window);
@@ -362,6 +375,65 @@ mod tests {
         let mut bytes = Vec::new();
         segment.append_aml_bytes(&mut bytes).unwrap();
         bytes
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn modern_console_exposes_legacy_io_without_changing_virtio_transport() {
+        let vmm = default_vmm();
+        let vm = vmm.vm.as_kvm().unwrap().clone();
+        let mut segment = PciSegment::new(0, &vm, &[0; 32]).unwrap();
+        let mut resource = Vec::new();
+        aml::AddressSpace::new_io(0u16, 0x0cf7u16)
+            .unwrap()
+            .append_aml_bytes(&mut resource)
+            .unwrap();
+        for enabled in [false, true] {
+            segment.legacy_io_enabled = enabled;
+            let mut bytes = Vec::new();
+            segment.append_aml_bytes(&mut bytes).unwrap();
+            assert_eq!(
+                bytes
+                    .windows(resource.len())
+                    .any(|window| window == resource),
+                enabled
+            );
+            assert!(segment.pci_transport.is_modern());
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn console_vga_memory_window_is_bounded_and_opt_in() {
+        let mut resource = Vec::new();
+        aml::AddressSpace::new_memory(
+            aml::AddressSpaceCacheable::Cacheable,
+            true,
+            0xa0000u32,
+            0xbffffu32,
+        )
+        .unwrap()
+        .append_aml_bytes(&mut resource)
+        .unwrap();
+        for transport in [PciTransportMode::Modern, PciTransportMode::Transitional] {
+            let vmm = default_vmm();
+            let vm = vmm.vm.as_kvm().unwrap().clone();
+            vm.resource_allocator().pci_transport = transport;
+            let mut segment = PciSegment::new(0, &vm, &[0; 32]).unwrap();
+            assert!(!segment.legacy_vga_enabled);
+            for enabled in [false, true] {
+                segment.legacy_vga_enabled = enabled;
+                let mut bytes = Vec::new();
+                segment.append_aml_bytes(&mut bytes).unwrap();
+                assert_eq!(
+                    bytes
+                        .windows(resource.len())
+                        .any(|window| window == resource),
+                    enabled
+                );
+                assert_eq!(segment.pci_transport, transport);
+            }
+        }
     }
 
     #[cfg(target_arch = "x86_64")]

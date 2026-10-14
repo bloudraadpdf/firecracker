@@ -17,6 +17,10 @@ impl VideoMemory {
         Ok(Self(Arc::new(MmapRegion::new(FRAMEBUFFER_SIZE)?)))
     }
 
+    pub(super) fn mapping(&self) -> Arc<MmapRegion> {
+        self.0.clone()
+    }
+
     pub(super) fn len(&self) -> usize {
         self.0.size()
     }

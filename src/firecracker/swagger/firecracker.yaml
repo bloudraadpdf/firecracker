@@ -1326,6 +1326,27 @@ definitions:
         description: A description of the error condition
         readOnly: true
 
+  ConsoleConfig:
+    type: object
+    additionalProperties: false
+    description: |
+      Optional AMD64 VGA, PS/2 and optical installation hardware. Requires PCI,
+      at least 64 MiB guest memory and ordinary pages. Set through the startup
+      configuration file; there is no separate console configuration endpoint.
+    required:
+      - socket_path
+      - vga_rom_path
+    properties:
+      socket_path:
+        type: string
+        description: Private host Unix socket for the console bridge, at most 107 bytes.
+      vga_rom_path:
+        type: string
+        description: Host path to the SeaVGABIOS expansion ROM.
+      optical_image_path:
+        type: string
+        description: Optional host path to a read-only installation ISO.
+
   FullVmConfiguration:
     type: object
     properties:
@@ -1340,6 +1361,8 @@ definitions:
         $ref: "#/definitions/BootSource"
       cpu-config:
         $ref: "#/definitions/CpuConfig"
+      console:
+        $ref: "#/definitions/ConsoleConfig"
       logger:
         $ref: "#/definitions/Logger"
       machine-config:

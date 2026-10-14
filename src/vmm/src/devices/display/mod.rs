@@ -99,6 +99,11 @@ impl Default for Vga {
 }
 
 impl Vga {
+    /// Stable, page-aligned VRAM backing for the linear framebuffer KVM slot.
+    pub(crate) fn framebuffer_mapping(&self) -> std::sync::Arc<vm_memory::MmapRegion> {
+        self.memory.mapping()
+    }
+
     /// Rejects malformed restored state before it can reach device accesses.
     pub fn validate(&self) -> bool {
         self.memory.len() == FRAMEBUFFER_SIZE

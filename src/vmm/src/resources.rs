@@ -83,6 +83,9 @@ pub enum CustomCpuTemplateOrPath {
 #[serde(rename_all = "kebab-case")]
 #[allow(missing_docs)]
 pub struct VmmConfig {
+    #[cfg(target_arch = "x86_64")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub console: Option<crate::vmm_config::console::ConsoleConfig>,
     pub balloon: Option<BalloonDeviceConfig>,
     pub drives: Vec<BlockDeviceConfig>,
     pub boot_source: BootSourceConfig,
@@ -115,6 +118,9 @@ pub struct LaunchIo {
 /// held in the Vmm.
 #[derive(Debug, Default)]
 pub struct VmResources {
+    /// Optional graphical console and optical media.
+    #[cfg(target_arch = "x86_64")]
+    pub console: Option<crate::vmm_config::console::ConsoleConfig>,
     /// The vCpu and memory configuration for this microVM.
     pub machine_config: MachineConfig,
     /// The boot source spec (contains both config and builder) for this microVM.
@@ -199,6 +205,12 @@ impl VmResources {
                     resources.set_custom_cpu_template(template)
                 }
             }
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        if let Some(console) = vmm_config.console {
+            console.validate()?;
+            resources.console = Some(console);
         }
 
         resources.build_boot_source(vmm_config.boot_source)?;
@@ -530,6 +542,12 @@ impl VmResources {
     pub fn allocate_guest_memory(&self) -> Result<Vec<GuestRegionMmap>, MemoryError> {
         let regions =
             crate::arch::arch_memory_regions(mib_to_bytes(self.machine_config.mem_size_mib));
+        #[cfg(target_arch = "x86_64")]
+        let regions = if self.console.is_some() {
+            crate::arch::x86_64::reserve_vga_memory(regions)
+        } else {
+            regions
+        };
         self.allocate_memory_regions(&regions)
     }
 
@@ -549,6 +567,8 @@ impl VmResources {
 impl From<&VmResources> for VmmConfig {
     fn from(resources: &VmResources) -> Self {
         VmmConfig {
+            #[cfg(target_arch = "x86_64")]
+            console: resources.console.clone(),
             balloon: resources.balloon.get_config().ok(),
             drives: resources.block.configs(),
             boot_source: resources.boot_source.config.clone(),
@@ -664,6 +684,8 @@ mod tests {
 
     fn default_vm_resources() -> VmResources {
         VmResources {
+            #[cfg(target_arch = "x86_64")]
+            console: None,
             machine_config: MachineConfig::default(),
             boot_source: default_boot_cfg(),
             block: default_blocks(),

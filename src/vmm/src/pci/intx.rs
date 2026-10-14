@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Weak};
 
 use event_manager::{EventOps, Events, MutEventSubscriber};
 use vmm_sys_util::epoll::EventSet;
@@ -21,14 +21,23 @@ struct Source {
     masked: bool,
 }
 
+#[derive(Debug)]
+enum Registration {
+    #[cfg(target_arch = "x86_64")]
+    Pending,
+    Active,
+    Failed(String),
+}
+
 /// A wired-OR PCI interrupt line with one ISR per device.
 #[derive(Debug)]
 pub(crate) struct PciIntxGroup {
-    vm: Arc<KvmVm>,
+    vm: Weak<KvmVm>,
     irq: EventFd,
     resample: EventFd,
     sources: HashMap<u8, Source>,
     asserted: bool,
+    registration: Registration,
 }
 
 impl PciIntxGroup {
@@ -46,12 +55,33 @@ impl PciIntxGroup {
             return Err(err.into());
         }
         Ok(Self {
-            vm,
+            vm: Arc::downgrade(&vm),
             irq,
             resample,
             sources: HashMap::new(),
             asserted: false,
+            registration: Registration::Pending,
         })
+    }
+
+    pub(crate) fn is_registered(&self) -> bool {
+        matches!(self.registration, Registration::Active)
+    }
+
+    pub(crate) fn check_registered(&self) -> std::io::Result<()> {
+        match &self.registration {
+            Registration::Active => Ok(()),
+            #[cfg(target_arch = "x86_64")]
+            Registration::Pending => {
+                Err(std::io::Error::other("PCI INTx resampling not registered"))
+            }
+            Registration::Failed(error) => Err(std::io::Error::other(error.clone())),
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) fn reset_registration(&mut self) {
+        self.registration = Registration::Pending;
     }
 
     pub(crate) fn bind(
@@ -64,7 +94,11 @@ impl PciIntxGroup {
             return Err(InterruptError::InvalidVectorIndex(usize::from(slot)));
         }
         self.sources.insert(slot, Source { status, masked });
-        self.update()
+        if let Err(error) = self.update() {
+            self.sources.remove(&slot);
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub(crate) fn unbind(&mut self, slot: u8) -> Result<(), InterruptError> {
@@ -115,9 +149,12 @@ impl PciIntxGroup {
 
 impl MutEventSubscriber for PciIntxGroup {
     fn init(&mut self, ops: &mut EventOps) {
-        if let Err(err) = ops.add(Events::new(&self.resample, EventSet::IN)) {
-            error!("Failed to register PCI INTx resampling: {err}");
-        }
+        self.registration = match ops.add(Events::new(&self.resample, EventSet::IN)) {
+            Ok(()) => Registration::Active,
+            Err(err) => {
+                Registration::Failed(format!("Failed to register PCI INTx resampling: {err}"))
+            }
+        };
     }
 
     fn process(&mut self, event: Events, _ops: &mut EventOps) {
@@ -137,11 +174,13 @@ impl MutEventSubscriber for PciIntxGroup {
 
 impl Drop for PciIntxGroup {
     fn drop(&mut self) {
-        if let Err(err) = self.vm.common.fd.unregister_irqfd(&self.irq, PCI_INTX_GSI) {
+        let Some(vm) = self.vm.upgrade() else {
+            return;
+        };
+        if let Err(err) = vm.common.fd.unregister_irqfd(&self.irq, PCI_INTX_GSI) {
             error!("Failed to unregister PCI INTx: {err}");
         }
-        if let Err(err) = self
-            .vm
+        if let Err(err) = vm
             .resource_allocator()
             .gsi_legacy_allocator
             .free_id(PCI_INTX_GSI)
@@ -164,6 +203,42 @@ mod tests {
 
     use super::*;
     use crate::vstate::vm::tests::setup_vm_with_memory;
+
+    #[test]
+    fn group_does_not_keep_vm_alive() {
+        let vm = Arc::new(setup_vm_with_memory(1 << 20));
+        vm.setup_irqchip().unwrap();
+        let weak = Arc::downgrade(&vm);
+        let group = PciIntxGroup::new(vm.clone()).unwrap();
+        assert_eq!(Arc::strong_count(&vm), 1);
+        drop(vm);
+        assert!(weak.upgrade().is_none());
+        drop(group);
+    }
+
+    #[test]
+    fn restored_pending_source_and_gsi_cleanup() {
+        let vm = Arc::new(setup_vm_with_memory(1 << 20));
+        vm.setup_irqchip().unwrap();
+        let mut group = PciIntxGroup::new(vm.clone()).unwrap();
+        let restored_status = Arc::new(AtomicU32::new(1));
+        group.bind(3, restored_status.clone(), true).unwrap();
+        assert!(!group.asserted);
+        group.mask(3, false).unwrap();
+        assert!(group.asserted);
+        assert_eq!(group.clear(3).unwrap(), 1);
+        assert!(!group.asserted);
+        group.unbind(3).unwrap();
+        drop(group);
+        vm.resource_allocator()
+            .gsi_legacy_allocator
+            .allocate_id_at(PCI_INTX_GSI)
+            .unwrap();
+        vm.resource_allocator()
+            .gsi_legacy_allocator
+            .free_id(PCI_INTX_GSI)
+            .unwrap();
+    }
 
     fn run_to_port(vcpu: &mut VcpuFd, expected: u16) {
         let deadline = Instant::now() + Duration::from_secs(2);

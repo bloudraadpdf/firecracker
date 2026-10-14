@@ -339,3 +339,31 @@ fn memory_bytes(vga: &Vga, offset: usize, len: usize) -> Vec<u8> {
     vga.memory.read(offset, &mut bytes);
     bytes
 }
+
+#[test]
+fn mapped_vram_is_shared_but_snapshots_are_independent() {
+    use vm_memory::{Bytes, VolatileMemory};
+    let vga = Vga::default();
+    let mapping = vga.framebuffer_mapping();
+    assert_eq!(mapping.as_ptr() as usize % 4096, 0);
+    mapping
+        .get_slice(0, 4)
+        .unwrap()
+        .write_slice(&[1, 2, 3, 4], 0)
+        .unwrap();
+    assert_eq!(memory_bytes(&vga, 0, 4), [1, 2, 3, 4]);
+    let snapshot = vga.clone();
+    mapping
+        .get_slice(0, 4)
+        .unwrap()
+        .write_slice(&[5, 6, 7, 8], 0)
+        .unwrap();
+    assert_eq!(memory_bytes(&snapshot, 0, 4), [1, 2, 3, 4]);
+    let encoded = bitcode::serialize(&vga).unwrap();
+    let restored: Vga = bitcode::deserialize(&encoded).unwrap();
+    assert_eq!(memory_bytes(&restored, 0, 4), [5, 6, 7, 8]);
+    assert!(!std::sync::Arc::ptr_eq(
+        &mapping,
+        &restored.framebuffer_mapping()
+    ));
+}
