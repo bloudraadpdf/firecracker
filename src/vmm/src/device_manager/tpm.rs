@@ -138,6 +138,9 @@ impl DeviceManager {
                 ],
             )
             .append_aml_bytes(bytes)?;
+            if self.uefi_vars.is_some() {
+                super::tpm_ppi::append(bytes)?;
+            }
         }
         Ok(())
     }

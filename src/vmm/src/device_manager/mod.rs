@@ -89,6 +89,8 @@ mod platform;
 #[cfg(target_arch = "x86_64")]
 mod tpm;
 #[cfg(target_arch = "x86_64")]
+mod tpm_ppi;
+#[cfg(target_arch = "x86_64")]
 mod uefi_vars;
 
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
