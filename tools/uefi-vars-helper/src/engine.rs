@@ -76,6 +76,19 @@ impl Engine {
         }
         Ok(status)
     }
+    pub fn set_variable(
+        &mut self,
+        name: &str,
+        vendor: [u8; 16],
+        attributes: u32,
+        data: &[u8],
+    ) -> Result<u64, &'static str> {
+        let mut message = set_message(name, vendor, attributes, data);
+        if self.transact(&mut message)? != 0 {
+            return Err("variable transport failure");
+        }
+        Ok(u64::from_le_bytes(message[32..40].try_into().unwrap()))
+    }
     pub fn save(&self) -> State {
         let mut state = State {
             flags: unsafe { fcuv_flags(self.0.as_ptr()) },
@@ -160,6 +173,31 @@ impl Engine {
         }
         Ok(e)
     }
+}
+fn set_message(name: &str, vendor: [u8; 16], attributes: u32, data: &[u8]) -> Vec<u8> {
+    let name: Vec<u8> = name
+        .encode_utf16()
+        .chain([0])
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    let mut message = vec![
+        0x33, 0xd5, 0x32, 0xed, 0xe6, 0x99, 0x09, 0x42, 0x9c, 0xc0, 0x2d, 0x72, 0xcd, 0xd9, 0x98,
+        0xa7,
+    ];
+    message.extend(
+        u64::try_from(16 + 36 + name.len() + data.len())
+            .unwrap()
+            .to_le_bytes(),
+    );
+    message.extend(3u64.to_le_bytes());
+    message.extend(0u64.to_le_bytes());
+    message.extend(vendor);
+    message.extend(u64::try_from(data.len()).unwrap().to_le_bytes());
+    message.extend(u64::try_from(name.len()).unwrap().to_le_bytes());
+    message.extend(attributes.to_le_bytes());
+    message.extend(name);
+    message.extend(data);
+    message
 }
 #[cfg(test)]
 mod tests {
@@ -256,24 +294,6 @@ mod authentication_tests {
         .unwrap();
         engine.cold_boot();
         engine
-    }
-    fn set_message(name: &str, vendor: [u8; 16], attributes: u32, data: &[u8]) -> Vec<u8> {
-        let name = utf16(name);
-        let mut message = guid("33d532ede69909429cc02d72cdd998a7").to_vec();
-        message.extend(
-            u64::try_from(16 + 36 + name.len() + data.len())
-                .unwrap()
-                .to_le_bytes(),
-        );
-        message.extend(3u64.to_le_bytes());
-        message.extend(0u64.to_le_bytes());
-        message.extend(vendor);
-        message.extend(u64::try_from(data.len()).unwrap().to_le_bytes());
-        message.extend(u64::try_from(name.len()).unwrap().to_le_bytes());
-        message.extend(attributes.to_le_bytes());
-        message.extend(name);
-        message.extend(data);
-        message
     }
     fn status(engine: &mut Engine, message: &mut [u8]) -> u64 {
         assert_eq!(engine.transact(message), Ok(0));
