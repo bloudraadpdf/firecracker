@@ -15,6 +15,7 @@ use super::console_bridge::{BridgeState, ConsoleBridge};
 use super::console_display::{DisplayDevice, DisplayState};
 use super::console_optical::{OpticalDevice, OpticalState};
 use super::console_server::ConsoleServer;
+use super::console_usb::{UsbDevice, UsbState};
 use super::{DeviceManager, VirtioDevices};
 use crate::EventManager;
 use crate::devices::legacy::I8042State;
@@ -30,6 +31,8 @@ pub struct ConsoleState {
     display: DisplayState,
     input: I8042State,
     held: Vec<(u8, bool)>,
+    release_pending: bool,
+    usb: UsbState,
     optical: Option<OpticalState>,
 }
 
@@ -40,6 +43,7 @@ pub struct ConsoleHardware {
     bridge: Arc<Mutex<ConsoleBridge>>,
     display: Arc<Mutex<DisplayDevice>>,
     server: Arc<Mutex<ConsoleServer>>,
+    usb: Arc<Mutex<UsbDevice>>,
     optical: Option<Arc<Mutex<OpticalDevice>>>,
 }
 
@@ -47,6 +51,7 @@ pub struct ConsoleHardware {
 pub(crate) struct ConsoleRegistration<'a> {
     events: &'a mut EventManager,
     subscriber: Option<SubscriberId>,
+    usb: Option<(SubscriberId, Arc<Mutex<UsbDevice>>)>,
     intx: Option<(SubscriberId, Arc<Mutex<PciIntxGroup>>)>,
 }
 
@@ -59,6 +64,7 @@ impl<'a> ConsoleRegistration<'a> {
             subscriber: server.map(|server| events.add_subscriber(server.clone())),
             events,
             intx: None,
+            usb: None,
         };
         if let Some(server) = server {
             server.lock().unwrap().check_registered()?;
@@ -75,14 +81,28 @@ impl<'a> ConsoleRegistration<'a> {
         Ok(self)
     }
 
+    fn with_usb(mut self, usb: Option<&Arc<Mutex<UsbDevice>>>) -> io::Result<Self> {
+        if let Some(usb) = usb {
+            let id = self.events.add_subscriber(usb.clone());
+            self.usb = Some((id, usb.clone()));
+            usb.lock().unwrap().check_registered()?;
+        }
+        Ok(self)
+    }
+
     pub(crate) fn commit(mut self) {
         self.subscriber = None;
+        self.usb = None;
         self.intx = None;
     }
 }
 
 impl Drop for ConsoleRegistration<'_> {
     fn drop(&mut self) {
+        if let Some((id, usb)) = self.usb.take() {
+            self.events.remove_subscriber(id).unwrap();
+            usb.lock().unwrap().reset_registration();
+        }
         if let Some((id, group)) = self.intx.take() {
             self.events.remove_subscriber(id).unwrap();
             group.lock().unwrap().reset_registration();
@@ -94,6 +114,12 @@ impl Drop for ConsoleRegistration<'_> {
 }
 
 impl DeviceManager {
+    pub(crate) fn set_console_running(&self, running: bool) {
+        if let Some(console) = &self.console {
+            console.usb.lock().unwrap().set_running(running);
+        }
+    }
+
     pub fn console_config(&self) -> Option<ConsoleConfig> {
         self.console.as_ref().map(|console| console.config.clone())
     }
@@ -120,8 +146,6 @@ impl DeviceManager {
             .legacy_devices
             .as_ref()
             .ok_or_else(|| io::Error::other("console requires x86 legacy devices"))?;
-        vm.register_irq(&legacy.i8042.lock().unwrap().mouse_interrupt_evt, 12)
-            .map_err(|error| io::Error::from_raw_os_error(error.errno()))?;
         let system_control = Arc::new(Mutex::new(Port92::new(
             vm.vcpus_exit_evt().try_clone()?,
             state.map(|state| &state.system_control),
@@ -153,16 +177,18 @@ impl DeviceManager {
                 .restore_state(&state.input)
                 .map_err(|error| io::Error::other(error.to_string()))?;
         }
-        let server = ConsoleServer::new(
+        let usb = UsbDevice::attach(vm, pci, state.map(|state| &state.usb))?;
+        let mut server = ConsoleServer::new(
             &config.socket_path,
             display.lock().unwrap().vga.clone(),
             legacy.i8042.clone(),
             optical.clone(),
         )?;
-        let mut server = server;
         if let Some(state) = state {
             server.restore_held(&state.held)?;
+            server.restore_release_pending(state.release_pending);
         }
+        server.set_tablet(usb.clone());
         let server = Arc::new(Mutex::new(server));
         self.console = Some(ConsoleHardware {
             config: config.clone(),
@@ -170,6 +196,7 @@ impl DeviceManager {
             bridge,
             display,
             server,
+            usb,
             optical,
         });
         Ok(())
@@ -187,28 +214,37 @@ impl DeviceManager {
                 VirtioDevices::Mmio(_) => None,
             });
         ConsoleRegistration::new(events, self.console.as_ref().map(|console| &console.server))?
-            .with_intx(intx)
+            .with_intx(intx)?
+            .with_usb(self.console.as_ref().map(|console| &console.usb))
     }
 
     pub(crate) fn save_console(&self) -> Option<ConsoleState> {
-        self.console.as_ref().map(|console| ConsoleState {
-            config: console.config.clone(),
-            system_control: console.system_control.lock().unwrap().save(),
-            bridge: console.bridge.lock().unwrap().save(),
-            display: console.display.lock().unwrap().save(),
-            held: console.server.lock().unwrap().held_keys(),
-            input: self
-                .legacy_devices
-                .as_ref()
-                .unwrap()
-                .i8042
-                .lock()
-                .unwrap()
-                .save_state(),
-            optical: console
-                .optical
-                .as_ref()
-                .map(|device| device.lock().unwrap().save()),
+        self.console.as_ref().map(|console| {
+            let (held, release_pending) = {
+                let server = console.server.lock().unwrap();
+                (server.held_keys(), server.release_pending())
+            };
+            ConsoleState {
+                config: console.config.clone(),
+                system_control: console.system_control.lock().unwrap().save(),
+                bridge: console.bridge.lock().unwrap().save(),
+                display: console.display.lock().unwrap().save(),
+                held,
+                release_pending,
+                usb: console.usb.lock().unwrap().save(),
+                input: self
+                    .legacy_devices
+                    .as_ref()
+                    .unwrap()
+                    .i8042
+                    .lock()
+                    .unwrap()
+                    .save_state(),
+                optical: console
+                    .optical
+                    .as_ref()
+                    .map(|device| device.lock().unwrap().save()),
+            }
         })
     }
 
@@ -236,19 +272,6 @@ impl DeviceManager {
                         SYSTEM_CONTROL_PORT,
                         1,
                         1,
-                    )]),
-                )?,
-            ],
-        )
-        .append_aml_bytes(bytes)?;
-        aml::Device::new(
-            self.acpi_device_scope().device_path("MOU0")?,
-            vec![
-                &aml::Name::new("_HID".try_into()?, &aml::EisaName::new("PNP0F13")?)?,
-                &aml::Name::new(
-                    "_CRS".try_into()?,
-                    &aml::ResourceTemplate::new(vec![&aml::Interrupt::new(
-                        true, true, false, false, 12,
                     )]),
                 )?,
             ],

@@ -74,6 +74,8 @@ mod console_display;
 mod console_optical;
 #[cfg(target_arch = "x86_64")]
 mod console_server;
+#[cfg(target_arch = "x86_64")]
+mod console_usb;
 /// Legacy Device Manager.
 pub mod legacy;
 /// Memory Mapped I/O Manager.
