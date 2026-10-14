@@ -143,6 +143,37 @@ mod tests {
     use super::*;
     use crate::api_server::parsed_request::tests::{depr_action_from_req, vmm_action_from_request};
 
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn protected_services_require_explicit_restore_generation() {
+        use std::path::PathBuf;
+
+        let mut body = serde_json::json!({
+            "snapshot_path": "vm.state",
+            "mem_backend": {"backend_type": "File", "backend_path": "vm.memory"},
+            "tpm": {"socket_path": "tpm.sock"},
+            "uefi_vars": {"socket_path": "variables.sock", "expected_generation": 42}
+        });
+        let request = parse_put_snapshot(&Body::new(body.to_string()), Some("load")).unwrap();
+        let VmmAction::LoadSnapshot(params) = vmm_action_from_request(request) else {
+            panic!("expected snapshot load");
+        };
+        assert_eq!(params.tpm.unwrap().socket_path, PathBuf::from("tpm.sock"));
+        let variables = params.uefi_vars.unwrap();
+        assert_eq!(variables.socket_path, PathBuf::from("variables.sock"));
+        assert_eq!(variables.expected_generation, 42);
+
+        body["uefi_vars"] = serde_json::json!({"socket_path": "variables.sock"});
+        let error = parse_put_snapshot(&Body::new(body.to_string()), Some("load")).unwrap_err();
+        assert!(error.to_string().contains("expected_generation"));
+
+        body["uefi_vars"]["expected_generation"] = serde_json::json!(-1);
+        parse_put_snapshot(&Body::new(body.to_string()), Some("load")).unwrap_err();
+        body["uefi_vars"]["expected_generation"] = serde_json::json!(42);
+        body["uefi_vars"]["reset"] = serde_json::json!(true);
+        parse_put_snapshot(&Body::new(body.to_string()), Some("load")).unwrap_err();
+    }
+
     #[test]
     fn test_parse_put_snapshot() {
         use std::path::PathBuf;
