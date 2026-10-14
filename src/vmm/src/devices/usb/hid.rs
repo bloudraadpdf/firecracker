@@ -282,6 +282,7 @@ impl HidTablet {
             (0x01, 11)
                 if self.state.configuration == 1 && value == 0 && index == 0 && length == 0 =>
             {
+                self.state.commit = Commit::Interface;
                 Some(Vec::new())
             }
             (0x02, 1 | 3)
@@ -456,6 +457,26 @@ mod tests {
         assert!(!tablet.configured());
         assert_eq!(tablet.transaction(0x69, 0, 0, true, &[], 0), ack(&[]));
         assert!(tablet.configured());
+    }
+
+    #[test]
+    fn set_interface_resets_endpoint_after_status_and_snapshot() {
+        let mut tablet = HidTablet::new();
+        configure(&mut tablet);
+        assert_eq!(tablet.transaction(0x69, 0, 1, false, &[], 8), ack(&[0; 6]));
+        assert!(tablet.update(100, 200, 1, 0));
+        setup(&mut tablet, [2, 3, 0, 0, 0x81, 0, 0, 0]);
+        assert_eq!(tablet.transaction(0x69, 0, 0, true, &[], 0), ack(&[]));
+        assert!(!tablet.configured());
+        setup(&mut tablet, [1, 11, 0, 0, 0, 0, 0, 0]);
+        assert!(!tablet.configured());
+        let mut restored = HidTablet::restore(&tablet.save()).unwrap();
+        assert_eq!(restored.transaction(0x69, 0, 0, true, &[], 0), ack(&[]));
+        assert!(restored.configured());
+        assert_eq!(
+            restored.transaction(0x69, 0, 1, false, &[], 8),
+            ack(&[1, 100, 0, 200, 0, 0])
+        );
     }
 
     #[test]
