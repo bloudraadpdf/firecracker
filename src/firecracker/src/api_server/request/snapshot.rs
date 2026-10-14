@@ -111,6 +111,10 @@ fn parse_put_snapshot_load(body: &Body) -> Result<ParsedRequest, RequestError> {
         resume_vm: snapshot_config.resume_vm,
         network_overrides: snapshot_config.network_overrides,
         vsock_override: snapshot_config.vsock_override,
+        #[cfg(target_arch = "x86_64")]
+        tpm: snapshot_config.tpm,
+        #[cfg(target_arch = "x86_64")]
+        uefi_vars: snapshot_config.uefi_vars,
         clock_realtime: snapshot_config.clock_realtime,
         huge_pages: snapshot_config.huge_pages,
         vmclock_restore_notification: snapshot_config.vmclock_restore_notification,
@@ -219,6 +223,10 @@ mod tests {
             resume_vm: false,
             network_overrides: vec![],
             vsock_override: None,
+            #[cfg(target_arch = "x86_64")]
+            tpm: None,
+            #[cfg(target_arch = "x86_64")]
+            uefi_vars: None,
             clock_realtime: false,
             huge_pages: SnapshotLoadHugePageConfig::Hugetlbfs2M,
             vmclock_restore_notification: VmClockRestoreNotification::Disabled,
@@ -254,6 +262,10 @@ mod tests {
             resume_vm: false,
             network_overrides: vec![],
             vsock_override: None,
+            #[cfg(target_arch = "x86_64")]
+            tpm: None,
+            #[cfg(target_arch = "x86_64")]
+            uefi_vars: None,
             clock_realtime: false,
             huge_pages: SnapshotLoadHugePageConfig::Snapshot,
             vmclock_restore_notification: Default::default(),
@@ -290,6 +302,10 @@ mod tests {
             resume_vm: true,
             network_overrides: vec![],
             vsock_override: None,
+            #[cfg(target_arch = "x86_64")]
+            tpm: None,
+            #[cfg(target_arch = "x86_64")]
+            uefi_vars: None,
             clock_realtime: false,
             huge_pages: SnapshotLoadHugePageConfig::Snapshot,
             vmclock_restore_notification: Default::default(),
@@ -334,6 +350,10 @@ mod tests {
                 host_dev_name: String::from("vmtap2"),
             }],
             vsock_override: None,
+            #[cfg(target_arch = "x86_64")]
+            tpm: None,
+            #[cfg(target_arch = "x86_64")]
+            uefi_vars: None,
             clock_realtime: false,
             huge_pages: SnapshotLoadHugePageConfig::Snapshot,
             vmclock_restore_notification: Default::default(),
@@ -366,6 +386,10 @@ mod tests {
             resume_vm: true,
             network_overrides: vec![],
             vsock_override: None,
+            #[cfg(target_arch = "x86_64")]
+            tpm: None,
+            #[cfg(target_arch = "x86_64")]
+            uefi_vars: None,
             clock_realtime: false,
             huge_pages: SnapshotLoadHugePageConfig::Snapshot,
             vmclock_restore_notification: Default::default(),

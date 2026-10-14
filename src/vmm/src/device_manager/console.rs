@@ -7,7 +7,6 @@ use std::io;
 use std::sync::{Arc, Mutex};
 
 use acpi_tables::{Aml, aml};
-use event_manager::{SubscriberId, SubscriberOps};
 use serde::{Deserialize, Serialize};
 
 use super::console_a20::{Port92, Port92State, SYSTEM_CONTROL_PORT};
@@ -17,9 +16,7 @@ use super::console_optical::{OpticalDevice, OpticalState};
 use super::console_server::ConsoleServer;
 use super::console_usb::{UsbDevice, UsbState};
 use super::{DeviceManager, VirtioDevices};
-use crate::EventManager;
 use crate::devices::legacy::I8042State;
-use crate::pci::intx::PciIntxGroup;
 use crate::vmm_config::console::ConsoleConfig;
 use crate::vstate::vm::KvmVm;
 
@@ -42,74 +39,25 @@ pub struct ConsoleHardware {
     system_control: Arc<Mutex<Port92>>,
     bridge: Arc<Mutex<ConsoleBridge>>,
     display: Arc<Mutex<DisplayDevice>>,
-    server: Arc<Mutex<ConsoleServer>>,
-    usb: Arc<Mutex<UsbDevice>>,
+    pub(super) server: Arc<Mutex<ConsoleServer>>,
+    pub(super) usb: Arc<Mutex<UsbDevice>>,
     optical: Option<Arc<Mutex<OpticalDevice>>>,
 }
 
-/// Rolls back the console subscription if subsequent VM startup fails.
-pub(crate) struct ConsoleRegistration<'a> {
-    events: &'a mut EventManager,
-    subscriber: Option<SubscriberId>,
-    usb: Option<(SubscriberId, Arc<Mutex<UsbDevice>>)>,
-    intx: Option<(SubscriberId, Arc<Mutex<PciIntxGroup>>)>,
-}
-
-impl<'a> ConsoleRegistration<'a> {
-    pub(crate) fn new(
-        events: &'a mut EventManager,
-        server: Option<&Arc<Mutex<ConsoleServer>>>,
-    ) -> io::Result<Self> {
-        let registration = Self {
-            subscriber: server.map(|server| events.add_subscriber(server.clone())),
-            events,
-            intx: None,
-            usb: None,
-        };
-        if let Some(server) = server {
-            server.lock().unwrap().check_registered()?;
-        }
-        Ok(registration)
-    }
-
-    fn with_intx(mut self, group: Option<Arc<Mutex<PciIntxGroup>>>) -> io::Result<Self> {
-        if let Some(group) = group {
-            let id = self.events.add_subscriber(group.clone());
-            self.intx = Some((id, group.clone()));
-            group.lock().unwrap().check_registered()?;
-        }
-        Ok(self)
-    }
-
-    fn with_usb(mut self, usb: Option<&Arc<Mutex<UsbDevice>>>) -> io::Result<Self> {
-        if let Some(usb) = usb {
-            let id = self.events.add_subscriber(usb.clone());
-            self.usb = Some((id, usb.clone()));
-            usb.lock().unwrap().check_registered()?;
-        }
-        Ok(self)
-    }
-
-    pub(crate) fn commit(mut self) {
-        self.subscriber = None;
-        self.usb = None;
-        self.intx = None;
-    }
-}
-
-impl Drop for ConsoleRegistration<'_> {
-    fn drop(&mut self) {
-        if let Some((id, usb)) = self.usb.take() {
-            self.events.remove_subscriber(id).unwrap();
-            usb.lock().unwrap().reset_registration();
-        }
-        if let Some((id, group)) = self.intx.take() {
-            self.events.remove_subscriber(id).unwrap();
-            group.lock().unwrap().reset_registration();
-        }
-        if let Some(subscriber) = self.subscriber.take() {
-            self.events.remove_subscriber(subscriber).unwrap();
-        }
+#[cfg(test)]
+impl ConsoleHardware {
+    pub(crate) fn fill_test_framebuffer(&self) {
+        let bytes: Vec<u8> = (0..=255)
+            .cycle()
+            .take(crate::devices::display::FRAMEBUFFER_SIZE)
+            .collect();
+        self.display
+            .lock()
+            .unwrap()
+            .vga
+            .lock()
+            .unwrap()
+            .write_framebuffer(0, &bytes);
     }
 }
 
@@ -202,22 +150,6 @@ impl DeviceManager {
         Ok(())
     }
 
-    pub(crate) fn register_console<'a>(
-        &self,
-        events: &'a mut EventManager,
-    ) -> io::Result<ConsoleRegistration<'a>> {
-        let intx = self
-            .console
-            .as_ref()
-            .and_then(|_| match &self.virtio_devices {
-                VirtioDevices::Pci(pci) => pci.unregistered_intx(),
-                VirtioDevices::Mmio(_) => None,
-            });
-        ConsoleRegistration::new(events, self.console.as_ref().map(|console| &console.server))?
-            .with_intx(intx)?
-            .with_usb(self.console.as_ref().map(|console| &console.usb))
-    }
-
     pub(crate) fn save_console(&self) -> Option<ConsoleState> {
         self.console.as_ref().map(|console| {
             let (held, release_pending) = {
@@ -283,6 +215,8 @@ impl DeviceManager {
 #[cfg(test)]
 mod registration_tests {
     use super::*;
+    use crate::EventManager;
+    use crate::pci::intx::PciIntxGroup;
     use crate::vstate::vm::tests::setup_vm_with_memory;
 
     #[test]
@@ -356,16 +290,17 @@ mod registration_tests {
         let mut events = EventManager::new().unwrap();
         group.lock().unwrap().check_registered().unwrap_err();
         {
-            let _registration = ConsoleRegistration::new(&mut events, None)
-                .unwrap()
-                .with_intx(Some(group.clone()))
-                .unwrap();
+            let _registration =
+                crate::device_manager::platform::PlatformRegistration::new(&mut events, None)
+                    .unwrap()
+                    .with_intx(Some(group.clone()))
+                    .unwrap();
             group.lock().unwrap().check_registered().unwrap();
             assert_eq!(Arc::strong_count(&group), 3);
         }
         assert_eq!(Arc::strong_count(&group), 1);
         group.lock().unwrap().check_registered().unwrap_err();
-        ConsoleRegistration::new(&mut events, None)
+        crate::device_manager::platform::PlatformRegistration::new(&mut events, None)
             .unwrap()
             .with_intx(Some(group.clone()))
             .unwrap()

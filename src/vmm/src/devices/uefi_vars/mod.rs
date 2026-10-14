@@ -44,6 +44,18 @@ impl std::fmt::Debug for UefiVarsState {
 }
 
 impl UefiVarsState {
+    #[cfg(test)]
+    pub(crate) fn maximum_test_state() -> Self {
+        Self {
+            status: SUCCESS,
+            size: MAX_MESSAGE,
+            address: 0x1000,
+            // Exercise all byte values: repeated zeroes could hide size regressions
+            // through bitcode's integer compression. No helper interprets this fixture.
+            checkpoint: (0..=255).cycle().take(MAX_CHECKPOINT).collect(),
+        }
+    }
+
     fn validate(&self) -> io::Result<()> {
         if self.size > MAX_MESSAGE
             || !matches!(self.status, SUCCESS | ERROR | UNSUPPORTED | BAD_SIZE)

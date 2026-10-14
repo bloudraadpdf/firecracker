@@ -45,7 +45,6 @@ use crate::logger::warn;
 use crate::persist::{MicrovmState, MicrovmStateError};
 use crate::resources::VmResources;
 use crate::seccomp::BpfThreadMap;
-use crate::snapshot::Persist;
 use crate::utils::{u32_mib_to_bytes, u64_to_usize};
 use crate::vmm_config::boot_source::{
     DEFAULT_KERNEL_CMDLINE, append_root_device_cmdline, build_cmdline,
@@ -65,6 +64,12 @@ use crate::{EventManager, Vmm, VmmError};
 /// Errors associated with starting the instance.
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum StartMicrovmError {
+    /// Protected UEFI variable service attachment failed: {0}
+    #[cfg(target_arch = "x86_64")]
+    UefiVars(std::io::Error),
+    /// TPM attachment failed: {0}
+    #[cfg(target_arch = "x86_64")]
+    Tpm(std::io::Error),
     /// Graphical console configuration or attachment failed: {0}
     #[cfg(target_arch = "x86_64")]
     Console(std::io::Error),
@@ -343,6 +348,18 @@ pub fn build_microvm_for_boot(
             .attach_console(&kvm_vm, console, None)
             .map_err(StartMicrovmError::Console)?;
     }
+    #[cfg(target_arch = "x86_64")]
+    if let Some(tpm) = &vm_resources.tpm {
+        device_manager
+            .attach_tpm(&kvm_vm, tpm, None)
+            .map_err(StartMicrovmError::Tpm)?;
+    }
+    #[cfg(target_arch = "x86_64")]
+    if let Some(variables) = &vm_resources.uefi_vars {
+        device_manager
+            .attach_uefi_vars(&kvm_vm, variables, None)
+            .map_err(StartMicrovmError::UefiVars)?;
+    }
     device_manager.attach_vmgenid_device(&kvm_vm)?;
     device_manager.attach_vmclock_device(&kvm_vm)?;
 
@@ -366,8 +383,8 @@ pub fn build_microvm_for_boot(
     )?;
 
     #[cfg(target_arch = "x86_64")]
-    let console_registration = device_manager
-        .register_console(event_manager)
+    let platform_registration = device_manager
+        .register_platform_devices(event_manager)
         .map_err(StartMicrovmError::Console)?;
 
     let vmm = Vmm {
@@ -409,7 +426,7 @@ pub fn build_microvm_for_boot(
     }
 
     #[cfg(target_arch = "x86_64")]
-    console_registration.commit();
+    platform_registration.commit();
     event_manager.add_subscriber(vmm.clone());
 
     Ok(vmm)
@@ -574,8 +591,8 @@ pub fn build_microvm_from_snapshot(
         DeviceManager::restore(device_ctor_args, &microvm_state.device_states)?;
 
     #[cfg(target_arch = "x86_64")]
-    let console_registration = device_manager
-        .register_console(event_manager)
+    let platform_registration = device_manager
+        .register_platform_devices(event_manager)
         .map_err(StartMicrovmError::Console)?;
 
     let vmm = Vmm {
@@ -597,7 +614,7 @@ pub fn build_microvm_from_snapshot(
     let vmm = Arc::new(Mutex::new(vmm));
     vmm.lock().unwrap().instance_info.state = VmState::Paused;
     #[cfg(target_arch = "x86_64")]
-    console_registration.commit();
+    platform_registration.commit();
     event_manager.add_subscriber(vmm.clone());
 
     debug!("event_end: build microvm from snapshot");
