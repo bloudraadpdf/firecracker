@@ -83,8 +83,9 @@ new process for a guest reboot.
 
 6. Shut down QEMU before giving Firecracker writable access to the disk.
 
-Firecracker does not provide the graphical console or CD-ROM controller
-used by Windows Setup. The disk preparation stage therefore uses QEMU.
+To install directly in Firecracker, use the
+[optional installation console](windows-console.md), which supplies VGA,
+PS/2 and ATAPI hardware. That guide records the tested editions and limits.
 An [unattended preparation tool](../tools/windows/README.md) generates the
 answer media and a separate raw disk without starting the installer.
 See the [Cloud Hypervisor Windows guide](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/main/docs/windows.md)
@@ -181,8 +182,11 @@ see [ARM64 validation](windows-arm64.md).
 
 ## Snapshots
 
-This branch uses snapshot format 20.0.0. It adds CET control and shadow-stack
-state for guests that expose those CPU features. A native vCPU regression
+This branch uses snapshot format 21.0.0, which adds the optional console
+device state. Console and headless revalidation for this format is tracked
+in the [console plan](windows-console-plan.md). The preceding reviewed
+format 20.0.0 added CET control and shadow-stack state for guests that expose
+those CPU features. A native vCPU regression
 verifies nonzero registers across two fresh restores. Server 2025, Windows 10
 and Windows 11 pass the
 format-20 cold/full/differential TAP and real Tokoloshe CONNECT regressions.
