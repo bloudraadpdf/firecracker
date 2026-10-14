@@ -1,3 +1,6 @@
+// Copyright 2026 Bloudraad.
+// SPDX-License-Identifier: Apache-2.0
+
 use std::{env, fs};
 
 fn main() {

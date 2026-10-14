@@ -1,3 +1,6 @@
+// Copyright 2026 Bloudraad.
+// SPDX-License-Identifier: Apache-2.0
+
 #![no_std]
 #![no_main]
 use core::ffi::c_void;

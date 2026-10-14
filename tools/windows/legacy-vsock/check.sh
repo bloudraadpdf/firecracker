@@ -6,25 +6,34 @@ proxy=${WINDOWS_CONNECT_PROXY:-../windows_probe}
 proxy_root=${WINDOWS_CONNECT_PROXY_ROOT:-$PWD/proxy}
 sidecar=${WINDOWS_CONNECT_SIDECAR:-$PWD/../tokoloshe-egress}
 rebase=${WINDOWS_CONNECT_REBASE:-../rebase-snap}
-uid=${WINDOWS_CONNECT_UID:-1001}
-gid=${WINDOWS_CONNECT_GID:-1001}
+uid=${WINDOWS_CONNECT_UID:-$(id -u)}
+gid=${WINDOWS_CONNECT_GID:-$(id -g)}
 tag=${WINDOWS_CONNECT_TAG:-LEGACY}
 limit=${WINDOWS_CONNECT_ATTEMPTS:-2400}
 run_as=()
 if [[ "$uid" != "$(id -u)" || "$gid" != "$(id -g)" ]]; then
- run_as=(setpriv --reuid "$uid" --regid "$gid" --groups 992)
+ run_as=(setpriv --reuid "$uid" --regid "$gid" --init-groups)
 fi
 mkdir run
 mkfifo run/proxy-input
 exec 3<>run/proxy-input
-"${run_as[@]}" "$proxy" "$proxy_root" "$sidecar" "$PWD/vsock.sock_4750" 127.0.0.1:40567 <run/proxy-input >run/proxy.log 2>&1 &
+setsid "${run_as[@]}" "$proxy" "$proxy_root" "$sidecar" "$PWD/vsock.sock_4750" 127.0.0.1:40567 <run/proxy-input >run/proxy.log 2>&1 &
 proxy_child=$!
 child=
+wait_for_exit() {
+ local pid=$1
+ for retry in {1..100}; do
+  if ! kill -0 "$pid" 2>/dev/null; then wait "$pid"; return; fi
+  sleep 0.1
+ done
+ kill -KILL "$pid" 2>/dev/null || true
+ wait "$pid"
+}
 stop_vm() {
  if [[ -n "$child" ]]; then
   if kill -0 "$child" 2>/dev/null; then kill -TERM "$child"; fi
   code=0
-  wait "$child" || code=$?
+  wait_for_exit "$child" || code=$?
   child=
   rm -f vsock.sock
   if [[ "$code" != 0 && "$code" != 143 ]]; then return "$code"; fi
@@ -37,11 +46,15 @@ cleanup() {
  if kill -0 "$proxy_child" 2>/dev/null; then
   printf '\n' >&3
  fi
- wait "$proxy_child" || result=$?
+ wait_for_exit "$proxy_child" || result=$?
+ kill -TERM -- "-$proxy_child" 2>/dev/null || true
+ kill -KILL -- "-$proxy_child" 2>/dev/null || true
  rm -f run/proxy-input
  exit "$result"
 }
-trap cleanup EXIT
+trap 'cleanup' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 for retry in {1..30}; do
  if grep -q READY run/proxy.log; then break; fi
  kill -0 "$proxy_child"; sleep 1
@@ -50,7 +63,7 @@ grep READY run/proxy.log
 start() {
  phase=$1; shift
  socket=run/$phase.sock
- "${run_as[@]}" "$fc" --enable-pci --api-sock "$socket" "$@" <"${WINDOWS_CONNECT_INPUT:-/dev/null}" >run/$phase.log 2>&1 &
+ "${run_as[@]}" "$fc" --enable-pci --api-sock "$socket" "$@" <"${WINDOWS_CONNECT_INPUT:-/dev/null}" >"run/$phase.log" 2>&1 &
  child=$!
  for retry in {1..30}; do
   if test -S "$socket"; then return; fi
@@ -58,7 +71,7 @@ start() {
  done
  return 1
 }
-request() { curl --fail-with-body -sS --unix-socket "$socket" -X "$1" "http://localhost/$2" -H 'Content-Type: application/json' -d "$3"; }
+request() { curl --connect-timeout 5 --max-time 120 --fail-with-body -sS --unix-socket "$socket" -X "$1" "http://localhost/$2" -H 'Content-Type: application/json' -d "$3"; }
 progress() {
  for ((retry = 0; retry < limit; retry++)); do
   count=$(grep -c 'egress CONNECT rejected' run/proxy.log || true)

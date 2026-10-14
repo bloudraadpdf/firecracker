@@ -1,14 +1,12 @@
-diff --git a/VirtIO/WDF/Dma.c b/VirtIO/WDF/Dma.c
-index 17bc4bb..1024031 100644
---- a/VirtIO/WDF/Dma.c
-+++ b/VirtIO/WDF/Dma.c
-@@ -388,5 +388,6 @@ void VirtIOWdfDeviceDmaTxComplete(VirtIODevice *vdev, WDFDMATRANSACTION transact
-     NTSTATUS status;
-     DPrintf(1, "%s %p\n", __FUNCTION__, transaction);
-     WdfDmaTransactionDmaCompletedFinal(transaction, 0, &status);
-+    WdfDmaTransactionRelease(transaction);
-     DerefTransaction(ctx);
- }
+From: Jacques Germishuys <jacques.germishuys@bloudraad.io>
+Subject: [PATCH] feat: build the Viosock driver and provider for XP
+
+Use the XP import libraries, KMDF 1.9 and legacy nonpaged allocations.
+Keep Vista-only Winsock requests out of the XP provider. Remove unused
+locals so both legacy builds can treat warnings as errors.
+
+Signed-off-by: Jacques Germishuys <jacques.germishuys@bloudraad.io>
+---
 diff --git a/viosock/lib/viosocklib.c b/viosock/lib/viosocklib.c
 index 34c6139..e9653d6 100644
 --- a/viosock/lib/viosocklib.c
@@ -85,7 +83,7 @@ index c038074..cd27a2e 100644
          PLIST_ENTRY CurrentItem;
          BOOLEAN     bRemove;
 diff --git a/viosock/sys/Evt.c b/viosock/sys/Evt.c
-index 665c1b7..f1ac750 100644
+index 30a293a..f1ac750 100644
 --- a/viosock/sys/Evt.c
 +++ b/viosock/sys/Evt.c
 @@ -102,7 +102,7 @@ VIOSockEvtVqInit(
@@ -97,24 +95,8 @@ index 665c1b7..f1ac750 100644
 
      PAGED_CODE();
 
-@@ -169,9 +169,13 @@ VIOSockEvtVqProcess(
-         {
-             /* Drop short/long events */
-
--            if (len != sizeof(pEvt))
-+            if (len != sizeof(VIRTIO_VSOCK_EVENT))
-             {
--                TraceEvents(TRACE_LEVEL_ERROR, DBG_HW_ACCESS, "Invalid event\n");
-+                TraceEvents(TRACE_LEVEL_ERROR,
-+                            DBG_HW_ACCESS,
-+                            "Invalid event received, received %u bytes\n, expected %u bytes\n",
-+                            len,
-+                            sizeof(VIRTIO_VSOCK_EVENT));
-             }
-             else
-             {
 diff --git a/viosock/sys/Rx.c b/viosock/sys/Rx.c
-index 610b1f6..6e97783 100644
+index 85ae58a..6e97783 100644
 --- a/viosock/sys/Rx.c
 +++ b/viosock/sys/Rx.c
 @@ -299,7 +299,7 @@ VIOSockRxCbInit(
@@ -156,58 +138,6 @@ index 610b1f6..6e97783 100644
      TraceEvents(TRACE_LEVEL_VERBOSE, DBG_HW_ACCESS, "--> %s\n", __FUNCTION__);
 
      InitializeListHead(&CompletionList);
-@@ -1320,7 +1316,11 @@ VIOSockReadDequeueCb(
-
-     status = WdfIoQueueRetrieveNextRequest(pSocket->ReadQueue, &ReadRequest);
-     if (!NT_SUCCESS(status))
-+    {
-+        InterlockedExchange(&lInProgress, 0);
-+        TraceEvents(TRACE_LEVEL_INFORMATION, DBG_READ, "The read queue is empty, exiting from VIOSockReadDequeueCb\n");
-         return FALSE;
-+    }
-
-     pRequest = GetRequestRxContext(ReadRequest);
-
-@@ -1430,8 +1430,6 @@ VIOSockReadDequeueCb(
-                 pCurrentItem = pCurrentItem->Blink;
-                 RemoveEntryList(&pCurrentCb->ListEntry);
-
--                pCurrentCb->BytesToRead = 0;
--
-                 if (VIOSockIsLoopbackCb(pCurrentCb))
-                 {
-                     status = WdfRequestUnmarkCancelable(pCurrentCb->Request);
-@@ -1454,14 +1452,13 @@ VIOSockReadDequeueCb(
-                     VIOSockRxCbPushLocked(pContext, pCurrentCb);
-                     VIOSockRxPktDec(pSocket, pCurrentCb->BytesToRead);
-                 }
-+                pCurrentCb->BytesToRead = 0;
-             }
-         }
-         else //request buffer is not big enough
-         {
-             memcpy(pRequest->FreePtr, pCurrentCb->ReadPtr, pRequest->FreeBytes);
-
--            pRequest->FreeBytes = 0;
--
-             if (!(pRequest->Flags & MSG_PEEK))
-             {
-                 //update current CB data ptr
-@@ -1469,6 +1466,7 @@ VIOSockReadDequeueCb(
-                 pCurrentCb->BytesToRead -= pRequest->FreeBytes;
-                 VIOSockRxPktDec(pSocket, pRequest->FreeBytes);
-             }
-+            pRequest->FreeBytes = 0;
-
-             break;
-         }
-@@ -1797,4 +1795,4 @@ VIOSockReadTimerFunc(
-     }
-
-     TraceEvents(TRACE_LEVEL_VERBOSE, DBG_READ, "<-- %s, status: 0x%08x, counter: %u\n", __FUNCTION__, status, lCounter);
--}
-\ No newline at end of file
-+}
 diff --git a/viosock/sys/Socket.c b/viosock/sys/Socket.c
 index 2edaa95..3e0087d 100644
 --- a/viosock/sys/Socket.c
