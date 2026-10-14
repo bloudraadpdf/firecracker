@@ -114,6 +114,59 @@ mod tests {
 
     use super::*;
 
+    #[cfg(all(target_env = "musl", not(debug_assertions)))]
+    fn apply_vcpu_filter() {
+        let filters = get_default_filters().unwrap();
+        let filter = &filters["vcpu"];
+        assert!(!filter.is_empty());
+        let limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: limit points to a valid rlimit structure.
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_CORE, &limit) }, 0);
+        vmm::seccomp::apply_filter(filter).unwrap();
+    }
+
+    #[cfg(all(target_env = "musl", not(debug_assertions)))]
+    #[test]
+    fn vcpu_filter_allows_tap_header_negotiation() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::process::ExitStatusExt;
+        use std::process::Command;
+        use vmm::devices::virtio::net::Tap;
+
+        const PROBE: &str = "FIRECRACKER_TEST_TAP_HEADER";
+        if let Ok(value) = std::env::var(PROBE) {
+            let size: i32 = value.parse().unwrap();
+            let tap = Tap::open_named("fcsec%d").unwrap();
+            apply_vcpu_filter();
+            // SAFETY: tap is open and size is a valid integer ioctl argument.
+            unsafe {
+                if size == 0 {
+                    libc::ioctl(tap.as_raw_fd(), 0x400454dc, &size);
+                    libc::_exit(1);
+                }
+                libc::_exit(i32::from(tap.set_vnet_hdr_size(size).is_err()));
+            }
+        }
+        for size in [10, 12, 0] {
+            let status = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "seccomp::tests::vcpu_filter_allows_tap_header_negotiation",
+                ])
+                .env(PROBE, size.to_string())
+                .status()
+                .unwrap();
+            if size == 0 {
+                assert_eq!(status.signal(), Some(libc::SIGSYS));
+            } else {
+                assert!(status.success(), "TAP header {size}: {status:?}");
+            }
+        }
+    }
+
     #[cfg(all(target_arch = "x86_64", target_env = "musl", not(debug_assertions)))]
     #[test]
     fn vcpu_filter_allows_only_eventfd_sized_reads() {
@@ -129,17 +182,8 @@ mod tests {
             assert!(size <= 16);
             let event = EventFd::new(libc::EFD_NONBLOCK).unwrap();
             event.write(1).unwrap();
-            let filters = get_default_filters().unwrap();
-            let filter = &filters["vcpu"];
-            assert!(!filter.is_empty());
             let mut data = [0u8; 16];
-            let limit = libc::rlimit {
-                rlim_cur: 0,
-                rlim_max: 0,
-            };
-            // SAFETY: limit points to a valid rlimit structure.
-            assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_CORE, &limit) }, 0);
-            vmm::seccomp::apply_filter(filter).unwrap();
+            apply_vcpu_filter();
             // SAFETY: event is open, size fits data, and _exit ends this test subprocess.
             unsafe {
                 let count = libc::read(event.as_raw_fd(), data.as_mut_ptr().cast(), size);

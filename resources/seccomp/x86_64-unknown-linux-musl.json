@@ -1514,6 +1514,18 @@
                         "index": 1,
                         "type": "dword",
                         "op": "eq",
+                        "val": 1074025688,
+                        "comment": "TUNSETVNETHDRSZ during virtio-net activation"
+                    }
+                ]
+            },
+            {
+                "syscall": "ioctl",
+                "args": [
+                    {
+                        "index": 1,
+                        "type": "dword",
+                        "op": "eq",
                         "val": 44717,
                         "comment": "KVM_KVMCLOCK_CTRL. We call this after pausing vCPUs to avoid soft lockups in the guest."
                     }
