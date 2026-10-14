@@ -27,6 +27,10 @@ use crate::vstate::vm::{VmCommon, VmError};
 pub enum KvmVmError {
     /// Failed to check KVM capability (0): {1}
     CheckCapability(Cap, kvm_ioctls::Error),
+    /// Invalid PIT-free timer configuration: {0}
+    PitlessTimers(#[from] crate::cpu_config::x86_64::cpuid::PitlessTimerError),
+    /// Snapshot PIT configuration differs from the VM hardware.
+    PitConfigurationMismatch,
     /// Set PIT2 error: {0}
     SetPit2(kvm_ioctls::Error),
     /// Set clock error: {0}
@@ -67,6 +71,7 @@ pub struct KvmVm {
     xsave2_size: Option<usize>,
     /// Port IO bus
     pub pio_bus: Arc<Bus>,
+    pub(crate) pit_enabled: bool,
 }
 
 impl KvmVm {
@@ -110,13 +115,17 @@ impl KvmVm {
             msrs_to_save,
             xsave2_size,
             pio_bus,
+            pit_enabled: false,
         })
     }
 
     /// Pre-vCPU creation setup.
-    pub fn arch_pre_create_vcpus(&mut self, _: u8) -> Result<(), KvmVmError> {
+    pub fn arch_pre_create_vcpus(
+        &mut self,
+        config: &crate::vmm_config::machine_config::MachineConfig,
+    ) -> Result<(), KvmVmError> {
         // For x86_64 we need to create the interrupt controller before calling `KVM_CREATE_VCPUS`
-        self.setup_irqchip()
+        self.setup_irqchip(config.pit)
     }
 
     /// Post-vCPU creation setup.
@@ -139,9 +148,12 @@ impl KvmVm {
         state: &VmState,
         clock_realtime: bool,
     ) -> Result<(), KvmVmError> {
-        self.fd()
-            .set_pit2(&state.pitstate)
-            .map_err(KvmVmError::SetPit2)?;
+        if state.pitstate.is_some() != self.pit_enabled {
+            return Err(KvmVmError::PitConfigurationMismatch);
+        }
+        if let Some(pitstate) = &state.pitstate {
+            self.fd().set_pit2(pitstate).map_err(KvmVmError::SetPit2)?;
+        }
         let mut clock = state.clock;
         clock.flags = if clock_realtime {
             // clock_realtime needs to be present in the snapshot
@@ -167,11 +179,15 @@ impl KvmVm {
         Ok(())
     }
 
-    /// Creates the irq chip and an in-kernel device model for the PIT.
-    pub fn setup_irqchip(&self) -> Result<(), KvmVmError> {
+    /// Creates the IRQ chip and, when enabled, the PIT device.
+    pub fn setup_irqchip(&mut self, pit: bool) -> Result<(), KvmVmError> {
         self.fd()
             .create_irq_chip()
             .map_err(KvmVmError::VmSetIrqChip)?;
+        if !pit {
+            crate::cpu_config::x86_64::cpuid::validate_pitless_timers(&self.kvm().supported_cpuid)?;
+            return Ok(());
+        }
         // We need to enable the emulation of a dummy speaker port stub so that writing to port 0x61
         // (i.e. KVM_SPEAKER_BASE_ADDRESS) does not trigger an exit to user space.
         let pit_config = kvm_pit_config {
@@ -180,12 +196,18 @@ impl KvmVm {
         };
         self.fd()
             .create_pit2(pit_config)
-            .map_err(KvmVmError::VmSetIrqChip)
+            .map_err(KvmVmError::VmSetIrqChip)?;
+        self.pit_enabled = true;
+        Ok(())
     }
 
     /// Saves and returns the KVM VM state.
     pub fn save_state(&self) -> Result<VmState, KvmVmError> {
-        let pitstate = self.fd().get_pit2().map_err(KvmVmError::VmGetPit2)?;
+        let pitstate = self
+            .pit_enabled
+            .then(|| self.fd().get_pit2())
+            .transpose()
+            .map_err(KvmVmError::VmGetPit2)?;
 
         let clock = self.fd().get_clock().map_err(KvmVmError::VmGetClock)?;
 
@@ -242,13 +264,20 @@ pub struct VmState {
     pub memory: GuestMemoryState,
     /// resource allocator
     pub resource_allocator: ResourceAllocatorState,
-    pitstate: kvm_pit_state2,
+    pitstate: Option<kvm_pit_state2>,
     clock: kvm_clock_data,
     // TODO: rename this field to adopt inclusive language once Linux updates it, too.
     pic_master: kvm_irqchip,
     // TODO: rename this field to adopt inclusive language once Linux updates it, too.
     pic_slave: kvm_irqchip,
     ioapic: kvm_irqchip,
+}
+
+impl VmState {
+    /// Whether the snapshot contains a programmable interval timer.
+    pub fn pit_enabled(&self) -> bool {
+        self.pitstate.is_some()
+    }
 }
 
 impl fmt::Debug for VmState {
@@ -283,12 +312,12 @@ mod tests {
         // Irqchips, clock and pitstate are not configured so trying to save state should fail.
         vm.save_state().unwrap_err();
 
-        let vm = setup_vm_with_memory(0x1000);
-        vm.setup_irqchip().unwrap();
+        let mut vm = setup_vm_with_memory(0x1000);
+        vm.setup_irqchip(true).unwrap();
 
         let vm_state = vm.save_state().unwrap();
         assert_eq!(
-            vm_state.pitstate.flags | KVM_PIT_SPEAKER_DUMMY,
+            vm_state.pitstate.unwrap().flags | KVM_PIT_SPEAKER_DUMMY,
             KVM_PIT_SPEAKER_DUMMY
         );
         assert_eq!(vm_state.pic_master.chip_id, KVM_IRQCHIP_PIC_MASTER);
@@ -296,7 +325,7 @@ mod tests {
         assert_eq!(vm_state.ioapic.chip_id, KVM_IRQCHIP_IOAPIC);
 
         let mut vm = setup_vm_with_memory(0x1000);
-        vm.setup_irqchip().unwrap();
+        vm.setup_irqchip(true).unwrap();
 
         vm.restore_state(&vm_state, false).unwrap();
     }
@@ -304,8 +333,8 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn test_vm_save_restore_state_kvm_clock_realtime() {
-        let vm = setup_vm_with_memory(0x1000);
-        vm.setup_irqchip().unwrap();
+        let mut vm = setup_vm_with_memory(0x1000);
+        vm.setup_irqchip(true).unwrap();
 
         let clock_realtime_supported = vm
             .kvm()
@@ -320,7 +349,7 @@ mod tests {
         vm_state.clock.flags &= !KVM_CLOCK_REALTIME;
 
         let mut vm = setup_vm_with_memory(0x1000);
-        vm.setup_irqchip().unwrap();
+        vm.setup_irqchip(true).unwrap();
 
         let res = vm.restore_state(&vm_state, true);
         assert!(res == Err(KvmVmError::ClockRealtimeNotInState));
@@ -335,7 +364,7 @@ mod tests {
             .unwrap();
 
         let mut vm = setup_vm_with_memory(0x1000);
-        vm.setup_irqchip().unwrap();
+        vm.setup_irqchip(true).unwrap();
 
         let res = vm.restore_state(&vm_state, true);
         if clock_realtime_supported {
@@ -350,12 +379,12 @@ mod tests {
     fn test_vm_save_restore_state_bad_irqchip() {
         use kvm_bindings::KVM_NR_IRQCHIPS;
 
-        let vm = setup_vm_with_memory(0x1000);
-        vm.setup_irqchip().unwrap();
+        let mut vm = setup_vm_with_memory(0x1000);
+        vm.setup_irqchip(true).unwrap();
         let mut vm_state = vm.save_state().unwrap();
 
         let mut vm = setup_vm_with_memory(0x1000);
-        vm.setup_irqchip().unwrap();
+        vm.setup_irqchip(true).unwrap();
 
         // Try to restore an invalid PIC Master chip ID
         let orig_master_chip_id = vm_state.pic_master.chip_id;
@@ -374,11 +403,33 @@ mod tests {
         vm.restore_state(&vm_state, false).unwrap_err();
     }
 
+    #[test]
+    fn pit_choice_survives_snapshot_and_rejects_different_hardware() {
+        for pit in [true, false] {
+            let mut source = setup_vm_with_memory(0x1000);
+            source.setup_irqchip(pit).unwrap();
+            assert_eq!(source.fd().get_pit2().is_ok(), pit);
+            let bytes = bitcode::serialize(&source.save_state().unwrap()).unwrap();
+            let state: VmState = bitcode::deserialize(&bytes).unwrap();
+            assert_eq!(state.pit_enabled(), pit);
+            let mut restored = setup_vm_with_memory(0x1000);
+            restored.setup_irqchip(state.pit_enabled()).unwrap();
+            restored.restore_state(&state, false).unwrap();
+            assert_eq!(restored.fd().get_pit2().is_ok(), pit);
+            let mut wrong = setup_vm_with_memory(0x1000);
+            wrong.setup_irqchip(!pit).unwrap();
+            assert_eq!(
+                wrong.restore_state(&state, false),
+                Err(KvmVmError::PitConfigurationMismatch)
+            );
+        }
+    }
+
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn test_vmstate_serde() {
         let mut vm = setup_vm_with_memory(0x1000);
-        vm.setup_irqchip().unwrap();
+        vm.setup_irqchip(true).unwrap();
         let state = vm.save_state().unwrap();
 
         // Test direct bitcode serialization

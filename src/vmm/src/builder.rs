@@ -176,7 +176,7 @@ pub fn build_microvm_for_boot(
     // Set up KVM VM and register memory regions.
     // Build custom CPU config if a custom template is provided.
     let mut vm = KvmVm::new(kvm)?;
-    let mut vcpus = vm.create_vcpus(vm_resources.machine_config.vcpu_count)?;
+    let mut vcpus = vm.create_vcpus(&vm_resources.machine_config)?;
     vm.register_dram_memory_regions(guest_memory)?;
 
     // Allocate memory as soon as possible to make hotpluggable memory available to all consumers,
@@ -450,7 +450,7 @@ pub fn build_microvm_from_snapshot(
         .map_err(StartMicrovmError::KvmVm)?;
 
     let mut vcpus = vm
-        .create_vcpus(vm_resources.machine_config.vcpu_count)
+        .create_vcpus(&vm_resources.machine_config)
         .map_err(StartMicrovmError::KvmVm)?;
 
     #[cfg(target_arch = "x86_64")]
@@ -845,7 +845,9 @@ pub(crate) mod tests {
     pub(crate) fn default_vmm() -> Vmm {
         let mut vm = setup_vm_with_memory(mib_to_bytes(128));
 
-        let _ = vm.create_vcpus(1).unwrap();
+        let _ = vm
+            .create_vcpus(&crate::vmm_config::machine_config::MachineConfig::default())
+            .unwrap();
 
         Vmm {
             instance_info: InstanceInfo::default(),
@@ -860,7 +862,9 @@ pub(crate) mod tests {
     pub(crate) fn default_vmm_with_pci() -> Vmm {
         let mut vm = setup_vm_with_memory(mib_to_bytes(128));
 
-        let _ = vm.create_vcpus(1).unwrap();
+        let _ = vm
+            .create_vcpus(&crate::vmm_config::machine_config::MachineConfig::default())
+            .unwrap();
 
         let vm = Arc::new(vm);
         let device_manager = default_device_manager_with_pci(&vm);

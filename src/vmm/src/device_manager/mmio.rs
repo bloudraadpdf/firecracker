@@ -670,7 +670,7 @@ pub(crate) mod tests {
         let mut cmdline = kernel_cmdline::Cmdline::new(4096).unwrap();
         let dummy = Arc::new(Mutex::new(DummyDevice::new()));
         #[cfg(target_arch = "x86_64")]
-        vm.setup_irqchip().unwrap();
+        vm.setup_irqchip(true).unwrap();
         #[cfg(target_arch = "aarch64")]
         vm.setup_irqchip(1).unwrap();
 
@@ -723,7 +723,7 @@ pub(crate) mod tests {
 
         let mut cmdline = kernel_cmdline::Cmdline::new(4096).unwrap();
         #[cfg(target_arch = "x86_64")]
-        vm.setup_irqchip().unwrap();
+        vm.setup_irqchip(true).unwrap();
         #[cfg(target_arch = "aarch64")]
         vm.setup_irqchip(1).unwrap();
 
@@ -777,7 +777,7 @@ pub(crate) mod tests {
         vm.register_dram_memory_regions(guest_mem).unwrap();
 
         #[cfg(target_arch = "x86_64")]
-        vm.setup_irqchip().unwrap();
+        vm.setup_irqchip(true).unwrap();
         #[cfg(target_arch = "aarch64")]
         vm.setup_irqchip(1).unwrap();
 

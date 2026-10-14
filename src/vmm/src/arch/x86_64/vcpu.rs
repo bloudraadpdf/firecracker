@@ -49,6 +49,8 @@ const DEFERRED_MSRS: [u32; 1] = [
 /// Errors associated with the wrappers over KVM ioctls.
 #[derive(Debug, PartialEq, Eq, thiserror::Error, displaydoc::Display)]
 pub enum KvmVcpuError {
+    /// Invalid PIT-free timer configuration: {0}
+    PitlessTimers(#[from] cpuid::PitlessTimerError),
     /// Failed to convert `kvm_bindings::CpuId` to `Cpuid`: {0}
     ConvertCpuidType(#[from] cpuid::CpuidTryFromKvmCpuid),
     /// Failed FamStructWrapper operation: {0}
@@ -120,6 +122,8 @@ pub struct SetTscError(#[from] kvm_ioctls::Error);
 /// Errors associated with configuring an x86_64 vCPU.
 #[derive(Debug, thiserror::Error, displaydoc::Display, Eq, PartialEq)]
 pub enum KvmVcpuConfigureError {
+    /// Invalid PIT-free timer configuration: {0}
+    PitlessTimers(#[from] cpuid::PitlessTimerError),
     /// Failed to convert `Cpuid` to `kvm_bindings::CpuId`: {0}
     ConvertCpuidType(#[from] vmm_sys_util::fam::Error),
     /// Failed to apply modifications to CPUID: {0}
@@ -154,6 +158,7 @@ pub struct KvmVcpu {
     ///
     /// `None` if `KVM_CAP_XSAVE2` not supported.
     xsave2_size: Option<usize>,
+    pit_enabled: bool,
 }
 
 /// Vcpu peripherals
@@ -184,6 +189,7 @@ impl KvmVcpu {
             peripherals: Default::default(),
             msrs_to_save: vm.msrs_to_save().to_vec(),
             xsave2_size: vm.xsave2_size(),
+            pit_enabled: vm.pit_enabled,
         })
     }
 
@@ -218,6 +224,9 @@ impl KvmVcpu {
         )?;
 
         let kvm_cpuid = CpuId::try_from(cpuid)?;
+        if !self.pit_enabled {
+            cpuid::validate_pitless_timers(&kvm_cpuid)?;
+        }
         self.fd
             .set_cpuid2(&kvm_cpuid)
             .map_err(KvmVcpuConfigureError::SetCpuid)?;
@@ -682,6 +691,9 @@ impl KvmVcpu {
 
     /// Use provided state to populate KVM internal state.
     pub fn restore_state(&self, state: &VcpuState) -> Result<(), KvmVcpuError> {
+        if !self.pit_enabled {
+            cpuid::validate_pitless_timers(&state.cpuid)?;
+        }
         // Ordering requirements:
         //
         // KVM_GET_VCPU_EVENTS/KVM_SET_VCPU_EVENTS is unsafe if other vCPUs are
@@ -878,8 +890,8 @@ mod tests {
     }
 
     fn setup_vcpu(mem_size: usize) -> (KvmVm, KvmVcpu) {
-        let vm = setup_vm_with_memory(mem_size);
-        vm.setup_irqchip().unwrap();
+        let mut vm = setup_vm_with_memory(mem_size);
+        vm.setup_irqchip(true).unwrap();
         let vcpu = KvmVcpu::new(0, &vm).unwrap();
         (vm, vcpu)
     }

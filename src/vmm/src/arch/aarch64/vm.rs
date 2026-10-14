@@ -93,7 +93,10 @@ impl KvmVm {
     }
 
     /// Pre-vCPU creation setup.
-    pub fn arch_pre_create_vcpus(&mut self, _: u8) -> Result<(), KvmVmError> {
+    pub fn arch_pre_create_vcpus(
+        &mut self,
+        _: &crate::vmm_config::machine_config::MachineConfig,
+    ) -> Result<(), KvmVmError> {
         Ok(())
     }
 

@@ -163,7 +163,7 @@ pub enum CreateSnapshotError {
 }
 
 /// Snapshot version
-pub const SNAPSHOT_VERSION: Version = Version::new(11, 0, 0);
+pub const SNAPSHOT_VERSION: Version = Version::new(12, 0, 0);
 
 /// Creates a Microvm snapshot.
 pub fn create_snapshot(
@@ -437,6 +437,8 @@ pub fn restore_from_snapshot(
             vcpu_count: Some(vcpu_count),
             mem_size_mib: Some(u64_to_usize(microvm_state.vm_info.mem_size_mib)),
             smt: Some(microvm_state.vm_info.smt),
+            #[cfg(target_arch = "x86_64")]
+            pit: Some(microvm_state.vm_state.pit_enabled()),
             cpu_template: Some(microvm_state.vm_info.cpu_template),
             track_dirty_pages: Some(track_dirty_pages),
             huge_pages: Some(params.huge_pages.resolve(microvm_state.vm_info.huge_pages)),

@@ -197,8 +197,12 @@ impl KvmVm {
     /// Creates the specified number of [`Vcpu`]s.
     ///
     /// Each vCPU gets a clone of the `vcpus_exit_evt` EventFd stored on this KvmVm.
-    pub fn create_vcpus(&mut self, vcpu_count: u8) -> Result<Vec<Vcpu>, VmError> {
-        self.arch_pre_create_vcpus(vcpu_count)?;
+    pub fn create_vcpus(
+        &mut self,
+        config: &crate::vmm_config::machine_config::MachineConfig,
+    ) -> Result<Vec<Vcpu>, VmError> {
+        let vcpu_count = config.vcpu_count;
+        self.arch_pre_create_vcpus(config)?;
 
         let mut vcpus = Vec::with_capacity(vcpu_count as usize);
         for cpu_idx in 0..vcpu_count {
@@ -870,14 +874,19 @@ pub(crate) mod tests {
         let vcpu_count = 2;
         let mut vm = setup_vm_with_memory(mib_to_bytes(128));
 
-        let vcpu_vec = vm.create_vcpus(vcpu_count).unwrap();
+        let vcpu_vec = vm
+            .create_vcpus(&crate::vmm_config::machine_config::MachineConfig {
+                vcpu_count,
+                ..Default::default()
+            })
+            .unwrap();
 
         assert_eq!(vcpu_vec.len(), vcpu_count as usize);
     }
 
     fn enable_irqchip(vm: &mut KvmVm) {
         #[cfg(target_arch = "x86_64")]
-        vm.setup_irqchip().unwrap();
+        vm.setup_irqchip(true).unwrap();
         #[cfg(target_arch = "aarch64")]
         vm.setup_irqchip(1).unwrap();
     }
@@ -1151,7 +1160,7 @@ pub(crate) mod tests {
         use vm_allocator::AllocPolicy;
 
         let mut vm = setup_vm_with_memory(0x1000);
-        vm.setup_irqchip().unwrap();
+        vm.setup_irqchip(true).unwrap();
 
         // Allocate a GSI and some memory.
         let (gsi, range) = {

@@ -581,6 +581,36 @@ impl From<core::arch::x86_64::CpuidResult> for CpuidRegisters {
     }
 }
 
+/// The CPU cannot run the PIT-free timer contract.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[error("PIT-free VMs require TSC, APIC, TSC-deadline, ARAT and the KVM clock")]
+pub struct PitlessTimerError;
+
+/// Checks the host or effective guest CPUID before PIT-free execution.
+///
+/// # Errors
+/// Returns an error if the clock or timer features required without a PIT are missing.
+pub fn validate_pitless_timers(cpuid: &kvm_bindings::CpuId) -> Result<(), PitlessTimerError> {
+    let leaf = |function| {
+        cpuid
+            .as_slice()
+            .iter()
+            .find(|entry| entry.function == function && entry.index == 0)
+    };
+    let valid = leaf(1).is_some_and(|entry| {
+        entry.edx & ((1 << 4) | (1 << 9)) == ((1 << 4) | (1 << 9)) && entry.ecx & (1 << 24) != 0
+    }) && leaf(6).is_some_and(|entry| entry.eax & (1 << 2) != 0)
+        && leaf(0x4000_0000).is_some_and(|entry| {
+            entry.ebx == 0x4b4d_564b && entry.ecx == 0x564b_4d56 && entry.edx == 0x4d
+        })
+        && leaf(0x4000_0001).is_some_and(|entry| entry.eax & ((1 << 0) | (1 << 3)) != 0);
+    if valid {
+        Ok(())
+    } else {
+        Err(PitlessTimerError)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -784,5 +814,55 @@ mod tests {
                 .unwrap();
         let cpuid = Cpuid::try_from(kvm_cpuid);
         assert_eq!(cpuid, Err(CpuidTryFromKvmCpuid::UnsupportedVendor([0; 12])));
+    }
+}
+
+#[cfg(test)]
+mod pit_tests {
+    use super::*;
+    use kvm_bindings::{CpuId, kvm_cpuid_entry2};
+
+    #[test]
+    fn pitless_timers_require_clock_and_deadline_features() {
+        let valid = CpuId::from_entries(&[
+            kvm_cpuid_entry2 {
+                function: 1,
+                ecx: 1 << 24,
+                edx: (1 << 4) | (1 << 9),
+                ..Default::default()
+            },
+            kvm_cpuid_entry2 {
+                function: 6,
+                eax: 1 << 2,
+                ..Default::default()
+            },
+            kvm_cpuid_entry2 {
+                function: 0x4000_0000,
+                ebx: 0x4b4d_564b,
+                ecx: 0x564b_4d56,
+                edx: 0x4d,
+                ..Default::default()
+            },
+            kvm_cpuid_entry2 {
+                function: 0x4000_0001,
+                eax: 1 << 3,
+                ..Default::default()
+            },
+        ])
+        .unwrap();
+        validate_pitless_timers(&valid).unwrap();
+        for index in 0..4 {
+            let mut missing = valid.clone();
+            missing.as_mut_slice()[index] = kvm_cpuid_entry2::default();
+            assert_eq!(validate_pitless_timers(&missing), Err(PitlessTimerError));
+        }
+        for bit in [4, 9] {
+            let mut missing = valid.clone();
+            missing.as_mut_slice()[0].edx &= !(1 << bit);
+            assert_eq!(validate_pitless_timers(&missing), Err(PitlessTimerError));
+        }
+        let mut missing = valid.clone();
+        missing.as_mut_slice()[0].ecx = 0;
+        assert_eq!(validate_pitless_timers(&missing), Err(PitlessTimerError));
     }
 }

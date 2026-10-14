@@ -163,6 +163,18 @@ the feature can be combined with guest_memfd support in Firecracker.
   after restoring from the snapshot even if an interrupt is lost when taking a
   snapshot.
 
+## Optional x86 PIT
+
+The x86 `machine-config` field `pit` defaults to `true`. Set it to `false`
+for guests that use the KVM clock and local APIC TSC-deadline timer. The
+host and effective guest CPU configuration must provide TSC, APIC,
+TSC-deadline, ARAT and the KVM clock. Unsupported configurations fail before
+execution. The guest must also enable and use those facilities.
+
+Snapshots store PIT state only when the device exists. Restore uses that
+saved choice, with no independent PIT override. Format 12 is incompatible
+with format 11; create fresh snapshots when updating this fork.
+
 ## Snapshot versioning
 
 The microVM state snapshot file uses a data format that has a version in the

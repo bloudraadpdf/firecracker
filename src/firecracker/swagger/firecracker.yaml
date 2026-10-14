@@ -1449,6 +1449,14 @@ definitions:
       # gdb_socket_path:
       #   type: string
       #   description: Path to the GDB socket. Requires the gdb feature to be enabled.
+      pit:
+        type: boolean
+        default: true
+        description: >-
+          Enable the legacy programmable interval timer (x86_64 only). Disabling
+          requires a guest that uses the KVM clock and local APIC TSC-deadline
+          timer. The host and guest CPU must support TSC, APIC, TSC-deadline,
+          ARAT and the KVM clock. Snapshots retain this choice.
       smt:
         type: boolean
         description: Flag for enabling/disabling simultaneous multithreading. Can be enabled only on x86.
