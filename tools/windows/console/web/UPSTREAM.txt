@@ -1,0 +1,5 @@
+noVNC 1.6.0
+https://github.com/novnc/noVNC
+Commit: a8dfd6a3ea3c74244f5ebdaa5a7f1023007a7820
+Unmodified browser application, core and vendor files.
+See LICENSE.txt, AUTHORS, docs/LICENSE.* and vendor/pako/LICENSE.
