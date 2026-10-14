@@ -1,3 +1,6 @@
+# Copyright 2026 Bloudraad.
+# SPDX-License-Identifier: Apache-2.0
+
 param([string]$Prefix = 'win7-legacy', [string]$Tag = 'WIN7LEGACY', [switch]$SecureChecks)
 $ErrorActionPreference = 'Stop'
 Start-Transcript -Path "C:\$Prefix-probe.log" -Force

@@ -1,3 +1,6 @@
+@REM Copyright 2026 Bloudraad.
+@REM SPDX-License-Identifier: Apache-2.0
+
 @echo on
 setlocal
 for %%D in (D E F G H) do if exist %%D:\BuildEnv\SetupBuildEnv.cmd set EWDK=%%D:

@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright 2026 Bloudraad.
+# SPDX-License-Identifier: Apache-2.0
+
 set -euo pipefail
 script=$(realpath "$0")
 export WINDOWS_DISK_GUARD=${WINDOWS_DISK_GUARD:-$(realpath "$(dirname "$script")/../egress/assert-disk-closed.sh")}
