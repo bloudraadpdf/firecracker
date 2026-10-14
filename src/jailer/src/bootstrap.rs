@@ -130,15 +130,15 @@ mod tests {
                 assert!(result.is_err());
             } else {
                 let file = result.unwrap();
-                // SAFETY: file owns the descriptor; F_GETFD only reads descriptor flags.
                 assert_ne!(
+                    // SAFETY: file owns the descriptor; F_GETFD only reads descriptor flags.
                     unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC,
                     0
                 );
             }
         }
         let regular = File::open("/dev/null").unwrap();
-        assert!(executable(regular.into_raw_fd()).is_err());
+        executable(regular.into_raw_fd()).unwrap_err();
     }
 
     #[test]
