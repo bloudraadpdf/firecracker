@@ -1,0 +1,133 @@
+// Copyright 2026 Bloudraad.
+// SPDX-License-Identifier: BSD-2-Clause-Patent
+
+#include <assert.h>
+#include <setjmp.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+typedef uint32_t UINT32;
+typedef uint64_t UINT64;
+typedef uintptr_t UINTN;
+typedef unsigned EFI_STATUS;
+typedef void VOID;
+#define IN
+#define OUT
+#define EFI_SUCCESS 0
+#define EFI_NOT_FOUND 1
+#define EFI_ERROR(x) ((x) != EFI_SUCCESS)
+#define MAX_UINT64 UINT64_MAX
+#define EFI_PAGE_SIZE 4096
+#define EFI_PAGE_MASK 4095
+#define ALIGN_VALUE(v,a) (((v) + (a) - 1) & ~((a) - 1))
+#define CLOUDHV_DEVICE_ID 0x0d57
+#define XEN_HVM_MEMMAP_TYPE_RAM 1
+#define EfiAcpiAddressRangeMemory 1
+#define EfiAcpiAddressRangeReserved 2
+#define EfiAcpiAddressRangeSoftReserved 0xefffffff
+#define EFI_RESOURCE_MEMORY_RESERVED 0
+#define EFI_RESOURCE_SYSTEM_MEMORY 1
+#define EFI_RESOURCE_ATTRIBUTE_PRESENT 1
+#define EFI_RESOURCE_ATTRIBUTE_INITIALIZED 2
+#define EFI_RESOURCE_ATTRIBUTE_UNCACHEABLE 4
+#define EFI_RESOURCE_ATTRIBUTE_WRITE_COMBINEABLE 8
+#define EFI_RESOURCE_ATTRIBUTE_WRITE_THROUGH_CACHEABLE 16
+#define EFI_RESOURCE_ATTRIBUTE_WRITE_BACK_CACHEABLE 32
+#define EFI_RESOURCE_ATTRIBUTE_TESTED 64
+#define EFI_RESOURCE_ATTRIBUTE_SPECIAL_PURPOSE 128
+#define DEBUG(x)
+typedef struct { UINT64 BaseAddr, Length; UINT32 Type; } EFI_E820_ENTRY64;
+typedef struct { UINT32 HostBridgeDevId; UINT64 LowMemory; } EFI_HOB_PLATFORM_INFO;
+typedef void (*E820_SCAN_CALLBACK)(EFI_E820_ENTRY64 *, EFI_HOB_PLATFORM_INFO *);
+struct hvm_memmap_table_entry { UINT64 addr, size; UINT32 type, reserved; };
+struct hvm_start_info { UINT64 memmap_paddr; UINT32 memmap_entries; };
+static struct hvm_memmap_table_entry Entries[129];
+static struct hvm_start_info StartInfo;
+static UINT32 ResetData[1];
+#define PcdGet32(x) ((UINTN)ResetData)
+static jmp_buf Failure;
+static unsigned Published;
+static struct { UINT64 start, end; UINT32 type; } Hobs[129];
+static EFI_HOB_PLATFORM_INFO Platform = { CLOUDHV_DEVICE_ID, 0xc0000000 };
+
+static void CpuDeadLoop(void) { longjmp(Failure, 1); }
+static void BuildResourceDescriptorHob(UINT32 type, UINT64 attributes, UINT64 start, UINT64 size)
+{
+    (void)attributes;
+    assert(Published < 129 && size != 0 && start <= UINT64_MAX - size);
+    Hobs[Published].start = start;
+    Hobs[Published].end = start + size;
+    Hobs[Published++].type = type;
+}
+static void PlatformAddMemoryRangeHob(UINT64 start, UINT64 end)
+{
+    BuildResourceDescriptorHob(EFI_RESOURCE_SYSTEM_MEMORY, 0, start, end - start);
+}
+
+#include "memory-map-functions.inc"
+
+static void Reset(UINT32 count)
+{
+    memset(Entries, 0, sizeof Entries);
+    StartInfo.memmap_paddr = (UINTN)Entries;
+    StartInfo.memmap_entries = count;
+    assert((UINTN)&StartInfo <= UINT32_MAX);
+    ResetData[0] = (UINT32)(UINTN)&StartInfo;
+    Published = 0;
+}
+static void Reject(const char *name)
+{
+    if (setjmp(Failure) == 0) {
+        (void)PlatformScanE820Pvh(PlatformAddHobCB, &Platform);
+        assert(!"malformed map accepted");
+    }
+    assert(Published == 0);
+    printf("PASS %s rejected before HOB publication\n", name);
+}
+static void Accept(void)
+{
+    assert(setjmp(Failure) == 0);
+    assert(PlatformScanE820Pvh(PlatformAddHobCB, &Platform) == EFI_SUCCESS);
+}
+int main(void)
+{
+    Reset(0); Reject("empty map");
+    Reset(129); Reject("oversized map");
+    Reset(1); Entries[0] = (struct hvm_memmap_table_entry){ 0, 0, 1, 0 };
+    Reject("zero interval");
+    Reset(1); Entries[0] = (struct hvm_memmap_table_entry){ UINT64_MAX - 1, 4, 1, 0 };
+    Reject("interval wrap");
+    Reset(2);
+    Entries[0] = (struct hvm_memmap_table_entry){ 0x1000, 0x2000, 1, 0 };
+    Entries[1] = (struct hvm_memmap_table_entry){ 0x2000, 0x2000, 2, 0 };
+    Reject("RAM reservation overlap");
+    Reset(2);
+    Entries[0] = (struct hvm_memmap_table_entry){ 0x1000, 0x800, 2, 0 };
+    Entries[1] = (struct hvm_memmap_table_entry){ 0x1800, 0x800, 2, 0 };
+    Reject("rounded reserved overlap");
+    Reset(1); Entries[0] = (struct hvm_memmap_table_entry){ UINT64_MAX - 1, 1, 2, 0 };
+    Reject("reserved rounding wrap");
+    Reset(1); Entries[0] = (struct hvm_memmap_table_entry){ UINT64_MAX - 1, 1, 1, 0 };
+    Accept(); assert(Published == 0); puts("PASS RAM rounding cannot wrap");
+    Reset(7);
+    Entries[0] = (struct hvm_memmap_table_entry){ 0, 0x9fc00, 1, 0 };
+    Entries[1] = (struct hvm_memmap_table_entry){ 0x9fc00, 0x40400, 2, 0 };
+    Entries[2] = (struct hvm_memmap_table_entry){ 0x100000, 0x1f00000, 1, 0 };
+    Entries[3] = (struct hvm_memmap_table_entry){ 0x2000000, 0x100000, 2, 0 };
+    Entries[4] = (struct hvm_memmap_table_entry){ 0x2100000, 0xbdf00000, 1, 0 };
+    Entries[5] = (struct hvm_memmap_table_entry){ 0x100000000ULL, 0x40000000, 1, 0 };
+    Entries[6] = (struct hvm_memmap_table_entry){ 0xf0000, 0x1000, 99, 0 };
+    Accept(); assert(Published == 7);
+    assert(Hobs[0].end == 0x9f000 && Hobs[1].start == 0x9f000);
+    assert(Hobs[3].type == EFI_RESOURCE_MEMORY_RESERVED);
+    assert(Hobs[5].start == 0x100000000ULL && Hobs[5].end == 0x140000000ULL);
+    assert(Hobs[6].type == EFI_RESOURCE_MEMORY_RESERVED);
+    for (unsigned i = 0; i < Published; i++) {
+        for (unsigned j = 0; j < i; j++) {
+            assert(Hobs[i].end <= Hobs[j].start || Hobs[j].end <= Hobs[i].start);
+        }
+    }
+    puts("PASS low/high RAM holes, inward/outward clipping and unknown-type reservation");
+    return 0;
+}

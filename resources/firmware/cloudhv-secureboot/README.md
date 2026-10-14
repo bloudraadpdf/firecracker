@@ -11,6 +11,7 @@ in order with `git apply --ignore-whitespace`:
 2. `resources/firmware/cloudhv-console/cloudhv-console.patch`
 3. `resources/firmware/cloudhv-secureboot/cloudhv-secureboot.patch`
 4. `resources/firmware/cloudhv-secureboot/cloudhv-physical-presence.patch`
+5. `resources/firmware/cloudhv-pvh-memory-map.patch`
 
 After the normal EDK2 BaseTools setup, build:
 

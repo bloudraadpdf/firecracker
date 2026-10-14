@@ -1,0 +1,19 @@
+# Copyright 2026 Bloudraad.
+# SPDX-License-Identifier: BSD-2-Clause-Patent
+
+[Defines]
+  INF_VERSION = 0x00010005
+  BASE_NAME = MemoryMapProbe
+  FILE_GUID = b44c31a8-938c-4c45-b9c4-581fbe726d90
+  MODULE_TYPE = UEFI_APPLICATION
+  VERSION_STRING = 1.0
+  ENTRY_POINT = UefiMain
+[Sources]
+  MemoryMapProbe.c
+[Packages]
+  MdePkg/MdePkg.dec
+[LibraryClasses]
+  UefiApplicationEntryPoint
+  UefiBootServicesTableLib
+  SerialPortLib
+  PrintLib
