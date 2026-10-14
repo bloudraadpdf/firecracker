@@ -59,6 +59,8 @@ The Firecracker binary will be placed at
 building, testing, and running Firecracker, go to the
 [quickstart guide](docs/getting-started.md).
 
+This branch also provides experimental [AMD64 Windows guest support](docs/windows.md).
+
 The overall security of Firecracker microVMs, including the ability to meet the
 criteria for safe multi-tenant computing, depends on a well configured Linux
 host operating system. A configuration that we believe meets this bar is
