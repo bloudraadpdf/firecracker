@@ -9,6 +9,8 @@
 #[cfg(target_arch = "x86_64")]
 pub mod acpi;
 #[cfg(target_arch = "x86_64")]
+pub mod atapi;
+#[cfg(target_arch = "x86_64")]
 pub mod cmos;
 mod i8042;
 #[cfg(target_arch = "aarch64")]
