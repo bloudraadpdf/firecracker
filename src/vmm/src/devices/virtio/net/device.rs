@@ -1081,6 +1081,14 @@ impl VirtioDevice for Net {
         self.config_space.as_slice()
     }
 
+    fn legacy_config_len(&self) -> usize {
+        if self.avail_features & (1 << VIRTIO_NET_F_MTU) != 0 {
+            self.config_as_bytes().len()
+        } else {
+            std::mem::offset_of!(ConfigSpace, _max_virtqueue_pairs)
+        }
+    }
+
     fn write_config(&mut self, offset: u64, data: &[u8]) {
         self.metrics.cfg_fails.inc();
         warn!(

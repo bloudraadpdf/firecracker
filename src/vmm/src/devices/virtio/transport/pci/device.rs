@@ -53,8 +53,6 @@ pub const VIRTQ_MSI_NO_VECTOR: u16 = 0xffff;
 /// BAR index we are using for VirtIO configuration
 const VIRTIO_BAR_INDEX: u8 = 0;
 const TRANSITIONAL_CAPABILITY_BAR_INDEX: u8 = 2;
-/// Size of the legacy register and device configuration I/O region.
-pub const LEGACY_IO_BAR_SIZE: u64 = 0x100;
 
 enum PciCapabilityType {
     Common = 1,
@@ -486,20 +484,17 @@ impl VirtioPciDevice {
         );
         #[cfg(target_arch = "x86_64")]
         if self.io_bar_address.is_some() {
+            let size = Self::legacy_io_bar_size(&*self.device.lock().unwrap());
             let base = allocator
                 .pci_io
-                .allocate(
-                    LEGACY_IO_BAR_SIZE,
-                    LEGACY_IO_BAR_SIZE,
-                    AllocPolicy::FirstMatch,
-                )
+                .allocate(size, size, AllocPolicy::FirstMatch)
                 .unwrap()
                 .start();
             self.io_bar_address = Some(u16::try_from(base).unwrap());
             self.bars.set_bar_io(
                 0,
                 u32::try_from(base).unwrap(),
-                u32::try_from(LEGACY_IO_BAR_SIZE).unwrap(),
+                u32::try_from(size).unwrap(),
             );
         }
         self.add_pci_capabilities();
@@ -519,9 +514,8 @@ impl VirtioPciDevice {
             .expect("virtio-pci BAR is not allocated");
         #[cfg(target_arch = "x86_64")]
         if let Some(base) = self.io_bar_address.take() {
-            let range =
-                RangeInclusive::new(u64::from(base), u64::from(base) + LEGACY_IO_BAR_SIZE - 1)
-                    .unwrap();
+            let size = self.io_bar_size();
+            let range = RangeInclusive::new(u64::from(base), u64::from(base) + size - 1).unwrap();
             allocator
                 .pci_io
                 .free(&range)
@@ -624,13 +618,14 @@ impl VirtioPciDevice {
         } else {
             VIRTIO_BAR_INDEX
         };
+        let io_size = Self::legacy_io_bar_size(&*device.lock().unwrap());
         if let Some(base) = state.io_bar_address
             && (base < 0x1000
-                || !u64::from(base).is_multiple_of(LEGACY_IO_BAR_SIZE)
-                || u64::from(base) + LEGACY_IO_BAR_SIZE > 0x1_0000
+                || !u64::from(base).is_multiple_of(io_size)
+                || u64::from(base) + io_size > 0x1_0000
                 || !state.bars.bar_idx_valid(0)
                 || !state.bars.bars[0].is_io()
-                || state.bars.get_bar_size(0) != LEGACY_IO_BAR_SIZE)
+                || state.bars.get_bar_size(0) != io_size)
         {
             return Err(VirtioPciDeviceError::InvalidIoBar);
         }
@@ -861,6 +856,17 @@ impl VirtioPciDevice {
         self.io_bar_address.map(u64::from)
     }
 
+    fn legacy_io_bar_size(device: &dyn VirtioDevice) -> u64 {
+        u64::try_from(24 + device.legacy_config_len())
+            .unwrap()
+            .next_power_of_two()
+    }
+
+    /// Size of the allocated legacy I/O BAR.
+    pub fn io_bar_size(&self) -> u64 {
+        self.bars.get_bar_size(0)
+    }
+
     fn cap_access_bar_base(&self) -> Option<u64> {
         let bar = self.cap_pci_cfg_info.cap.cap.pci_bar;
         if bar == self.capability_bar_index() {
@@ -882,12 +888,13 @@ impl VirtioPciDevice {
             return;
         };
         let new_base = self.bars.get_bar_addr_32(0);
+        let size = self.io_bar_size();
         if old_base == new_base {
             return;
         }
         let range = match self.vm.resource_allocator().pci_io.allocate(
-            LEGACY_IO_BAR_SIZE,
-            LEGACY_IO_BAR_SIZE,
+            size,
+            size,
             AllocPolicy::ExactMatch(new_base),
         ) {
             Ok(range) => range,
@@ -896,11 +903,7 @@ impl VirtioPciDevice {
                 return;
             }
         };
-        if let Err(err) = self
-            .vm
-            .pio_bus
-            .move_range(old_base, new_base, LEGACY_IO_BAR_SIZE)
-        {
+        if let Err(err) = self.vm.pio_bus.move_range(old_base, new_base, size) {
             error!("Cannot relocate I/O BAR to {new_base:#x}: {err:?}");
             self.vm.resource_allocator().pci_io.free(&range).unwrap();
             return;
@@ -908,7 +911,7 @@ impl VirtioPciDevice {
         self.vm
             .resource_allocator()
             .pci_io
-            .free(&RangeInclusive::new(old_base, old_base + LEGACY_IO_BAR_SIZE - 1).unwrap())
+            .free(&RangeInclusive::new(old_base, old_base + size - 1).unwrap())
             .unwrap();
         self.io_bar_address = Some(u16::try_from(new_base).unwrap());
     }
@@ -2011,10 +2014,76 @@ mod tests {
         let memory_bar = device.read_config_register(BAR0_REG_IDX + 2);
         let io_bar = device.read_config_register(BAR0_REG_IDX);
         device.write_config_register(BAR0_REG_IDX, 0, &u32::MAX.to_le_bytes());
-        assert_eq!(device.read_config_register(BAR0_REG_IDX), 0xffff_ff01);
+        assert_eq!(device.read_config_register(BAR0_REG_IDX), 0xffff_ffe1);
         assert_eq!(device.read_config_register(BAR0_REG_IDX + 1), 0);
         assert_eq!(device.read_config_register(BAR0_REG_IDX + 2), memory_bar);
         device.write_config_register(BAR0_REG_IDX, 0, &io_bar.to_le_bytes());
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_network_legacy_bar_size() {
+        use crate::devices::virtio::net::{Net, Tap};
+        for (mtu, expected) in [(None, 32u64), (Some(1500), 64)] {
+            let mut vmm = crate::builder::tests::default_vmm_with_pci_mode(
+                crate::pci::PciTransportMode::Transitional,
+            );
+            let net = Arc::new(Mutex::new(
+                Net::new_with_tap(
+                    "net".into(),
+                    Tap::open_named("fcbar%d").unwrap(),
+                    None,
+                    RateLimiter::default(),
+                    RateLimiter::default(),
+                    mtu,
+                )
+                .unwrap(),
+            ));
+            vmm.device_manager
+                .attach_boot_virtio_device(
+                    &vmm.vm,
+                    "net".into(),
+                    net,
+                    &mut Cmdline::new(1024).unwrap(),
+                    &mut crate::EventManager::new().unwrap(),
+                    false,
+                )
+                .unwrap();
+            let device = pci_devices(&vmm.device_manager)
+                .get_virtio_device(VirtioDeviceType::Net, "net")
+                .unwrap();
+            let mut device = device.lock().unwrap();
+            let base = device.io_bar_address().unwrap();
+            device.write_config_register(BAR0_REG_IDX, 0, &u32::MAX.to_le_bytes());
+            let mask = device.read_config_register(BAR0_REG_IDX) & !3;
+            assert_eq!(u64::from((!mask).wrapping_add(1)), expected);
+            device.write_config_register(BAR0_REG_IDX, 0, &(base as u32).to_le_bytes());
+            let restored_vmm = crate::builder::tests::default_vmm_with_pci_mode(
+                crate::pci::PciTransportMode::Transitional,
+            );
+            let restored = VirtioPciDevice::new_from_state(
+                "restored".into(),
+                kvm_vm(&restored_vmm),
+                device.virtio_device(),
+                device.state(),
+            )
+            .unwrap();
+            assert_eq!(restored.io_bar_size(), expected);
+            for size in [16, 256] {
+                let mut state = device.state();
+                state.bars.bars[0] = Default::default();
+                state.bars.set_bar_io(0, base as u32, size);
+                assert!(matches!(
+                    VirtioPciDevice::new_from_state(
+                        "bad".into(),
+                        kvm_vm(&vmm),
+                        device.virtio_device(),
+                        state,
+                    ),
+                    Err(super::VirtioPciDeviceError::InvalidIoBar)
+                ));
+            }
+        }
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -2039,7 +2108,8 @@ mod tests {
         vm.pio_bus.read(base + 12, &mut value).unwrap();
         assert_eq!(u16::from_le_bytes(value), queue_size);
         command(false);
-        let new_base = base + super::LEGACY_IO_BAR_SIZE;
+        let size = device.lock().unwrap().io_bar_size();
+        let new_base = base + size;
         device.lock().unwrap().write_config_register(
             BAR0_REG_IDX,
             0,
@@ -2053,11 +2123,11 @@ mod tests {
         assert_eq!(u16::from_le_bytes(value), queue_size);
         vm.resource_allocator()
             .pci_io
-            .allocate(0x100, 0x100, AllocPolicy::ExactMatch(base))
+            .allocate(size, size, AllocPolicy::ExactMatch(base))
             .unwrap();
         vm.resource_allocator()
             .pci_io
-            .allocate(0x100, 0x100, AllocPolicy::ExactMatch(new_base))
+            .allocate(size, size, AllocPolicy::ExactMatch(new_base))
             .unwrap_err();
         for invalid in [base, 0x1_0000] {
             command(false);
@@ -2460,10 +2530,14 @@ mod tests {
     fn test_transitional_detach_releases_bars() {
         let mut vmm = create_vmm_with_pci_mode(crate::pci::PciTransportMode::Transitional);
         let vm = kvm_vm(&vmm).clone();
-        let (io_base, memory_base) = {
+        let (io_base, io_size, memory_base) = {
             let device = get_virtio_device(&vmm);
             let device = device.lock().unwrap();
-            (device.io_bar_address().unwrap(), device.bar_address())
+            (
+                device.io_bar_address().unwrap(),
+                device.io_bar_size(),
+                device.bar_address(),
+            )
         };
         vmm.device_manager
             .hot_unplug_device(
@@ -2477,11 +2551,7 @@ mod tests {
         let mut allocator = vm.resource_allocator();
         allocator
             .pci_io
-            .allocate(
-                super::LEGACY_IO_BAR_SIZE,
-                super::LEGACY_IO_BAR_SIZE,
-                AllocPolicy::ExactMatch(io_base),
-            )
+            .allocate(io_size, io_size, AllocPolicy::ExactMatch(io_base))
             .unwrap();
         allocator
             .pci_memory()

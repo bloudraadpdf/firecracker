@@ -168,6 +168,11 @@ pub trait VirtioDevice: AsAny + MutEventSubscriber + Send {
     /// Each device returns its live config struct bytes here.
     fn config_as_bytes(&self) -> &[u8];
 
+    /// Length of device configuration exposed through legacy PCI ports.
+    fn legacy_config_len(&self) -> usize {
+        self.config_as_bytes().len()
+    }
+
     /// Reads this device configuration space at `offset`.
     fn read_config(&self, offset: u64, data: &mut [u8]) {
         let config = self.config_as_bytes();

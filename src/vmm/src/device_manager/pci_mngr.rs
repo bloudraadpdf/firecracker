@@ -25,8 +25,6 @@ use crate::devices::virtio::pmem::device::Pmem;
 use crate::devices::virtio::pmem::persist::{PmemConstructorArgs, PmemState};
 use crate::devices::virtio::rng::Entropy;
 use crate::devices::virtio::rng::persist::{EntropyConstructorArgs, EntropyState};
-#[cfg(target_arch = "x86_64")]
-use crate::devices::virtio::transport::pci::device::LEGACY_IO_BAR_SIZE;
 use crate::devices::virtio::transport::pci::device::{
     CAPABILITY_BAR_SIZE, PciInterruptForwarder, VirtioPciDevice, VirtioPciDeviceError,
     VirtioPciDeviceState,
@@ -125,7 +123,12 @@ impl PciDevices {
             let sub_id = event_manager.add_subscriber(device.virtio_device());
             device.sub_id = Some(sub_id);
 
-            (device.bar_address(), device.io_bar_address())
+            (
+                device.bar_address(),
+                device
+                    .io_bar_address()
+                    .map(|base| (base, device.io_bar_size())),
+            )
         };
 
         self.virtio_devices
@@ -145,8 +148,8 @@ impl PciDevices {
             .mmio_bus
             .insert(virtio_device.clone(), bar_address, CAPABILITY_BAR_SIZE)?;
         #[cfg(target_arch = "x86_64")]
-        if let Some(base) = io_bar_address {
-            vm.pio_bus.insert(virtio_device, base, LEGACY_IO_BAR_SIZE)?;
+        if let Some((base, size)) = io_bar_address {
+            vm.pio_bus.insert(virtio_device, base, size)?;
         }
         #[cfg(target_arch = "aarch64")]
         debug_assert!(io_bar_address.is_none());
@@ -232,7 +235,9 @@ impl PciDevices {
                 .map_err(PciManagerError::Kvm)?;
             (
                 pci_device.bar_address(),
-                pci_device.io_bar_address(),
+                pci_device
+                    .io_bar_address()
+                    .map(|base| (base, pci_device.io_bar_size())),
                 pci_device.sub_id,
             )
         };
@@ -243,8 +248,8 @@ impl PciDevices {
             .map_err(PciManagerError::Bus)?;
 
         #[cfg(target_arch = "x86_64")]
-        if let Some(base) = io_bar_address {
-            vm.pio_bus.remove(base, LEGACY_IO_BAR_SIZE)?;
+        if let Some((base, size)) = io_bar_address {
+            vm.pio_bus.remove(base, size)?;
         }
         #[cfg(target_arch = "aarch64")]
         debug_assert!(io_bar_address.is_none());
