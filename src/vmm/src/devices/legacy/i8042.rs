@@ -458,6 +458,7 @@ impl I8042Device {
     }
 
     fn reset(&self) -> Result<(), I8042Error> {
+        crate::logger::info!("Guest requested i8042 reset");
         self.reset_evt.write(1).map_err(I8042Error::Interrupt)?;
         METRICS.reset_count.inc();
         Ok(())
