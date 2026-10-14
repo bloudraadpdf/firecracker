@@ -182,7 +182,7 @@ mod tests {
         data.extend(0u32.to_le_bytes());
         data.extend(48u32.to_le_bytes());
         data.resize(67228, 0);
-        for (index, entry) in data[28..].chunks_exact_mut(48).enumerate() {
+        for (index, entry) in data[28..].as_chunks_mut::<48>().0.iter_mut().enumerate() {
             entry[16..20].copy_from_slice(&u32::try_from(index).unwrap().to_le_bytes());
         }
         let variable = Variable {
@@ -377,6 +377,32 @@ mod authentication_tests {
         assert_eq!(status(&mut restored, &mut update), 0x8000_0000_0000_0008);
     }
 
+    #[test]
+    fn signed_platform_key_deletion_updates_mode() {
+        let mut engine = enrolled();
+        let mut delete = set_message(
+            "PK",
+            guid("61dfe48bca93d211aa0d00e098032b8c"),
+            0x27,
+            include_bytes!("../tests/fixtures/pk-delete.auth"),
+        );
+        assert_eq!(status(&mut engine, &mut delete), 0);
+        let state = engine.save();
+        assert!(!state.variables.iter().any(|v| v.name == utf16("PK")));
+        for (name, value) in [("SetupMode", 1), ("SecureBoot", 0)] {
+            assert_eq!(
+                state
+                    .variables
+                    .iter()
+                    .find(|v| v.name == utf16(name))
+                    .unwrap()
+                    .data,
+                [value],
+                "{name}"
+            );
+        }
+        assert_eq!(Engine::restore(&state).unwrap().save(), state);
+    }
     #[test]
     fn unsigned_deletion_cannot_remove_platform_key() {
         let mut engine = enrolled();

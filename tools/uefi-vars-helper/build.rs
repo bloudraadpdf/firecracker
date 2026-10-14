@@ -27,6 +27,7 @@ fn main() {
     for patch in [
         "0001-host-state-codec.patch",
         "0002-authenticated-variable-validation.patch",
+        "0003-platform-key-deletion-mode.patch",
     ] {
         let path = fs::canonicalize(PathBuf::from("patches").join(patch)).unwrap();
         println!("cargo:rerun-if-changed={}", path.display());
