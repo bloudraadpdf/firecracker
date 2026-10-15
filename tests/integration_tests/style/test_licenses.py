@@ -13,6 +13,10 @@ AMAZON_COPYRIGHT = (
     "Copyright {} Amazon.com, Inc. or its affiliates. All Rights Reserved."
 )
 AMAZON_LICENSE = "SPDX-License-Identifier: Apache-2.0"
+BLOUDRAAD_COPYRIGHT = (
+    "Copyright 2026 Bloudraad.",
+    "Copyright 2026 Bloudraad Ltd",
+)
 CHROMIUM_COPYRIGHT = "Copyright 2017 The Chromium OS Authors. All rights reserved."
 CHROMIUM_LICENSE = (
     "Use of this source code is governed by a BSD-style license that can be"
@@ -72,6 +76,10 @@ def _validate_license(filename):
             copyright_info
         ) and _look_for_license(file, AMAZON_LICENSE)
 
+        has_bloudraad_copyright = any(
+            author in copyright_info for author in BLOUDRAAD_COPYRIGHT
+        ) and _look_for_license(file, AMAZON_LICENSE)
+
         has_chromium_copyright = (
             CHROMIUM_COPYRIGHT in copyright_info
             and _look_for_license(file, CHROMIUM_LICENSE)
@@ -100,6 +108,7 @@ def _validate_license(filename):
 
         return (
             has_amazon_copyright
+            or has_bloudraad_copyright
             or has_chromium_copyright
             or has_tuntap_copyright
             or has_alibaba_copyright
