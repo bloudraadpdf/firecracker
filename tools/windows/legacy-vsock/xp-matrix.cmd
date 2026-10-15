@@ -1,3 +1,6 @@
+@REM Copyright 2026 Bloudraad.
+@REM SPDX-License-Identifier: Apache-2.0
+
 @echo off
 mode COM1: BAUD=115200 PARITY=n DATA=8 STOP=1
 C:\xp-connect.exe >C:\xp-legacy-probe.log 2>&1

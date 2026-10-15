@@ -1,10 +1,18 @@
+@REM Copyright 2026 Bloudraad.
+@REM SPDX-License-Identifier: Apache-2.0
+
 @echo on
 setlocal
+set "EWDK="
 for %%D in (D E F G H) do if exist %%D:\BuildEnv\SetupBuildEnv.cmd set EWDK=%%D:
 if not defined EWDK exit /b 2
 call %EWDK%\BuildEnv\SetupBuildEnv.cmd x86
+if errorlevel 1 exit /b 3
+set "CL="
+set "_CL_="
 set WDK7=C:\LegacyVsock\wdk7\WinDDK\7600.16385.win7_wdk.100208-1538
 cd /d C:\LegacyVsock\upstream\viosock\lib
+if errorlevel 1 exit /b 4
 if not exist objfre_wxp_x86 mkdir objfre_wxp_x86
 cl /nologo /c /O2 /MT /Zl /GS /W4 /WX /DWIN32 /DWIN32_LEAN_AND_MEAN /D_WINDOWS /D_USRDLL /DVIOSOCKLIB_EXPORTS /DUNICODE /D_UNICODE /DNDEBUG /D_WIN32_WINNT=0x0501 /DWINVER=0x0501 /DNTDDI_VERSION=0x05010200 /I%WDK7%\inc\crt /I"%WindowsSdkDir%Include\10.0.19041.0\um" /I"%WindowsSdkDir%Include\10.0.19041.0\shared" /FI"%WindowsSdkDir%Include\10.0.19041.0\shared\sal.h" /Foobjfre_wxp_x86\ dllmain.c install.c native.c viosocklib.c utils.c
 if errorlevel 1 exit /b 30
