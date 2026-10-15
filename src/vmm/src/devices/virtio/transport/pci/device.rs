@@ -636,7 +636,7 @@ impl VirtioPciDevice {
             // BAR reads expect that the buffer has the exact size of the field that
             // offset is pointing to. So, do some check that the `length` has a meaningful value
             // and only use the part of the buffer we actually need.
-            if len <= 4 {
+            if matches!(len, 1 | 2 | 4) && len <= data.len() {
                 self.read_bar(0, bar_offset as u64, &mut data[..len]);
             }
         }
@@ -661,7 +661,7 @@ impl VirtioPciDevice {
             // BAR writes expect that the buffer has the exact size of the field that
             // offset is pointing to. So, do some check that the `length` has a meaningful value
             // and only use the part of the buffer we actually need.
-            if len <= 4 {
+            if matches!(len, 1 | 2 | 4) {
                 let len = len.min(data.len());
                 self.write_bar(0, bar_offset as u64, &data[..len])
             } else {

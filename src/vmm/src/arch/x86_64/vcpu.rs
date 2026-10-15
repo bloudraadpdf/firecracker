@@ -19,9 +19,9 @@ use vmm_sys_util::fam::{self, FamStruct};
 
 use crate::arch::EntryPoint;
 use crate::arch::x86_64::generated::msr_index::{MSR_IA32_TSC, MSR_IA32_TSC_DEADLINE};
-use crate::arch::x86_64::interrupts;
 use crate::arch::x86_64::msr::{MsrError, create_boot_msr_entries};
 use crate::arch::x86_64::regs::{SetupFpuError, SetupRegistersError, SetupSpecialRegistersError};
+use crate::arch::x86_64::{hyperv, interrupts};
 use crate::cpu_config::x86_64::{CpuConfiguration, cpuid};
 use crate::logger::{IncMetric, METRICS, error, warn};
 use crate::vstate::bus::Bus;
@@ -49,6 +49,8 @@ const DEFERRED_MSRS: [u32; 1] = [
 /// Errors associated with the wrappers over KVM ioctls.
 #[derive(Debug, PartialEq, Eq, thiserror::Error, displaydoc::Display)]
 pub enum KvmVcpuError {
+    /// Failed to restore Hyper-V state: {0}
+    Hyperv(#[from] hyperv::HypervError),
     /// Failed to convert `kvm_bindings::CpuId` to `Cpuid`: {0}
     ConvertCpuidType(#[from] cpuid::CpuidTryFromKvmCpuid),
     /// Failed FamStructWrapper operation: {0}
@@ -120,6 +122,8 @@ pub struct SetTscError(#[from] kvm_ioctls::Error);
 /// Errors associated with configuring an x86_64 vCPU.
 #[derive(Debug, thiserror::Error, displaydoc::Display, Eq, PartialEq)]
 pub enum KvmVcpuConfigureError {
+    /// Failed to configure Hyper-V: {0}
+    Hyperv(#[from] hyperv::HypervError),
     /// Failed to convert `Cpuid` to `kvm_bindings::CpuId`: {0}
     ConvertCpuidType(#[from] vmm_sys_util::fam::Error),
     /// Failed to apply modifications to CPUID: {0}
@@ -243,6 +247,9 @@ impl KvmVcpu {
         configured_cpuid: &CpuId,
     ) -> Result<(), KvmVcpuConfigureError> {
         let mut msrs = msrs.clone();
+        if hyperv::enabled(configured_cpuid) {
+            hyperv::enable_synic(&self.fd)?;
+        }
         self.msrs_to_save.extend(msrs.keys());
 
         create_boot_msr_entries().into_iter().for_each(|entry| {
@@ -625,7 +632,15 @@ impl KvmVcpu {
             None
         });
         let cpuid = self.get_cpuid()?;
-        let saved_msrs = self.get_msr_chunks(self.msrs_to_save.iter().copied())?;
+        let mut msrs_to_save = self.msrs_to_save.clone();
+        if hyperv::enabled(&cpuid) {
+            for index in hyperv::msrs_to_save() {
+                if !msrs_to_save.contains(&index) {
+                    msrs_to_save.push(index);
+                }
+            }
+        }
+        let saved_msrs = self.get_msr_chunks(msrs_to_save.into_iter())?;
         let vcpu_events = self
             .fd
             .get_vcpu_events()
@@ -706,6 +721,9 @@ impl KvmVcpu {
         self.fd
             .set_cpuid2(&state.cpuid)
             .map_err(KvmVcpuError::VcpuSetCpuid)?;
+        if hyperv::enabled(&state.cpuid) {
+            hyperv::enable_synic(&self.fd)?;
+        }
         self.fd
             .set_mp_state(state.mp_state)
             .map_err(KvmVcpuError::VcpuSetMpState)?;
@@ -845,7 +863,7 @@ mod tests {
 
     use kvm_bindings::kvm_msr_entry;
     use kvm_ioctls::Cap;
-    use vm_memory::GuestAddress;
+    use vm_memory::{Bytes, GuestAddress};
 
     use super::*;
     use crate::arch::BootProtocol;
@@ -1038,6 +1056,66 @@ mod tests {
             })
             .unwrap();
         assert!(leaf3.result.eax == 0x1234_5678);
+    }
+
+    #[test]
+    fn hyperv_snapshot_restores_synic_and_timer_state() {
+        use crate::arch::x86_64::generated::hyperv_tlfs::*;
+
+        let (vm, mut vcpu) = setup_vcpu(0x10000);
+        let mut cpuid = Cpuid::try_from(vm.kvm().supported_cpuid.clone()).unwrap();
+        hyperv::configure(&mut cpuid, &vm.kvm().fd).unwrap();
+        let cpuid = vcpu.configure_cpuid(&cpuid, 1, false).unwrap();
+        vcpu.configure_msrs_for_boot(&BTreeMap::new(), &cpuid)
+            .unwrap();
+        let values = [
+            (HV_X64_MSR_GUEST_OS_ID, 0x0001_0000_0000_0000),
+            (HV_X64_MSR_SCONTROL, 1),
+            (HV_X64_MSR_SIEFP, 0x2001),
+            (HV_X64_MSR_SIMP, 0x3001),
+            (HV_X64_MSR_SINT0, 0x10080),
+            (HV_X64_MSR_STIMER0_CONFIG, 0),
+            (HV_X64_MSR_STIMER0_COUNT, 12345),
+        ];
+        let msrs = Msrs::from_entries(&values.map(|(index, data)| kvm_bindings::kvm_msr_entry {
+            index,
+            data,
+            ..Default::default()
+        }))
+        .unwrap();
+        assert_eq!(vcpu.fd.set_msrs(&msrs).unwrap(), values.len());
+        let state = vcpu.save_state().unwrap();
+
+        let (restored_vm, restored) = setup_vcpu(0x10000);
+        let page = [0xa5u8; 4096];
+        restored_vm
+            .guest_memory()
+            .write_slice(&page, GuestAddress(0x2000))
+            .unwrap();
+        restored_vm
+            .guest_memory()
+            .write_slice(&page, GuestAddress(0x3000))
+            .unwrap();
+        restored.restore_state(&state).unwrap();
+        let resaved = restored.save_state().unwrap();
+        assert!(hyperv::enabled(&resaved.cpuid));
+        for (index, data) in values {
+            let saved = resaved
+                .saved_msrs
+                .iter()
+                .flat_map(|chunk| chunk.as_slice())
+                .find(|entry| entry.index == index)
+                .unwrap();
+            assert_eq!(saved.data, data, "MSR {index:#x}");
+        }
+        for addr in [0x2000, 0x3000] {
+            let mut actual = [0; 4096];
+            restored_vm
+                .guest_memory()
+                .read_slice(&mut actual, GuestAddress(addr))
+                .unwrap();
+            assert_eq!(actual, page);
+        }
     }
 
     #[test]

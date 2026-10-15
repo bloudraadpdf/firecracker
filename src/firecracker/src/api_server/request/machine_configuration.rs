@@ -121,6 +121,8 @@ mod tests {
                 vcpu_count: Some(8),
                 mem_size_mib: Some(1024),
                 smt: Some(false),
+                #[cfg(target_arch = "x86_64")]
+                hyperv: Some(false),
                 cpu_template: None,
                 track_dirty_pages: Some(false),
                 huge_pages: Some(expected),
@@ -142,6 +144,8 @@ mod tests {
             vcpu_count: Some(8),
             mem_size_mib: Some(1024),
             smt: Some(false),
+            #[cfg(target_arch = "x86_64")]
+            hyperv: Some(false),
             cpu_template: Some(StaticCpuTemplate::None),
             track_dirty_pages: Some(false),
             huge_pages: Some(HugePageConfig::None),
@@ -163,6 +167,8 @@ mod tests {
             vcpu_count: Some(8),
             mem_size_mib: Some(1024),
             smt: Some(false),
+            #[cfg(target_arch = "x86_64")]
+            hyperv: Some(false),
             cpu_template: None,
             track_dirty_pages: Some(true),
             huge_pages: Some(HugePageConfig::None),
@@ -188,6 +194,7 @@ mod tests {
                 vcpu_count: Some(8),
                 mem_size_mib: Some(1024),
                 smt: Some(false),
+                hyperv: Some(false),
                 cpu_template: Some(StaticCpuTemplate::T2),
                 track_dirty_pages: Some(true),
                 huge_pages: Some(HugePageConfig::None),
@@ -215,6 +222,8 @@ mod tests {
             vcpu_count: Some(8),
             mem_size_mib: Some(1024),
             smt: Some(true),
+            #[cfg(target_arch = "x86_64")]
+            hyperv: Some(false),
             cpu_template: None,
             track_dirty_pages: Some(true),
             huge_pages: Some(HugePageConfig::None),

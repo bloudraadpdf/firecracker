@@ -27,6 +27,8 @@ pub const FADT_F_PWR_BUTTON: u8 = 4;
 /// If the system does not have a sleep button, this value would be “1” and no power button device
 /// would be present
 pub const FADT_F_SLP_BUTTON: u8 = 5;
+/// Indicates that the reset register is supported.
+pub const FADT_F_RESET_REG_SUP: u8 = 10;
 /// Flag for Hardware Reduced API. If enabled, software-only alternatives are used for supported
 /// fixed features.
 pub const FADT_F_HW_REDUCED_ACPI: u8 = 20;
@@ -146,6 +148,23 @@ impl Fadt {
     pub fn set_hypervisor_vendor_id(&mut self, hypervisor_vendor_id: [u8; 8]) {
         self.hypervisor_vendor_id = hypervisor_vendor_id;
     }
+
+    /// Configure the reset register and its trigger value.
+    pub fn set_reset(&mut self, register: GenericAddressStructure, value: u8) {
+        self.reset_reg = register;
+        self.reset_value = value;
+        self.flags = U32::new(self.flags.get() | (1 << FADT_F_RESET_REG_SUP));
+    }
+
+    /// Configure hardware-reduced sleep control and status registers.
+    pub fn set_sleep_registers(
+        &mut self,
+        control: GenericAddressStructure,
+        status: GenericAddressStructure,
+    ) {
+        self.sleep_control_reg = control;
+        self.sleep_status_reg = status;
+    }
 }
 
 impl Sdt for Fadt {
@@ -157,5 +176,36 @@ impl Sdt for Fadt {
         self.header.checksum = checksum(&[self.as_bytes()]);
         mem.write_slice(self.as_bytes(), address)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use vm_memory::GuestMemoryMmap;
+
+    use super::*;
+
+    #[test]
+    fn hardware_reduced_power_registers() {
+        let mut table = Fadt::new(*b"TESTVM", *b"TESTFADT", 0);
+        table.set_flags(1 << FADT_F_HW_REDUCED_ACPI);
+        let control = GenericAddressStructure::new(1, 8, 0, 1, 0x600);
+        let status = GenericAddressStructure::new(1, 8, 0, 1, 0x601);
+        table.set_reset(control, 1);
+        table.set_sleep_registers(control, status);
+        let mem = GuestMemoryMmap::<()>::from_ranges(&[(GuestAddress(0), 4096)]).unwrap();
+        table.write_to_guest(&mem, GuestAddress(0)).unwrap();
+        let mut bytes = vec![0; table.len()];
+        mem.read_slice(&mut bytes, GuestAddress(0)).unwrap();
+
+        assert_eq!(checksum(&[&bytes]), 0);
+        assert_eq!(
+            u32::from_le_bytes(bytes[112..116].try_into().unwrap()),
+            (1 << FADT_F_HW_REDUCED_ACPI) | (1 << FADT_F_RESET_REG_SUP)
+        );
+        assert_eq!(&bytes[116..128], control.as_bytes());
+        assert_eq!(bytes[128], 1);
+        assert_eq!(&bytes[244..256], control.as_bytes());
+        assert_eq!(&bytes[256..268], status.as_bytes());
     }
 }
