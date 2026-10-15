@@ -16,6 +16,8 @@ pub mod legacy;
 pub mod pci;
 pub mod pseudo;
 #[cfg(target_arch = "x86_64")]
+pub mod tpm;
+#[cfg(target_arch = "x86_64")]
 pub mod usb;
 pub mod virtio;
 
