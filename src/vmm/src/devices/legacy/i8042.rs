@@ -1,18 +1,19 @@
 // Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2026 Bloudraad.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Portions Copyright 2017 The Chromium OS Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the THIRD-PARTY file.
 
+use std::collections::VecDeque;
 use std::io;
-use std::num::Wrapping;
 use std::sync::{Arc, Barrier};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use vmm_sys_util::eventfd::EventFd;
 
-use crate::logger::{IncMetric, SharedIncMetric, error, warn};
+use crate::logger::{IncMetric, SharedIncMetric, error};
 use crate::vstate::bus::BusDevice;
 
 /// Errors thrown by the i8042 device.
@@ -20,514 +21,1050 @@ use crate::vstate::bus::BusDevice;
 pub enum I8042Error {
     /// i8042 internal buffer full.
     InternalBufferFull,
-    /// Keyboard interrupt disabled by guest driver.
-    KbdInterruptDisabled,
-    /// Could not trigger keyboard interrupt: {0}.
-    KbdInterruptFailure(io::Error),
+    /// Could not trigger input interrupt: {0}.
+    Interrupt(io::Error),
+    /// Invalid i8042 snapshot state.
+    InvalidState,
+    /// Unsupported PS/2 key code or mouse buttons.
+    InvalidInput,
 }
 
 /// Metrics specific to the i8042 device.
 #[derive(Debug, Serialize)]
 pub(super) struct I8042DeviceMetrics {
-    /// Errors triggered while using the i8042 device.
     error_count: SharedIncMetric,
-    /// Number of superfluous read intents on this i8042 device.
     missed_read_count: SharedIncMetric,
-    /// Number of superfluous write intents on this i8042 device.
     missed_write_count: SharedIncMetric,
-    /// Bytes read by this device.
     read_count: SharedIncMetric,
-    /// Number of resets done by this device.
     reset_count: SharedIncMetric,
-    /// Bytes written by this device.
     write_count: SharedIncMetric,
 }
-impl I8042DeviceMetrics {
-    /// Const default construction.
-    const fn new() -> Self {
+
+pub(super) static METRICS: I8042DeviceMetrics = I8042DeviceMetrics {
+    error_count: SharedIncMetric::new(),
+    missed_read_count: SharedIncMetric::new(),
+    missed_write_count: SharedIncMetric::new(),
+    read_count: SharedIncMetric::new(),
+    reset_count: SharedIncMetric::new(),
+    write_count: SharedIncMetric::new(),
+};
+
+const QUEUE_CAPACITY: usize = 256;
+const KBD_IRQ: u8 = 1;
+const AUX_IRQ: u8 = 2;
+const KBD_DISABLED: u8 = 0x10;
+const AUX_DISABLED: u8 = 0x20;
+const TRANSLATE: u8 = 0x40;
+const ACK: u8 = 0xfa;
+const RESEND: u8 = 0xfe;
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+enum Destination {
+    Control,
+    Output,
+    KeyboardOutput,
+    MouseOutput,
+    Mouse,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+enum KeyboardParameter {
+    Leds,
+    ScanSet,
+    Typematic,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+enum MouseParameter {
+    Resolution,
+    SampleRate,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+struct OutputByte {
+    value: u8,
+    mouse: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct Keyboard {
+    enabled: bool,
+    scan_set: u8,
+    leds: u8,
+    typematic: u8,
+    parameter: Option<KeyboardParameter>,
+    last_byte: u8,
+}
+
+impl Default for Keyboard {
+    fn default() -> Self {
         Self {
-            error_count: SharedIncMetric::new(),
-            missed_read_count: SharedIncMetric::new(),
-            missed_write_count: SharedIncMetric::new(),
-            read_count: SharedIncMetric::new(),
-            reset_count: SharedIncMetric::new(),
-            write_count: SharedIncMetric::new(),
+            enabled: true,
+            scan_set: 2,
+            leds: 0,
+            typematic: 0x2b,
+            parameter: None,
+            last_byte: ACK,
         }
     }
 }
 
-/// Stores aggregated metrics
-pub(super) static METRICS: I8042DeviceMetrics = I8042DeviceMetrics::new();
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct Mouse {
+    enabled: bool,
+    remote: bool,
+    wrap: bool,
+    scaling: bool,
+    resolution: u8,
+    sample_rate: u8,
+    parameter: Option<MouseParameter>,
+    buttons: u8,
+    x: i16,
+    y: i16,
+    last_byte: u8,
+}
 
-/// Offset of the status port (port 0x64)
-const OFS_STATUS: u64 = 4;
+impl Default for Mouse {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            remote: false,
+            wrap: false,
+            scaling: false,
+            resolution: 2,
+            sample_rate: 100,
+            parameter: None,
+            buttons: 0,
+            x: 0,
+            y: 0,
+            last_byte: ACK,
+        }
+    }
+}
 
-/// Offset of the data port (port 0x60)
-const OFS_DATA: u64 = 0;
+/// Saved controller, keyboard, mouse and pending output state.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct I8042State {
+    control: u8,
+    output: u8,
+    command_write: bool,
+    destination: Option<Destination>,
+    queue: VecDeque<OutputByte>,
+    pending_input: VecDeque<OutputByte>,
+    keyboard: Keyboard,
+    mouse: Mouse,
+}
 
-/// i8042 commands
-/// These values are written by the guest driver to port 0x64.
-const CMD_READ_CTR: u8 = 0x20; // Read control register
-const CMD_WRITE_CTR: u8 = 0x60; // Write control register
-const CMD_READ_OUTP: u8 = 0xD0; // Read output port
-const CMD_WRITE_OUTP: u8 = 0xD1; // Write output port
-const CMD_RESET_CPU: u8 = 0xFE; // Reset CPU
+impl Default for I8042State {
+    fn default() -> Self {
+        Self {
+            control: 0x05,
+            output: 3,
+            command_write: false,
+            destination: None,
+            queue: VecDeque::new(),
+            pending_input: VecDeque::new(),
+            keyboard: Keyboard::default(),
+            mouse: Mouse::default(),
+        }
+    }
+}
 
-/// i8042 status register bits
-const SB_OUT_DATA_AVAIL: u8 = 0x0001; // Data available at port 0x60
-const SB_I8042_CMD_DATA: u8 = 0x0008; // i8042 expecting command parameter at port 0x60
-const SB_KBD_ENABLED: u8 = 0x0010; // 1 = kbd enabled, 0 = kbd locked
-
-/// i8042 control register bits
-const CB_KBD_INT: u8 = 0x0001; // kbd interrupt enabled
-const CB_POST_OK: u8 = 0x0004; // POST ok (should always be 1)
-
-/// Key scan codes
-const KEY_CTRL: u16 = 0x0014;
-const KEY_ALT: u16 = 0x0011;
-const KEY_DEL: u16 = 0xE071;
-
-/// Internal i8042 buffer size, in bytes
-const BUF_SIZE: usize = 16;
-
-/// A i8042 PS/2 controller that emulates just enough to shutdown the machine.
+/// Dual-channel PS/2 controller at I/O ports 0x60 and 0x64.
 #[derive(Debug)]
 pub struct I8042Device {
-    /// CPU reset eventfd. We will set this event when the guest issues CMD_RESET_CPU.
     reset_evt: EventFd,
-
-    /// Keyboard interrupt event (IRQ 1).
+    /// Keyboard interrupt (IRQ 1).
     pub kbd_interrupt_evt: EventFd,
-
-    /// The i8042 status register.
-    status: u8,
-
-    /// The i8042 control register.
-    control: u8,
-
-    /// The i8042 output port.
-    outp: u8,
-
-    /// The last command sent to port 0x64.
-    cmd: u8,
-
-    /// The internal i8042 data buffer.
-    buf: [u8; BUF_SIZE],
-    bhead: Wrapping<usize>,
-    btail: Wrapping<usize>,
+    /// Auxiliary interrupt (IRQ 12).
+    pub mouse_interrupt_evt: EventFd,
+    state: I8042State,
 }
 
 impl I8042Device {
-    /// Constructs an i8042 device that will signal the given event when the guest requests it.
-    pub fn new(reset_evt: EventFd) -> Result<I8042Device, std::io::Error> {
-        Ok(I8042Device {
+    /// Construct a controller whose reset requests terminate the VM.
+    pub fn new(reset_evt: EventFd) -> io::Result<Self> {
+        Ok(Self {
             reset_evt,
             kbd_interrupt_evt: EventFd::new(libc::EFD_NONBLOCK)?,
-            control: CB_POST_OK | CB_KBD_INT,
-            cmd: 0,
-            outp: 0,
-            status: SB_KBD_ENABLED,
-            buf: [0; BUF_SIZE],
-            bhead: Wrapping(0),
-            btail: Wrapping(0),
+            mouse_interrupt_evt: EventFd::new(libc::EFD_NONBLOCK)?,
+            state: I8042State::default(),
         })
     }
 
-    /// Signal a ctrl-alt-del (reset) event.
-    #[inline]
-    pub fn trigger_ctrl_alt_del(&mut self) -> Result<(), I8042Error> {
-        // The CTRL+ALT+DEL sequence is 4 bytes in total (1 extended key + 2 normal keys).
-        // Fail if we don't have room for the whole sequence.
-        if BUF_SIZE - self.buf_len() < 4 {
-            return Err(I8042Error::InternalBufferFull);
-        }
-        self.trigger_key(KEY_CTRL)?;
-        self.trigger_key(KEY_ALT)?;
-        self.trigger_key(KEY_DEL)?;
-        Ok(())
+    /// Save pending commands and output as well as device configuration.
+    pub fn save_state(&self) -> I8042State {
+        self.state.clone()
     }
 
-    fn trigger_kbd_interrupt(&self) -> Result<(), I8042Error> {
-        if (self.control & CB_KBD_INT) == 0 {
-            warn!("Failed to trigger i8042 kbd interrupt (disabled by guest OS)");
-            return Err(I8042Error::KbdInterruptDisabled);
+    /// Restore validated state. IRQ routes must be registered before this call.
+    pub fn restore_state(&mut self, state: &I8042State) -> Result<(), I8042Error> {
+        if state.queue.len() > QUEUE_CAPACITY
+            || state.pending_input.len() > QUEUE_CAPACITY
+            || !(1..=2).contains(&state.keyboard.scan_set)
+            || state.keyboard.leds > 7
+            || state.keyboard.typematic > 0x7f
+            || state.mouse.resolution > 3
+            || state.mouse.buttons > 7
+            || ![10, 20, 40, 60, 80, 100, 200].contains(&state.mouse.sample_rate)
+        {
+            return Err(I8042Error::InvalidState);
         }
-        self.kbd_interrupt_evt
-            .write(1)
-            .map_err(I8042Error::KbdInterruptFailure)
+        self.state = state.clone();
+        self.flush_input();
+        self.signal_front()
     }
 
-    fn trigger_key(&mut self, key: u16) -> Result<(), I8042Error> {
-        if key & 0xff00 != 0 {
-            // Check if there is enough room in the buffer, before pushing an extended (2-byte) key.
-            if BUF_SIZE - self.buf_len() < 2 {
-                return Err(I8042Error::InternalBufferFull);
+    fn signal_front(&self) -> Result<(), I8042Error> {
+        if let Some(front) = self.state.queue.front() {
+            let (mask, event) = if front.mouse {
+                (AUX_IRQ, &self.mouse_interrupt_evt)
+            } else {
+                (KBD_IRQ, &self.kbd_interrupt_evt)
+            };
+            if self.state.control & mask != 0 {
+                event.write(1).map_err(I8042Error::Interrupt)?;
             }
-            self.push_byte((key >> 8) as u8)?;
         }
-        self.push_byte((key & 0xff) as u8)?;
-
-        match self.trigger_kbd_interrupt() {
-            Ok(_) | Err(I8042Error::KbdInterruptDisabled) => Ok(()),
-            Err(err) => Err(err),
-        }
-    }
-
-    #[inline]
-    fn push_byte(&mut self, byte: u8) -> Result<(), I8042Error> {
-        self.status |= SB_OUT_DATA_AVAIL;
-        if self.buf_len() == BUF_SIZE {
-            return Err(I8042Error::InternalBufferFull);
-        }
-        self.buf[self.btail.0 % BUF_SIZE] = byte;
-        self.btail += Wrapping(1usize);
         Ok(())
     }
 
-    #[inline]
-    fn pop_byte(&mut self) -> Option<u8> {
-        if self.buf_len() == 0 {
-            return None;
-        }
-        let res = self.buf[self.bhead.0 % BUF_SIZE];
-        self.bhead += Wrapping(1usize);
-        if self.buf_len() == 0 {
-            self.status &= !SB_OUT_DATA_AVAIL;
-        }
-        Some(res)
+    fn input_capacity(&self) -> usize {
+        QUEUE_CAPACITY.saturating_sub(self.state.queue.len() + self.state.pending_input.len())
     }
 
-    #[inline]
-    fn flush_buf(&mut self) {
-        self.bhead = Wrapping(0usize);
-        self.btail = Wrapping(0usize);
-        self.status &= !SB_OUT_DATA_AVAIL;
+    fn flush_input(&mut self) {
+        while self.state.queue.len() < QUEUE_CAPACITY {
+            let Some(index) = self.state.pending_input.iter().position(|byte| {
+                self.state.control
+                    & if byte.mouse {
+                        AUX_DISABLED
+                    } else {
+                        KBD_DISABLED
+                    }
+                    == 0
+            }) else {
+                break;
+            };
+            if let Some(byte) = self.state.pending_input.remove(index) {
+                self.state.queue.push_back(byte);
+            }
+        }
     }
 
-    #[inline]
-    fn buf_len(&self) -> usize {
-        (self.btail - self.bhead).0
+    fn enqueue_input(&mut self, mouse: bool, bytes: &[u8]) -> Result<(), I8042Error> {
+        if bytes.len() > self.input_capacity() {
+            return Err(I8042Error::InternalBufferFull);
+        }
+        let empty = self.state.queue.is_empty();
+        self.state
+            .pending_input
+            .extend(bytes.iter().map(|&value| OutputByte { value, mouse }));
+        self.flush_input();
+        if empty {
+            self.signal_front()?;
+        }
+        Ok(())
     }
+
+    fn enqueue(&mut self, mouse: bool, bytes: &[u8]) -> Result<(), I8042Error> {
+        if bytes.len() > QUEUE_CAPACITY - self.state.queue.len() {
+            return Err(I8042Error::InternalBufferFull);
+        }
+        let empty = self.state.queue.is_empty();
+        self.state
+            .queue
+            .extend(bytes.iter().map(|&value| OutputByte { value, mouse }));
+        if empty {
+            self.signal_front()?;
+        }
+        Ok(())
+    }
+
+    fn reply(&mut self, mouse: bool, bytes: &[u8]) -> Result<(), I8042Error> {
+        self.enqueue(mouse, bytes)?;
+        if let Some(&last) = bytes.last() {
+            if mouse {
+                self.state.mouse.last_byte = last;
+            } else {
+                self.state.keyboard.last_byte = last;
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether a normal or E0-prefixed set-2 make code names a supported key.
+    pub fn valid_key(code: u8, extended: bool) -> bool {
+        if extended {
+            matches!(
+                code,
+                0x11 | 0x14
+                    | 0x1f
+                    | 0x27
+                    | 0x2f
+                    | 0x4a
+                    | 0x5a
+                    | 0x69
+                    | 0x6b
+                    | 0x6c
+                    | 0x70
+                    | 0x71
+                    | 0x72
+                    | 0x74
+                    | 0x75
+                    | 0x7a
+                    | 0x7d
+            )
+        } else {
+            set1_code(code).is_some() && !matches!(code, 0x1f | 0x27 | 0x2f)
+        }
+    }
+
+    /// Inject a physical key using its set-2 make code. Repeated presses are allowed.
+    /// Extended keys use the E0 prefix; Pause and Print Screen have dedicated methods.
+    pub fn inject_key(
+        &mut self,
+        code: u8,
+        extended: bool,
+        pressed: bool,
+    ) -> Result<(), I8042Error> {
+        if !Self::valid_key(code, extended) {
+            return Err(I8042Error::InvalidInput);
+        }
+        let translated = set1_code(code).ok_or(I8042Error::InvalidInput)?;
+        if !self.state.keyboard.enabled {
+            return Ok(());
+        }
+        let set1 = self.state.keyboard.scan_set == 1 || self.state.control & TRANSLATE != 0;
+        let mut bytes = Vec::with_capacity(3);
+        if extended {
+            bytes.push(0xe0);
+        }
+        if set1 {
+            bytes.push(translated | if pressed { 0 } else { 0x80 });
+        } else {
+            if !pressed {
+                bytes.push(0xf0);
+            }
+            bytes.push(code);
+        }
+        self.enqueue_input(false, &bytes)
+    }
+
+    /// Inject the Pause make sequence (this key has no break sequence).
+    pub fn inject_pause(&mut self) -> Result<(), I8042Error> {
+        if !self.state.keyboard.enabled {
+            return Ok(());
+        }
+        let bytes: &[u8] =
+            if self.state.keyboard.scan_set == 1 || self.state.control & TRANSLATE != 0 {
+                &[0xe1, 0x1d, 0x45, 0xe1, 0x9d, 0xc5]
+            } else {
+                &[0xe1, 0x14, 0x77, 0xe1, 0xf0, 0x14, 0xf0, 0x77]
+            };
+        self.enqueue_input(false, bytes)
+    }
+
+    /// Inject Print Screen with its synthetic shift bytes.
+    pub fn inject_print_screen(&mut self, pressed: bool) -> Result<(), I8042Error> {
+        if !self.state.keyboard.enabled {
+            return Ok(());
+        }
+        let set1 = self.state.keyboard.scan_set == 1 || self.state.control & TRANSLATE != 0;
+        self.enqueue_input(
+            false,
+            match (set1, pressed) {
+                (true, true) => &[0xe0, 0x2a, 0xe0, 0x37],
+                (true, false) => &[0xe0, 0xb7, 0xe0, 0xaa],
+                (false, true) => &[0xe0, 0x12, 0xe0, 0x7c],
+                (false, false) => &[0xe0, 0xf0, 0x7c, 0xe0, 0xf0, 0x12],
+            },
+        )
+    }
+
+    /// Inject and release Ctrl-Alt-Delete without leaving modifiers pressed.
+    pub fn trigger_ctrl_alt_del(&mut self) -> Result<(), I8042Error> {
+        if self.input_capacity() < 11 {
+            return Err(I8042Error::InternalBufferFull);
+        }
+        for (code, extended, pressed) in [
+            (0x14, false, true),
+            (0x11, false, true),
+            (0x71, true, true),
+            (0x71, true, false),
+            (0x11, false, false),
+            (0x14, false, false),
+        ] {
+            self.inject_key(code, extended, pressed)?;
+        }
+        Ok(())
+    }
+
+    /// Inject relative movement in PS/2 counts (positive Y is upwards).
+    /// Buttons are left, right and middle in bits 0, 1 and 2.
+    pub fn inject_mouse(&mut self, x: i16, y: i16, buttons: u8) -> Result<(), I8042Error> {
+        if buttons > 7 {
+            return Err(I8042Error::InvalidInput);
+        }
+        if self.state.mouse.wrap {
+            return Ok(());
+        }
+        if self.state.mouse.enabled && !self.state.mouse.remote && self.input_capacity() < 3 {
+            return Err(I8042Error::InternalBufferFull);
+        }
+        let mouse = &mut self.state.mouse;
+        mouse.buttons = buttons;
+        mouse.x = mouse.x.saturating_add(x);
+        mouse.y = mouse.y.saturating_add(y);
+        if mouse.enabled && !mouse.remote {
+            let packet = self.mouse_packet();
+            self.enqueue_input(true, &packet)?;
+        }
+        Ok(())
+    }
+
+    fn mouse_packet(&mut self) -> [u8; 3] {
+        let mouse = &mut self.state.mouse;
+        let scale = |value: i16| -> i32 {
+            let value = i32::from(value);
+            if !mouse.scaling {
+                return value;
+            }
+            let magnitude = match value.abs() {
+                0..=1 => value.abs(),
+                2 => 1,
+                3 => 3,
+                4 => 6,
+                5 => 9,
+                n => n * 2,
+            };
+            magnitude * value.signum()
+        };
+        let x = scale(mouse.x);
+        let y = scale(mouse.y);
+        let flags = 8
+            | mouse.buttons
+            | if x < 0 { 0x10 } else { 0 }
+            | if y < 0 { 0x20 } else { 0 }
+            | if !(-255..=255).contains(&x) { 0x40 } else { 0 }
+            | if !(-255..=255).contains(&y) { 0x80 } else { 0 };
+        mouse.x = 0;
+        mouse.y = 0;
+        [
+            flags,
+            x.clamp(-255, 255).to_le_bytes()[0],
+            y.clamp(-255, 255).to_le_bytes()[0],
+        ]
+    }
+
+    fn reset(&self) -> Result<(), I8042Error> {
+        self.reset_evt.write(1).map_err(I8042Error::Interrupt)?;
+        METRICS.reset_count.inc();
+        Ok(())
+    }
+
+    fn command(&mut self, command: u8) -> Result<(), I8042Error> {
+        self.state.destination = None;
+        match command {
+            0x20 => self.enqueue(false, &[self.state.control])?,
+            0x60 => self.state.destination = Some(Destination::Control),
+            0xa7 => self.state.control |= AUX_DISABLED,
+            0xa8 => self.state.control &= !AUX_DISABLED,
+            0xa9 | 0xab => self.enqueue(false, &[0])?,
+            0xaa => {
+                self.state.control |= 4;
+                self.enqueue(false, &[0x55])?;
+            }
+            0xad => self.state.control |= KBD_DISABLED,
+            0xae => self.state.control &= !KBD_DISABLED,
+            0xc0 => self.enqueue(false, &[0x80])?,
+            0xd0 => self.enqueue(false, &[self.state.output])?,
+            0xd1 => self.state.destination = Some(Destination::Output),
+            0xd2 => self.state.destination = Some(Destination::KeyboardOutput),
+            0xd3 => self.state.destination = Some(Destination::MouseOutput),
+            0xd4 => self.state.destination = Some(Destination::Mouse),
+            0xdd => self.state.output &= !2,
+            0xdf => self.state.output |= 2,
+            0xf0..=0xff if command & 1 == 0 => self.reset()?,
+            _ => (),
+        }
+        Ok(())
+    }
+
+    fn data(&mut self, value: u8) -> Result<(), I8042Error> {
+        match self.state.destination.take() {
+            Some(Destination::Control) => {
+                self.state.control = value;
+                self.signal_front()
+            }
+            Some(Destination::Output) => {
+                self.state.output = value;
+                if value & 1 == 0 {
+                    self.reset()?;
+                }
+                Ok(())
+            }
+            Some(Destination::KeyboardOutput) => self.enqueue(false, &[value]),
+            Some(Destination::MouseOutput) => self.enqueue(true, &[value]),
+            Some(Destination::Mouse) => {
+                self.state.control &= !AUX_DISABLED;
+                self.mouse_command(value)
+            }
+            None => {
+                self.state.control &= !KBD_DISABLED;
+                self.keyboard_command(value)
+            }
+        }
+    }
+
+    fn keyboard_command(&mut self, value: u8) -> Result<(), I8042Error> {
+        if let Some(parameter) = self.state.keyboard.parameter.take() {
+            match parameter {
+                KeyboardParameter::Leds if value <= 7 => self.state.keyboard.leds = value,
+                KeyboardParameter::Typematic if value <= 0x7f => {
+                    self.state.keyboard.typematic = value
+                }
+                KeyboardParameter::ScanSet if value == 0 => {
+                    let set = self.state.keyboard.scan_set;
+                    let result = if self.state.control & TRANSLATE != 0 {
+                        if set == 1 { 0x43 } else { 0x41 }
+                    } else {
+                        set
+                    };
+                    return self.reply(false, &[ACK, result]);
+                }
+                KeyboardParameter::ScanSet if (1..=2).contains(&value) => {
+                    self.state.keyboard.scan_set = value
+                }
+                _ => {
+                    self.state.keyboard.parameter = Some(parameter);
+                    return self.reply(false, &[RESEND]);
+                }
+            }
+            return self.reply(false, &[ACK]);
+        }
+        match value {
+            0xed => self.state.keyboard.parameter = Some(KeyboardParameter::Leds),
+            0xee => return self.reply(false, &[0xee]),
+            0xf0 => self.state.keyboard.parameter = Some(KeyboardParameter::ScanSet),
+            0xf2 => {
+                return self.reply(
+                    false,
+                    &[
+                        ACK,
+                        0xab,
+                        if self.state.control & TRANSLATE != 0 {
+                            0x41
+                        } else {
+                            0x83
+                        },
+                    ],
+                );
+            }
+            0xf3 => self.state.keyboard.parameter = Some(KeyboardParameter::Typematic),
+            0xf4 => self.state.keyboard.enabled = true,
+            0xf5 | 0xf6 => {
+                self.state.pending_input.retain(|byte| byte.mouse);
+                self.state.keyboard = Keyboard::default();
+                self.state.keyboard.enabled = value == 0xf6;
+            }
+            0xfe => return self.enqueue(false, &[self.state.keyboard.last_byte]),
+            0xff => {
+                self.state.pending_input.retain(|byte| byte.mouse);
+                self.state.keyboard = Keyboard::default();
+                return self.reply(false, &[ACK, 0xaa]);
+            }
+            _ => return self.reply(false, &[RESEND]),
+        }
+        self.reply(false, &[ACK])
+    }
+
+    fn mouse_command(&mut self, value: u8) -> Result<(), I8042Error> {
+        if self.state.mouse.wrap && value != 0xec && value != 0xff {
+            return self.reply(true, &[value]);
+        }
+        if let Some(parameter) = self.state.mouse.parameter.take() {
+            match parameter {
+                MouseParameter::Resolution if value <= 3 => self.state.mouse.resolution = value,
+                MouseParameter::SampleRate if [10, 20, 40, 60, 80, 100, 200].contains(&value) => {
+                    self.state.mouse.sample_rate = value
+                }
+                _ => {
+                    self.state.mouse.parameter = Some(parameter);
+                    return self.reply(true, &[RESEND]);
+                }
+            }
+            return self.reply(true, &[ACK]);
+        }
+        match value {
+            0xe6 => self.state.mouse.scaling = false,
+            0xe7 => self.state.mouse.scaling = true,
+            0xe8 => self.state.mouse.parameter = Some(MouseParameter::Resolution),
+            0xe9 => {
+                let mouse = &self.state.mouse;
+                let status = (mouse.buttons & 1) << 2
+                    | (mouse.buttons & 2) >> 1
+                    | (mouse.buttons & 4) >> 1
+                    | if mouse.scaling { 0x10 } else { 0 }
+                    | if mouse.enabled { 0x20 } else { 0 }
+                    | if mouse.remote { 0x40 } else { 0 };
+                return self.reply(true, &[ACK, status, mouse.resolution, mouse.sample_rate]);
+            }
+            0xea => self.state.mouse.remote = false,
+            0xeb => {
+                let packet = self.mouse_packet();
+                return self.reply(true, &[ACK, packet[0], packet[1], packet[2]]);
+            }
+            0xec => self.state.mouse.wrap = false,
+            0xee => self.state.mouse.wrap = true,
+            0xf0 => self.state.mouse.remote = true,
+            0xf2 => return self.reply(true, &[ACK, 0]),
+            0xf3 => self.state.mouse.parameter = Some(MouseParameter::SampleRate),
+            0xf4 => self.state.mouse.enabled = true,
+            0xf5 => self.state.mouse.enabled = false,
+            0xf6 => {
+                self.state.pending_input.retain(|byte| !byte.mouse);
+                self.state.mouse = Mouse::default();
+            }
+            0xfe => return self.enqueue(true, &[self.state.mouse.last_byte]),
+            0xff => {
+                self.state.pending_input.retain(|byte| !byte.mouse);
+                self.state.mouse = Mouse::default();
+                return self.reply(true, &[ACK, 0xaa, 0]);
+            }
+            _ => return self.reply(true, &[RESEND]),
+        }
+        self.reply(true, &[ACK])
+    }
+}
+
+// IBM enhanced keyboard set-2 make codes paired with their set-1 equivalents.
+fn set1_code(code: u8) -> Option<u8> {
+    Some(match code {
+        0x76 => 0x01,
+        0x16 => 0x02,
+        0x1e => 0x03,
+        0x26 => 0x04,
+        0x25 => 0x05,
+        0x2e => 0x06,
+        0x36 => 0x07,
+        0x3d => 0x08,
+        0x3e => 0x09,
+        0x46 => 0x0a,
+        0x45 => 0x0b,
+        0x4e => 0x0c,
+        0x55 => 0x0d,
+        0x66 => 0x0e,
+        0x0d => 0x0f,
+        0x15 => 0x10,
+        0x1d => 0x11,
+        0x24 => 0x12,
+        0x2d => 0x13,
+        0x2c => 0x14,
+        0x35 => 0x15,
+        0x3c => 0x16,
+        0x43 => 0x17,
+        0x44 => 0x18,
+        0x4d => 0x19,
+        0x54 => 0x1a,
+        0x5b => 0x1b,
+        0x5a => 0x1c,
+        0x14 => 0x1d,
+        0x1c => 0x1e,
+        0x1b => 0x1f,
+        0x23 => 0x20,
+        0x2b => 0x21,
+        0x34 => 0x22,
+        0x33 => 0x23,
+        0x3b => 0x24,
+        0x42 => 0x25,
+        0x4b => 0x26,
+        0x4c => 0x27,
+        0x52 => 0x28,
+        0x0e => 0x29,
+        0x12 => 0x2a,
+        0x5d => 0x2b,
+        0x1a => 0x2c,
+        0x22 => 0x2d,
+        0x21 => 0x2e,
+        0x2a => 0x2f,
+        0x32 => 0x30,
+        0x31 => 0x31,
+        0x3a => 0x32,
+        0x41 => 0x33,
+        0x49 => 0x34,
+        0x4a => 0x35,
+        0x59 => 0x36,
+        0x7c => 0x37,
+        0x11 => 0x38,
+        0x29 => 0x39,
+        0x58 => 0x3a,
+        0x05 => 0x3b,
+        0x06 => 0x3c,
+        0x04 => 0x3d,
+        0x0c => 0x3e,
+        0x03 => 0x3f,
+        0x0b => 0x40,
+        0x83 => 0x41,
+        0x0a => 0x42,
+        0x01 => 0x43,
+        0x09 => 0x44,
+        0x77 => 0x45,
+        0x7e => 0x46,
+        0x6c => 0x47,
+        0x75 => 0x48,
+        0x7d => 0x49,
+        0x7b => 0x4a,
+        0x6b => 0x4b,
+        0x73 => 0x4c,
+        0x74 => 0x4d,
+        0x79 => 0x4e,
+        0x69 => 0x4f,
+        0x72 => 0x50,
+        0x7a => 0x51,
+        0x70 => 0x52,
+        0x71 => 0x53,
+        0x61 => 0x56,
+        0x78 => 0x57,
+        0x07 => 0x58,
+        0x1f => 0x5b,
+        0x27 => 0x5c,
+        0x2f => 0x5d,
+        _ => return None,
+    })
 }
 
 impl BusDevice for I8042Device {
     fn read(&mut self, _base: u64, offset: u64, data: &mut [u8]) {
-        // All our ports are byte-wide. We don't know how to handle any wider data.
-        if data.len() != 1 {
+        if data.len() != 1 || ![0, 4].contains(&offset) {
             METRICS.missed_read_count.inc();
             return;
         }
-
-        let mut read_ok = true;
-
-        match offset {
-            OFS_STATUS => data[0] = self.status,
-            OFS_DATA => {
-                // The guest wants to read a byte from port 0x60. For the 8042, that means the top
-                // byte in the internal buffer. If the buffer is empty, the guest will get a 0.
-                data[0] = self.pop_byte().unwrap_or(0);
-
-                // Check if we still have data in the internal buffer. If so, we need to trigger
-                // another interrupt, to let the guest know they need to issue another read from
-                // port 0x60.
-                if (self.status & SB_OUT_DATA_AVAIL) != 0
-                    && let Err(I8042Error::KbdInterruptFailure(err)) = self.trigger_kbd_interrupt()
-                {
-                    warn!("Failed to trigger i8042 kbd interrupt {:?}", err);
-                }
+        if offset == 4 {
+            data[0] = 0x10 | self.state.control & 4 | if self.state.command_write { 8 } else { 0 };
+            if let Some(front) = self.state.queue.front() {
+                data[0] |= 1 | if front.mouse { 0x20 } else { 0 };
             }
-            _ => read_ok = false,
-        }
-        if read_ok {
-            METRICS.read_count.add(data.len() as u64);
         } else {
-            METRICS.missed_read_count.inc();
+            data[0] = self.state.queue.pop_front().map_or(0, |byte| byte.value);
+            self.flush_input();
+            if let Err(err) = self.signal_front() {
+                error!("i8042 interrupt: {err}");
+                METRICS.error_count.inc();
+            }
         }
+        METRICS.read_count.inc();
     }
 
     fn write(&mut self, _base: u64, offset: u64, data: &[u8]) -> Option<Arc<Barrier>> {
-        // All our ports are byte-wide. We don't know how to handle any wider data.
-        if data.len() != 1 {
+        if data.len() != 1 || ![0, 4].contains(&offset) {
             METRICS.missed_write_count.inc();
             return None;
         }
-
-        let mut write_ok = true;
-
-        match offset {
-            OFS_STATUS if data[0] == CMD_RESET_CPU => {
-                // The guest wants to assert the CPU reset line. We handle that by triggering
-                // our exit event fd. Meaning Firecracker will be exiting as soon as the VMM
-                // thread wakes up to handle this event.
-                if let Err(err) = self.reset_evt.write(1) {
-                    error!("Failed to trigger i8042 reset event: {:?}", err);
-                    METRICS.error_count.inc();
-                }
-                METRICS.reset_count.inc();
-            }
-            OFS_STATUS if data[0] == CMD_READ_CTR => {
-                // The guest wants to read the control register.
-                // Let's make sure only the control register will be available for reading from
-                // the data port, for the next inb(0x60).
-                self.flush_buf();
-                let control = self.control;
-                // Buffer is empty, push() will always succeed.
-                self.push_byte(control).unwrap();
-            }
-            OFS_STATUS if data[0] == CMD_WRITE_CTR => {
-                // The guest wants to write the control register. This is a two-step command:
-                // 1. port 0x64 < CMD_WRITE_CTR
-                // 2. port 0x60 < <control reg value>
-                // Make sure we'll be expecting the control reg value on port 0x60 for the next
-                // write.
-                self.flush_buf();
-                self.status |= SB_I8042_CMD_DATA;
-                self.cmd = data[0];
-            }
-            OFS_STATUS if data[0] == CMD_READ_OUTP => {
-                // The guest wants to read the output port (for lack of a better name - this is
-                // just another register on the 8042, that happens to also have its bits connected
-                // to some output pins of the 8042).
-                self.flush_buf();
-                let outp = self.outp;
-                // Buffer is empty, push() will always succeed.
-                self.push_byte(outp).unwrap();
-            }
-            OFS_STATUS if data[0] == CMD_WRITE_OUTP => {
-                // Similar to writing the control register, this is a two-step command.
-                // I.e. write CMD_WRITE_OUTP at port 0x64, then write the actual out port value
-                // to port 0x60.
-                self.status |= SB_I8042_CMD_DATA;
-                self.cmd = data[0];
-            }
-            OFS_DATA if (self.status & SB_I8042_CMD_DATA) != 0 => {
-                // The guest is writing to port 0x60. This byte can either be:
-                // 1. the payload byte of a CMD_WRITE_CTR or CMD_WRITE_OUTP command, in which case
-                //    the status reg bit SB_I8042_CMD_DATA will be set, or
-                // 2. a direct command sent to the keyboard
-                // This match arm handles the first option (when the SB_I8042_CMD_DATA bit is set).
-                match self.cmd {
-                    CMD_WRITE_CTR => self.control = data[0],
-                    CMD_WRITE_OUTP => self.outp = data[0],
-                    _ => (),
-                }
-                self.status &= !SB_I8042_CMD_DATA;
-            }
-            OFS_DATA => {
-                // The guest is sending a command straight to the keyboard (so this byte is not
-                // addressed to the 8042, but to the keyboard). Since we're emulating a pretty
-                // dumb keyboard, we can get away with blindly ack-in anything (byte 0xFA).
-                // Something along the lines of "Yeah, uhm-uhm, yeah, okay, honey, that's great."
-                self.flush_buf();
-                // Buffer is empty, push() will always succeed.
-                self.push_byte(0xFA).unwrap();
-                if let Err(I8042Error::KbdInterruptFailure(err)) = self.trigger_kbd_interrupt() {
-                    warn!("Failed to trigger i8042 kbd interrupt {:?}", err);
-                }
-            }
-            _ => {
-                write_ok = false;
-            }
-        }
-
-        if write_ok {
-            METRICS.write_count.inc();
+        self.state.command_write = offset == 4;
+        let result = if offset == 4 {
+            self.command(data[0])
         } else {
-            METRICS.missed_write_count.inc();
+            self.data(data[0])
+        };
+        let result = result.and_then(|()| {
+            let empty = self.state.queue.is_empty();
+            self.flush_input();
+            if empty { self.signal_front() } else { Ok(()) }
+        });
+        if let Err(err) = result {
+            error!("i8042 write: {err}");
+            METRICS.error_count.inc();
         }
-
+        METRICS.write_count.inc();
         None
     }
 }
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
 
-    impl PartialEq for I8042Error {
-        fn eq(&self, other: &I8042Error) -> bool {
-            self.to_string() == other.to_string()
+    fn controller() -> I8042Device {
+        I8042Device::new(EventFd::new(libc::EFD_NONBLOCK).unwrap()).unwrap()
+    }
+
+    fn read(device: &mut I8042Device, offset: u64) -> u8 {
+        let mut data = [0];
+        device.read(0, offset, &mut data);
+        data[0]
+    }
+
+    fn command(device: &mut I8042Device, byte: u8) {
+        device.write(0, 4, &[byte]);
+    }
+    fn data(device: &mut I8042Device, byte: u8) {
+        device.write(0, 0, &[byte]);
+    }
+    fn mouse(device: &mut I8042Device, byte: u8) {
+        command(device, 0xd4);
+        data(device, byte);
+    }
+    fn drain(device: &mut I8042Device) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        while read(device, 4) & 1 != 0 {
+            bytes.push(read(device, 0));
         }
+        bytes
     }
 
     #[test]
-    fn test_i8042_read_write_and_event() {
-        let mut i8042 = I8042Device::new(EventFd::new(libc::EFD_NONBLOCK).unwrap()).unwrap();
-        let reset_evt = i8042.reset_evt.try_clone().unwrap();
-
-        // Check if reading in a 2-length array doesn't have side effects.
-        let mut data = [1, 2];
-        i8042.read(0x0, 0, &mut data);
-        assert_eq!(data, [1, 2]);
-        i8042.read(0x0, 1, &mut data);
-        assert_eq!(data, [1, 2]);
-
-        // Check if reset works.
-        // Write 1 to the reset event fd, so that read doesn't block in case the event fd
-        // counter doesn't change (for 0 it blocks).
-        reset_evt.write(1).unwrap();
-        let mut data = [CMD_RESET_CPU];
-        i8042.write(0x0, OFS_STATUS, &data);
-        assert_eq!(reset_evt.read().unwrap(), 2);
-
-        // Check if reading with offset 1 doesn't have side effects.
-        i8042.read(0x0, 1, &mut data);
-        assert_eq!(data[0], CMD_RESET_CPU);
-
-        // Check invalid `write`s.
-        let before = METRICS.missed_write_count.count();
-        // offset != 0.
-        i8042.write(0x0, 1, &data);
-        // data != CMD_RESET_CPU
-        data[0] = CMD_RESET_CPU + 1;
-        i8042.write(0x0, 1, &data);
-        // data.len() != 1
-        let data = [CMD_RESET_CPU; 2];
-        i8042.write(0x0, 1, &data);
-        assert_eq!(METRICS.missed_write_count.count(), before + 3);
+    fn firmware_and_windows_initialization() {
+        let mut dev = controller();
+        command(&mut dev, 0xad);
+        command(&mut dev, 0xa7);
+        command(&mut dev, 0xaa);
+        assert_eq!(drain(&mut dev), [0x55]);
+        command(&mut dev, 0x60);
+        data(&mut dev, 0x67);
+        data(&mut dev, 0xed);
+        data(&mut dev, 0);
+        assert_eq!(drain(&mut dev), [ACK, ACK]);
+        command(&mut dev, 0xae);
+        command(&mut dev, 0xa8);
+        data(&mut dev, 0xff);
+        assert_eq!(drain(&mut dev), [ACK, 0xaa]);
+        mouse(&mut dev, 0xff);
+        assert_eq!(drain(&mut dev), [ACK, 0xaa, 0]);
+        mouse(&mut dev, 0xf2);
+        assert_eq!(drain(&mut dev), [ACK, 0]);
+        mouse(&mut dev, 0xe8);
+        mouse(&mut dev, 0);
+        mouse(&mut dev, 0xe6);
+        mouse(&mut dev, 0xe9);
+        assert_eq!(drain(&mut dev), [ACK, ACK, ACK, ACK, 0, 0, 100]);
     }
 
     #[test]
-    fn test_i8042_commands() {
-        let mut i8042 = I8042Device::new(EventFd::new(libc::EFD_NONBLOCK).unwrap()).unwrap();
-        let mut data = [1];
-
-        // Test reading/writing the control register.
-        data[0] = CMD_WRITE_CTR;
-        i8042.write(0x0, OFS_STATUS, &data);
-        assert_ne!(i8042.status & SB_I8042_CMD_DATA, 0);
-        data[0] = 0x52;
-        i8042.write(0x0, OFS_DATA, &data);
-        data[0] = CMD_READ_CTR;
-        i8042.write(0x0, OFS_STATUS, &data);
-        assert_ne!(i8042.status & SB_OUT_DATA_AVAIL, 0);
-        i8042.read(0x0, OFS_DATA, &mut data);
-        assert_eq!(data[0], 0x52);
-
-        // Test reading/writing the output port.
-        data[0] = CMD_WRITE_OUTP;
-        i8042.write(0x0, OFS_STATUS, &data);
-        assert_ne!(i8042.status & SB_I8042_CMD_DATA, 0);
-        data[0] = 0x52;
-        i8042.write(0x0, OFS_DATA, &data);
-        data[0] = CMD_READ_OUTP;
-        i8042.write(0x0, OFS_STATUS, &data);
-        assert_ne!(i8042.status & SB_OUT_DATA_AVAIL, 0);
-        i8042.read(0x0, OFS_DATA, &mut data);
-        assert_eq!(data[0], 0x52);
-
-        // Test kbd commands.
-        data[0] = 0x52;
-        i8042.write(0x0, OFS_DATA, &data);
-        assert_ne!(i8042.status & SB_OUT_DATA_AVAIL, 0);
-        i8042.read(0x0, OFS_DATA, &mut data);
-        assert_eq!(data[0], 0xFA);
-    }
-
-    #[test]
-    fn test_i8042_buffer() {
-        let mut i8042 = I8042Device::new(EventFd::new(libc::EFD_NONBLOCK).unwrap()).unwrap();
-
-        // Test push/pop.
-        i8042.push_byte(52).unwrap();
-        assert_ne!(i8042.status & SB_OUT_DATA_AVAIL, 0);
-        assert_eq!(i8042.pop_byte().unwrap(), 52);
-        assert_eq!(i8042.status & SB_OUT_DATA_AVAIL, 0);
-
-        // Test empty buffer pop.
-        assert!(i8042.pop_byte().is_none());
-
-        // Test buffer full.
-        for i in 0..BUF_SIZE {
-            i8042.push_byte(i.try_into().unwrap()).unwrap();
-            assert_eq!(i8042.buf_len(), i + 1);
-        }
+    fn keyboard_translation_and_special_keys() {
+        let mut dev = controller();
+        dev.inject_key(0x1c, false, true).unwrap();
+        dev.inject_key(0x1c, false, false).unwrap();
+        dev.inject_key(0x75, true, false).unwrap();
+        assert_eq!(drain(&mut dev), [0x1c, 0xf0, 0x1c, 0xe0, 0xf0, 0x75]);
+        command(&mut dev, 0x60);
+        data(&mut dev, 0x45);
+        dev.inject_key(0x1c, false, true).unwrap();
+        dev.inject_key(0x1c, false, false).unwrap();
+        dev.inject_key(0x75, true, false).unwrap();
+        assert_eq!(drain(&mut dev), [0x1e, 0x9e, 0xe0, 0xc8]);
+        dev.inject_pause().unwrap();
+        dev.inject_print_screen(false).unwrap();
         assert_eq!(
-            i8042.push_byte(0).unwrap_err(),
-            I8042Error::InternalBufferFull
+            drain(&mut dev),
+            [0xe1, 0x1d, 0x45, 0xe1, 0x9d, 0xc5, 0xe0, 0xb7, 0xe0, 0xaa]
         );
+        data(&mut dev, 0xf0);
+        data(&mut dev, 0);
+        assert_eq!(drain(&mut dev), [ACK, ACK, 0x41]);
     }
 
     #[test]
-    fn test_i8042_kbd() {
-        let mut i8042 = I8042Device::new(EventFd::new(libc::EFD_NONBLOCK).unwrap()).unwrap();
-
-        fn expect_key(i8042: &mut I8042Device, key: u16) {
-            let mut data = [1];
-
-            // The interrupt line should be on.
-            i8042.trigger_kbd_interrupt().unwrap();
-            assert!(i8042.kbd_interrupt_evt.read().unwrap() > 1);
-
-            // The "data available" flag should be on.
-            i8042.read(0x0, OFS_STATUS, &mut data);
-
-            let mut key_byte: u8;
-            if key & 0xFF00 != 0 {
-                // For extended keys, we should be able to read the MSB first.
-                key_byte = ((key & 0xFF00) >> 8) as u8;
-                i8042.read(0x0, OFS_DATA, &mut data);
-                assert_eq!(data[0], key_byte);
-
-                // And then do the same for the LSB.
-
-                // The interrupt line should be on.
-                i8042.trigger_kbd_interrupt().unwrap();
-                assert!(i8042.kbd_interrupt_evt.read().unwrap() > 1);
-                // The "data available" flag should be on.
-                i8042.read(0x0, OFS_STATUS, &mut data);
-            }
-            key_byte = (key & 0xFF) as u8;
-            i8042.read(0x0, OFS_DATA, &mut data);
-            assert_eq!(data[0], key_byte);
+    fn inhibited_input_is_saved_and_controller_replies_bypass_it() {
+        let mut dev = controller();
+        command(&mut dev, 0x60);
+        data(&mut dev, KBD_IRQ | AUX_IRQ);
+        mouse(&mut dev, 0xf4);
+        drain(&mut dev);
+        dev.mouse_interrupt_evt.read().unwrap();
+        command(&mut dev, 0xad);
+        command(&mut dev, 0xa7);
+        dev.inject_key(0x1c, false, true).unwrap();
+        dev.inject_key(0x1c, false, false).unwrap();
+        dev.inject_mouse(2, -3, 1).unwrap();
+        assert_eq!(read(&mut dev, 4) & 1, 0);
+        dev.kbd_interrupt_evt.read().unwrap_err();
+        dev.mouse_interrupt_evt.read().unwrap_err();
+        command(&mut dev, 0x20);
+        assert_eq!(dev.kbd_interrupt_evt.read().unwrap(), 1);
+        assert_eq!(read(&mut dev, 0), 0x33);
+        let mut restored = controller();
+        restored.restore_state(&dev.save_state()).unwrap();
+        assert_eq!(read(&mut restored, 4) & 1, 0);
+        command(&mut restored, 0xa8);
+        for byte in [0x29, 2, 0xfd] {
+            assert_eq!(restored.mouse_interrupt_evt.read().unwrap(), 1);
+            assert_eq!(read(&mut restored, 4) & 0x21, 0x21);
+            assert_eq!(read(&mut restored, 0), byte);
         }
-
-        // Test key trigger.
-        i8042.trigger_key(KEY_CTRL).unwrap();
-        expect_key(&mut i8042, KEY_CTRL);
-
-        // Test extended key trigger.
-        i8042.trigger_key(KEY_DEL).unwrap();
-        expect_key(&mut i8042, KEY_DEL);
-
-        // Test CTRL+ALT+DEL trigger.
-        i8042.trigger_ctrl_alt_del().unwrap();
-        expect_key(&mut i8042, KEY_CTRL);
-        expect_key(&mut i8042, KEY_ALT);
-        expect_key(&mut i8042, KEY_DEL);
-
-        // Almost fill up the buffer, so we can test trigger failures.
-        for _i in 0..BUF_SIZE - 1 {
-            i8042.push_byte(1).unwrap();
+        restored.kbd_interrupt_evt.read().unwrap_err();
+        command(&mut restored, 0xae);
+        for byte in [0x1c, 0xf0, 0x1c] {
+            assert_eq!(restored.kbd_interrupt_evt.read().unwrap(), 1);
+            assert_eq!(read(&mut restored, 4) & 0x21, 1);
+            assert_eq!(read(&mut restored, 0), byte);
         }
+        assert_eq!(read(&mut restored, 4) & 1, 0);
+    }
 
-        // Test extended key trigger failure.
-        assert_eq!(i8042.buf_len(), BUF_SIZE - 1);
-        assert_eq!(
-            i8042.trigger_key(KEY_DEL).unwrap_err(),
-            I8042Error::InternalBufferFull
-        );
+    #[test]
+    fn inhibited_queue_is_bounded_and_reset_discards_device_input() {
+        let mut dev = controller();
+        command(&mut dev, 0xad);
+        for _ in 0..QUEUE_CAPACITY {
+            dev.inject_key(0x1c, false, true).unwrap();
+        }
+        dev.inject_key(0x1c, false, true).unwrap_err();
+        assert_eq!(dev.state.pending_input.len(), QUEUE_CAPACITY);
+        command(&mut dev, 0x20);
+        assert_eq!(drain(&mut dev), [0x15]);
+        let mut state = dev.save_state();
+        state.pending_input.push_back(OutputByte {
+            value: 0,
+            mouse: false,
+        });
+        dev.restore_state(&state).unwrap_err();
+        data(&mut dev, 0xff);
+        assert_eq!(drain(&mut dev), [ACK, 0xaa]);
+        assert!(dev.state.pending_input.is_empty());
+    }
 
-        // Test ctrl+alt+del trigger failure.
-        i8042.pop_byte().unwrap();
-        i8042.pop_byte().unwrap();
-        assert_eq!(i8042.buf_len(), BUF_SIZE - 3);
-        assert_eq!(
-            i8042.trigger_ctrl_alt_del().unwrap_err(),
-            I8042Error::InternalBufferFull
-        );
+    #[test]
+    fn device_commands_reenable_inhibited_interfaces() {
+        let mut dev = controller();
+        command(&mut dev, 0x60);
+        data(&mut dev, KBD_IRQ | AUX_IRQ | TRANSLATE);
+        command(&mut dev, 0xad);
+        command(&mut dev, 0xa7);
+        assert_eq!(dev.save_state().control, 0x73);
+        dev.inject_key(0x5a, false, true).unwrap();
+        dev.inject_mouse(1, 2, 0).unwrap();
+        assert!(drain(&mut dev).is_empty());
 
-        // Test kbd interrupt disable.
-        let mut data = [1];
-        data[0] = CMD_WRITE_CTR;
-        i8042.write(0x0, OFS_STATUS, &data);
-        data[0] = i8042.control & !CB_KBD_INT;
-        i8042.write(0x0, OFS_DATA, &data);
-        i8042.trigger_key(KEY_CTRL).unwrap();
-        assert_eq!(
-            i8042.trigger_kbd_interrupt().unwrap_err(),
-            I8042Error::KbdInterruptDisabled
-        )
+        data(&mut dev, 0xf4);
+        assert_eq!(drain(&mut dev), [ACK, 0x1c]);
+        assert_eq!(dev.save_state().control, 0x63);
+        dev.kbd_interrupt_evt.read().unwrap();
+        dev.inject_key(0x5a, false, true).unwrap();
+        dev.inject_key(0x5a, false, false).unwrap();
+        assert_eq!(dev.kbd_interrupt_evt.read().unwrap(), 1);
+        assert_eq!(read(&mut dev, 0), 0x1c);
+        assert_eq!(dev.kbd_interrupt_evt.read().unwrap(), 1);
+        assert_eq!(read(&mut dev, 0), 0x9c);
+
+        mouse(&mut dev, 0xf4);
+        assert_eq!(drain(&mut dev), [ACK]);
+        assert_eq!(dev.save_state().control, 0x43);
+        dev.mouse_interrupt_evt.read().unwrap();
+        dev.inject_mouse(1, 2, 0).unwrap();
+        assert_eq!(dev.mouse_interrupt_evt.read().unwrap(), 1);
+        assert_eq!(drain(&mut dev), [8, 2, 4]);
+    }
+
+    #[test]
+    fn source_status_and_irq_follow_front_byte() {
+        let mut dev = controller();
+        command(&mut dev, 0x60);
+        data(&mut dev, 7);
+        dev.inject_key(0x1c, false, true).unwrap();
+        mouse(&mut dev, 0xf2);
+        assert_eq!(dev.kbd_interrupt_evt.read().unwrap(), 1);
+        dev.mouse_interrupt_evt.read().unwrap_err();
+        assert_eq!(read(&mut dev, 4) & 0x21, 1);
+        assert_eq!(read(&mut dev, 0), 0x1c);
+        assert_eq!(dev.mouse_interrupt_evt.read().unwrap(), 1);
+        assert_eq!(read(&mut dev, 4) & 0x21, 0x21);
+        assert_eq!(read(&mut dev, 0), ACK);
+        assert_eq!(dev.mouse_interrupt_evt.read().unwrap(), 1);
+        assert_eq!(read(&mut dev, 0), 0);
+        assert_eq!(read(&mut dev, 4) & 0x21, 0);
+    }
+
+    #[test]
+    fn commands_do_not_discard_pending_keys() {
+        let mut dev = controller();
+        dev.inject_key(0x1c, false, true).unwrap();
+        command(&mut dev, 0x20);
+        data(&mut dev, 0xf2);
+        assert_eq!(drain(&mut dev), [0x1c, 5, ACK, 0xab, 0x83]);
+        data(&mut dev, 0xf5);
+        dev.inject_key(0x1c, false, true).unwrap();
+        assert_eq!(drain(&mut dev), [ACK]);
+        data(&mut dev, 0xf4);
+        dev.inject_key(0x1c, false, true).unwrap();
+        assert_eq!(drain(&mut dev), [ACK, 0x1c]);
+    }
+
+    #[test]
+    fn mouse_stream_remote_scaling_and_status() {
+        let mut dev = controller();
+        mouse(&mut dev, 0xf4);
+        drain(&mut dev);
+        dev.inject_mouse(-4, 5, 1).unwrap();
+        assert_eq!(drain(&mut dev), [0x19, 0xfc, 5]);
+        mouse(&mut dev, 0xf0);
+        mouse(&mut dev, 0xe7);
+        drain(&mut dev);
+        dev.inject_mouse(4, -5, 5).unwrap();
+        assert!(drain(&mut dev).is_empty());
+        mouse(&mut dev, 0xeb);
+        assert_eq!(drain(&mut dev), [ACK, 0x2d, 6, 0xf7]);
+        mouse(&mut dev, 0xe9);
+        assert_eq!(drain(&mut dev), [ACK, 0x76, 2, 100]);
+        mouse(&mut dev, 0xea);
+        drain(&mut dev);
+        dev.inject_mouse(i16::MIN, i16::MAX, 0).unwrap();
+        assert_eq!(drain(&mut dev), [0xd8, 1, 255]);
+    }
+
+    #[test]
+    fn snapshot_mid_command_and_mixed_output() {
+        let mut original = controller();
+        mouse(&mut original, 0xf3);
+        data(&mut original, 0xf0);
+        command(&mut original, 0xd4);
+        let state = original.save_state();
+        let mut restored = controller();
+        restored.restore_state(&state).unwrap();
+        data(&mut restored, 200);
+        data(&mut restored, 1);
+        assert_eq!(drain(&mut restored), [ACK, ACK, ACK, ACK]);
+        restored.inject_key(0x1c, false, true).unwrap();
+        assert_eq!(drain(&mut restored), [0x1e]);
+        assert_eq!(restored.state.mouse.sample_rate, 200);
+        let mut invalid = state;
+        invalid.keyboard.scan_set = 3;
+        assert!(matches!(
+            restored.restore_state(&invalid),
+            Err(I8042Error::InvalidState)
+        ));
+    }
+
+    #[test]
+    fn bounded_queue_rejects_whole_key_and_mouse_packet() {
+        let mut dev = controller();
+        dev.enqueue(false, &[0; QUEUE_CAPACITY - 1]).unwrap();
+        assert!(matches!(
+            dev.inject_key(0x75, true, false),
+            Err(I8042Error::InternalBufferFull)
+        ));
+        assert_eq!(dev.state.queue.len(), QUEUE_CAPACITY - 1);
+        dev.state.mouse.enabled = true;
+        assert!(matches!(
+            dev.inject_mouse(10, 20, 1),
+            Err(I8042Error::InternalBufferFull)
+        ));
+        assert_eq!(dev.state.mouse.x, 0);
+        assert_eq!(dev.state.mouse.buttons, 0);
+    }
+
+    #[test]
+    fn reset_paths_and_access_widths() {
+        let mut dev = controller();
+        let mut bytes = [1, 2];
+        dev.read(0, 0, &mut bytes);
+        assert_eq!(bytes, [1, 2]);
+        dev.write(0, 4, &[0xfe, 0]);
+        dev.reset_evt.read().unwrap_err();
+        command(&mut dev, 0xfe);
+        assert_eq!(dev.reset_evt.read().unwrap(), 1);
+        command(&mut dev, 0xd1);
+        data(&mut dev, 2);
+        assert_eq!(dev.reset_evt.read().unwrap(), 1);
     }
 }

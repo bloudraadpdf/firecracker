@@ -114,6 +114,28 @@ pub enum ConfigurationError {
     Hyperv(#[from] hyperv::HypervError),
 }
 
+/// Exclude the VGA aperture from KVM RAM so accesses reach the display device.
+pub fn reserve_vga_memory(regions: Vec<(GuestAddress, usize)>) -> Vec<(GuestAddress, usize)> {
+    let mut result = Vec::with_capacity(regions.len() + 1);
+    for (start, length) in regions {
+        let end = start.0 + length as u64;
+        if end <= 0xa0000 || start.0 >= 0xc0000 {
+            result.push((start, length));
+            continue;
+        }
+        if start.0 < 0xa0000 {
+            result.push((start, usize::try_from(0xa0000 - start.0).unwrap()));
+        }
+        if end > 0xc0000 {
+            result.push((
+                GuestAddress(0xc0000),
+                usize::try_from(end - 0xc0000).unwrap(),
+            ));
+        }
+    }
+    result
+}
+
 /// Returns a Vec of the valid memory addresses.
 /// These should be used to configure the GuestMemoryMmap structure for the platform.
 /// For x86_64 all addresses are valid from the start of the kernel except an 1GB
@@ -310,13 +332,40 @@ pub fn configure_system_for_boot(
     Ok(())
 }
 
+fn boot_ram_regions(guest_mem: &GuestMemoryMmap) -> Vec<(u64, u64)> {
+    let console = !guest_mem.address_in_range(GuestAddress(0xa0000));
+    let mut ranges = Vec::new();
+    for region in guest_mem
+        .iter()
+        .filter(|region| region.region_type == GuestRegionType::Dram)
+    {
+        let start = max(layout::HIMEM_START, region.start_addr().0);
+        let end = region.last_addr().0 + 1;
+        if start >= end {
+            continue;
+        }
+        let reserved = layout::CONSOLE_SYSTEM_MEM_START;
+        let reserved_end = reserved + layout::CONSOLE_SYSTEM_MEM_SIZE;
+        if console && start < reserved_end && end > reserved {
+            if start < reserved {
+                ranges.push((start, reserved - start));
+            }
+            if end > reserved_end {
+                ranges.push((reserved_end, end - reserved_end));
+            }
+        } else {
+            ranges.push((start, end - start));
+        }
+    }
+    ranges
+}
+
 fn configure_pvh(
     guest_mem: &GuestMemoryMmap,
     cmdline_addr: GuestAddress,
     initrd: &Option<InitrdConfig>,
 ) -> Result<(), ConfigurationError> {
     const XEN_HVM_START_MAGIC_VALUE: u32 = 0x336e_c578;
-    let himem_start = GuestAddress(layout::HIMEM_START);
 
     // Vector to hold modules (currently either empty or holding initrd).
     let mut modules: Vec<hvm_modlist_entry> = Vec::new();
@@ -354,15 +403,18 @@ fn configure_pvh(
         ..Default::default()
     });
 
-    for region in guest_mem
-        .iter()
-        .filter(|region| region.region_type == GuestRegionType::Dram)
-    {
-        // the first 1MB is reserved for the kernel
-        let addr = max(himem_start, region.start_addr());
+    if !guest_mem.address_in_range(GuestAddress(0xa0000)) {
         memmap.push(hvm_memmap_table_entry {
-            addr: addr.raw_value(),
-            size: region.last_addr().unchecked_offset_from(addr) + 1,
+            addr: layout::CONSOLE_SYSTEM_MEM_START,
+            size: layout::CONSOLE_SYSTEM_MEM_SIZE,
+            type_: E820_RESERVED,
+            ..Default::default()
+        });
+    }
+    for (addr, size) in boot_ram_regions(guest_mem) {
+        memmap.push(hvm_memmap_table_entry {
+            addr,
+            size,
             type_: MEMMAP_TYPE_RAM,
             ..Default::default()
         });
@@ -415,8 +467,6 @@ fn configure_64bit_boot(
     const KERNEL_LOADER_OTHER: u8 = 0xff;
     const KERNEL_MIN_ALIGNMENT_BYTES: u32 = 0x0100_0000; // Must be non-zero.
 
-    let himem_start = GuestAddress(layout::HIMEM_START);
-
     // A bzImage carries its own setup header; for ELF there is none, so
     // start from a zeroed header with the minimum required alignment.
     let mut hdr = setup_header.unwrap_or_else(|| setup_header {
@@ -457,18 +507,16 @@ fn configure_64bit_boot(
         E820_RESERVED,
     )?;
 
-    for region in guest_mem
-        .iter()
-        .filter(|region| region.region_type == GuestRegionType::Dram)
-    {
-        // the first 1MB is reserved for the kernel
-        let addr = max(himem_start, region.start_addr());
+    if !guest_mem.address_in_range(GuestAddress(0xa0000)) {
         add_e820_entry(
             &mut params,
-            addr.raw_value(),
-            region.last_addr().unchecked_offset_from(addr) + 1,
-            E820_RAM,
+            layout::CONSOLE_SYSTEM_MEM_START,
+            layout::CONSOLE_SYSTEM_MEM_SIZE,
+            E820_RESERVED,
         )?;
+    }
+    for (addr, size) in boot_ram_regions(guest_mem) {
+        add_e820_entry(&mut params, addr, size, E820_RAM)?;
     }
 
     LinuxBootConfigurator::write_bootparams(
@@ -651,6 +699,63 @@ mod tests {
     use crate::test_utils::{arch_mem, single_region_mem};
     use crate::utils::mib_to_bytes;
     use crate::vstate::resources::ResourceAllocator;
+
+    #[test]
+    fn console_boot_maps_reserve_platform_tables() {
+        use vm_memory::Bytes;
+
+        let size = mib_to_bytes(64);
+        let mem =
+            crate::test_utils::multi_region_mem(&reserve_vga_memory(arch_memory_regions(size)));
+        let start = layout::CONSOLE_SYSTEM_MEM_START;
+        let end = start + layout::CONSOLE_SYSTEM_MEM_SIZE;
+        let regions = boot_ram_regions(&mem);
+        assert_eq!(
+            regions,
+            [
+                (layout::HIMEM_START, start - layout::HIMEM_START),
+                (end, size as u64 - end)
+            ]
+        );
+        configure_pvh(&mem, GuestAddress(CMDLINE_START), &None).unwrap();
+        let info: hvm_start_info = mem.read_obj(GuestAddress(layout::PVH_INFO_START)).unwrap();
+        let entries: Vec<hvm_memmap_table_entry> = (0..info.memmap_entries)
+            .map(|i| {
+                mem.read_obj(GuestAddress(
+                    info.memmap_paddr
+                        + u64::from(i) * std::mem::size_of::<hvm_memmap_table_entry>() as u64,
+                ))
+                .unwrap()
+            })
+            .collect();
+        assert!(entries.iter().any(|entry| entry.addr == start
+            && entry.size == end - start
+            && entry.type_ == E820_RESERVED));
+        assert!(
+            entries
+                .iter()
+                .filter(|entry| entry.type_ == E820_RAM)
+                .all(|entry| entry.addr >= end || entry.addr + entry.size <= start)
+        );
+
+        configure_64bit_boot(&mem, GuestAddress(CMDLINE_START), 0, &None, None).unwrap();
+        let params: boot_params = mem.read_obj(GuestAddress(layout::ZERO_PAGE_START)).unwrap();
+        let entries = &params.e820_table[..usize::from(params.e820_entries)];
+        assert!(entries.iter().any(|entry| entry.addr == start
+            && entry.size == end - start
+            && entry.r#type == E820_RESERVED));
+        assert!(
+            entries
+                .iter()
+                .filter(|entry| entry.r#type == E820_RAM)
+                .all(|entry| entry.addr >= end || entry.addr + entry.size <= start)
+        );
+
+        assert_eq!(
+            boot_ram_regions(&arch_mem(size)),
+            [(layout::HIMEM_START, size as u64 - layout::HIMEM_START)]
+        );
+    }
 
     #[test]
     fn pvh_passes_acpi_root_to_firmware() {

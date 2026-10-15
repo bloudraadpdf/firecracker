@@ -129,7 +129,7 @@ impl PortIODeviceManager {
         scope: crate::acpi::DeviceScope,
     ) -> Result<(), AmlError> {
         aml::Device::new(
-            "_SB_.PRES".try_into()?,
+            scope.device_path("PRES")?,
             vec![
                 &aml::Name::new("_HID".try_into()?, &aml::EisaName::new("PNP0C02")?)?,
                 &aml::Name::new("_UID".try_into()?, &"POWER")?,
@@ -225,6 +225,26 @@ impl PortIODeviceManager {
 mod tests {
     use super::*;
     use crate::vstate::vm::tests::setup_vm_with_memory;
+
+    #[test]
+    fn all_legacy_io_consumers_follow_their_parent_bus() {
+        for scope in [
+            crate::acpi::DeviceScope::SystemBus,
+            crate::acpi::DeviceScope::PciRoot,
+        ] {
+            let mut bytes = Vec::new();
+            PortIODeviceManager::append_aml_bytes(&mut bytes, scope).unwrap();
+            for name in ["PRES", "RTC0", "COM1", "PS2_"] {
+                let mut path = Vec::new();
+                scope
+                    .device_path(name)
+                    .unwrap()
+                    .append_aml_bytes(&mut path)
+                    .unwrap();
+                assert!(bytes.windows(path.len()).any(|entry| entry == path));
+            }
+        }
+    }
 
     #[test]
     fn power_reservation_has_unique_id() {

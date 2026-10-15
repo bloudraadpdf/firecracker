@@ -13,6 +13,9 @@ use crate::vmm_config::pmem::PmemConfig;
 pub mod balloon;
 /// Wrapper for configuring the microVM boot source.
 pub mod boot_source;
+/// Optional AMD64 graphical console and installation media.
+#[cfg(target_arch = "x86_64")]
+pub mod console;
 /// Wrapper for configuring the block devices.
 pub mod drive;
 /// Wrapper for configuring the entropy device attached to the microVM.
