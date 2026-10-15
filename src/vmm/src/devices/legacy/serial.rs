@@ -500,6 +500,21 @@ mod tests {
     }
 
     #[test]
+    fn test_transmit_interrupt_on_enable() {
+        let mut serial = SerialDevice::new(None, test_serial_out_sink(), None).unwrap();
+        for _ in 0..2 {
+            serial.write(0, 1, &[0]);
+            serial.write(0, 1, &[2]);
+            assert_eq!(serial.serial.interrupt_evt().read().unwrap(), 1);
+            let mut identification = [0];
+            serial.read(0, 2, &mut identification);
+            assert_eq!(identification[0] & 0x0f, 2);
+            serial.read(0, 2, &mut identification);
+            assert_eq!(identification[0] & 0x0f, 1);
+        }
+    }
+
+    #[test]
     fn test_restore_from_state() {
         let mut serial = SerialDevice::new(None, test_serial_out_sink(), None).unwrap();
         serial.serial.raw_input(b"abc").unwrap();
