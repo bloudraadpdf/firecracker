@@ -1450,6 +1450,7 @@ mod tests {
     fn test_update_machine_config() {
         let mut vm_resources = default_vm_resources();
         let mut aux_vm_config = MachineConfigUpdate {
+            pci_transport: Some(crate::pci::PciTransportMode::default()),
             vcpu_count: Some(32),
             mem_size_mib: Some(512),
             smt: Some(false),

@@ -107,7 +107,14 @@ impl Persist<'_> for Queue {
             num_added: state.num_added,
         };
         if constructor_args.is_activated {
-            queue.initialize(&constructor_args.mem)?;
+            if queue.size == 0 || queue.size > queue.max_size || !queue.size.is_power_of_two() {
+                return Err(QueueError::InvalidSize(queue.size));
+            }
+            if queue.ready {
+                queue.initialize(&constructor_args.mem)?;
+            } else if queue.next_avail.0 != 0 || queue.next_used.0 != 0 || queue.num_added.0 != 0 {
+                return Err(QueueError::NotReady);
+            }
         }
         Ok(queue)
     }
@@ -340,24 +347,22 @@ mod tests {
             .build_queues_checked(&mem, VirtioDeviceType::Net, state.queues.len(), max_size)
             .unwrap_err();
 
-        // Invalid: size > max.
-        let bad_q = QueueState {
-            size: max_size + 1,
-            ..Default::default()
-        };
-        state.queues = vec![bad_q];
         state.activated = true;
-        state
-            .build_queues_checked(&mem, VirtioDeviceType::Net, state.queues.len(), max_size)
-            .unwrap_err();
-
-        // activated && !q.is_valid()
-        let bad_q = QueueState::default();
-        state.queues = vec![bad_q];
-        state.activated = true;
-        state
-            .build_queues_checked(&mem, VirtioDeviceType::Net, state.queues.len(), max_size)
-            .unwrap_err();
+        for invalid in [
+            QueueState {
+                size: max_size + 1,
+                ..Default::default()
+            },
+            QueueState {
+                next_used: Wrapping(1),
+                ..Default::default()
+            },
+        ] {
+            state.queues = vec![invalid];
+            state
+                .build_queues_checked(&mem, VirtioDeviceType::Net, state.queues.len(), max_size)
+                .unwrap_err();
+        }
     }
 
     #[test]
