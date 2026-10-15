@@ -89,6 +89,7 @@ pub fn vcpu_inject_bp(
     vcpu_fd: &VcpuFd,
     addrs: &[GuestAddress],
     step: bool,
+    _debug: kvm_bindings::kvm_debug_exit_arch,
 ) -> Result<(), GdbTargetError> {
     let mut control = KVM_GUESTDBG_ENABLE
         | KVM_GUESTDBG_USE_HW_BP

@@ -6,7 +6,7 @@ use std::os::unix::fs::MetadataExt;
 
 use vm_memory::{GuestAddress, GuestMemoryBackend, ReadVolatile, VolatileMemoryError};
 
-use crate::arch::initrd_load_addr;
+use crate::arch::{BootProtocol, initrd_load_addr};
 use crate::utils::u64_to_usize;
 use crate::vmm_config::boot_source::BootConfig;
 use crate::vstate::memory::GuestMemoryMmap;
@@ -14,6 +14,9 @@ use crate::vstate::memory::GuestMemoryMmap;
 /// Errors associated with initrd loading.
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum InitrdError {
+    /// Firmware boot does not support an initrd.
+    #[cfg(target_arch = "aarch64")]
+    FirmwareBoot,
     /// Failed to compute the initrd address.
     Address,
     /// Cannot load initrd due to an invalid memory configuration.
@@ -40,7 +43,12 @@ impl InitrdConfig {
     pub fn from_config(
         boot_cfg: &BootConfig,
         vm_memory: &GuestMemoryMmap,
+        _protocol: BootProtocol,
     ) -> Result<Option<Self>, InitrdError> {
+        #[cfg(target_arch = "aarch64")]
+        if _protocol == BootProtocol::FirmwareBoot && boot_cfg.initrd_file.is_some() {
+            return Err(InitrdError::FirmwareBoot);
+        }
         Ok(match &boot_cfg.initrd_file {
             Some(f) => {
                 let f = f.try_clone().map_err(InitrdError::CloneFd)?;
@@ -84,6 +92,42 @@ mod tests {
         let mut fake_bin = Vec::new();
         fake_bin.resize(1_000_000, 0xAA);
         fake_bin
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn test_firmware_rejects_initrd_before_writing_memory() {
+        use vm_memory::Bytes;
+
+        let memory = crate::test_utils::arch_mem(0x80_0000);
+        let mut file = TempFile::new().unwrap().into_file();
+        file.write_all(&[0xaa; 4096]).unwrap();
+        file.rewind().unwrap();
+        let mut config = BootConfig {
+            cmdline: None,
+            kernel_file: file.try_clone().unwrap(),
+            initrd_file: Some(file),
+        };
+        let address = GuestAddress(initrd_load_addr(&memory, 4096).unwrap());
+        memory.write_slice(&[0x55; 4096], address).unwrap();
+        assert!(matches!(
+            InitrdConfig::from_config(&config, &memory, BootProtocol::FirmwareBoot),
+            Err(InitrdError::FirmwareBoot)
+        ));
+        let mut bytes = [0; 4096];
+        memory.read_slice(&mut bytes, address).unwrap();
+        assert_eq!(bytes, [0x55; 4096]);
+        assert!(
+            InitrdConfig::from_config(&config, &memory, BootProtocol::LinuxBoot)
+                .unwrap()
+                .is_some()
+        );
+        config.initrd_file = None;
+        assert!(
+            InitrdConfig::from_config(&config, &memory, BootProtocol::FirmwareBoot)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

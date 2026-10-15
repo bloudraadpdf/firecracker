@@ -98,8 +98,8 @@ pub enum KvmVcpuError {
     RestoreState(VcpuArchError),
     /// Failed to save the state of the vcpu: {0}
     SaveState(VcpuArchError),
-    /// Found unsupported KVM_ARM_VCPU_PMU_V3 bit set in vcpu features.
-    UnsupportedPmuV3,
+    /// Failed to initialise the ARM performance monitor: {0}
+    PmuInit(kvm_ioctls::Error),
 }
 
 /// Error type for [`KvmVcpu::configure`].
@@ -301,18 +301,35 @@ impl KvmVcpu {
 
     /// Initializes internal vcpufd.
     fn init_vcpu(&self) -> Result<(), KvmVcpuError> {
-        // Setting KVM_ARM_VCPU_PMU_V3 without initialising the PMU causes KVM
-        // to crash on KVM_RUN with EINVAL.
-        //
-        // To properly initialise the PMU, the KVM_SET_DEVICE_ATTR ioctl must
-        // be made with the flag KVM_ARM_VCPU_PMU_V3_INIT set. Firecracker
-        // currently does not handle this, so we should return an error instead.
-        if (self.kvi.features[0] & (1 << KVM_ARM_VCPU_PMU_V3)) != 0 {
-            return Err(KvmVcpuError::UnsupportedPmuV3);
+        self.fd.vcpu_init(&self.kvi).map_err(KvmVcpuError::Init)?;
+        if self.has_pmu() {
+            let irq = super::layout::PMU_IRQ;
+            for attribute in [
+                kvm_device_attr {
+                    group: KVM_ARM_VCPU_PMU_V3_CTRL,
+                    attr: u64::from(KVM_ARM_VCPU_PMU_V3_IRQ),
+                    addr: &irq as *const u32 as u64,
+                    flags: 0,
+                },
+                kvm_device_attr {
+                    group: KVM_ARM_VCPU_PMU_V3_CTRL,
+                    attr: u64::from(KVM_ARM_VCPU_PMU_V3_INIT),
+                    addr: 0,
+                    flags: 0,
+                },
+            ] {
+                self.fd
+                    .set_device_attr(&attribute)
+                    .map_err(KvmVcpuError::PmuInit)?;
+            }
         }
 
-        self.fd.vcpu_init(&self.kvi).map_err(KvmVcpuError::Init)?;
         Ok(())
+    }
+
+    /// Whether this vCPU exposes the architectural performance monitor.
+    pub fn has_pmu(&self) -> bool {
+        self.kvi.features[0] & (1 << KVM_ARM_VCPU_PMU_V3) != 0
     }
 
     /// Checks for SVE feature and calls `vcpu_finalize` if
@@ -536,7 +553,7 @@ impl Debug for VcpuState {
                     .iter()
                     .rev()
                     .fold(String::new(), |mut output, b| {
-                        let _ = write!(output, "{b:x}");
+                        let _ = write!(output, "{b:02x}");
                         output
                     })
             )?;
@@ -695,23 +712,47 @@ mod tests {
     }
 
     #[test]
-    fn test_pmu_v3_feature_invalid() {
+    fn test_pmu_v3_initialisation_and_restore() {
         let mut vm = setup_vm_with_memory(0x1000);
         let mut vcpu = KvmVcpu::new(0, &vm).unwrap();
         vm.setup_irqchip(1).unwrap();
 
-        // Firecracker does not support KVM_ARM_VCPU_PMU_V3. Check that
-        // attempting to enable this feature returns an error.
-        let vcpu_features = vec![VcpuFeatures {
-            index: 0,
-            bitmap: RegisterValueFilter {
-                filter: 1 << KVM_ARM_VCPU_PMU_V3,
-                value: 1 << KVM_ARM_VCPU_PMU_V3,
-            },
-        }];
-
-        let res = vcpu.init(&vcpu_features);
-        assert!(matches!(res.unwrap_err(), KvmVcpuError::UnsupportedPmuV3));
+        let template: crate::cpu_config::templates::CustomCpuTemplate =
+            serde_json::from_str(r#"{"vcpu_features":[{"index":0,"bitmap":"0b1xxx"}]}"#).unwrap();
+        let res = vcpu.init(&template.vcpu_features);
+        if vm.fd().check_extension_raw(u64::from(KVM_CAP_ARM_PMU_V3)) == 0 {
+            assert!(matches!(res.unwrap_err(), KvmVcpuError::Init(_)));
+            return;
+        }
+        res.unwrap();
+        assert!(vcpu.has_pmu());
+        vcpu.fd
+            .set_one_reg(PMSELR_EL0, &1_u64.to_le_bytes())
+            .unwrap();
+        let state = vcpu.save_state().unwrap();
+        let mut restored_vm = setup_vm_with_memory(0x1000);
+        let mut restored = KvmVcpu::new(0, &restored_vm).unwrap();
+        restored_vm.setup_irqchip(1).unwrap();
+        restored.restore_state(&state).unwrap();
+        assert!(restored.has_pmu());
+        let restored_state = restored.save_state().unwrap();
+        // KVM's timer ABI exposes running counters at these two encodings.
+        let differences: Vec<_> = state
+            .regs
+            .iter()
+            .zip(restored_state.regs.iter())
+            .filter(|(before, _)| !matches!(before.id, SYS_CNTPCT_EL0 | SYS_CNTV_CVAL_EL0))
+            .filter(|(before, after)| before.as_slice() != after.as_slice())
+            .map(|(before, after)| {
+                format!(
+                    "{:#x}: {} -> {}",
+                    before.id,
+                    before.value_str(),
+                    after.value_str()
+                )
+            })
+            .collect();
+        assert!(differences.is_empty(), "{}", differences.join("\n"));
     }
 
     #[test]

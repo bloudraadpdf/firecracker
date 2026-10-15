@@ -210,6 +210,10 @@ impl<'a> Persist<'a> for VmClock {
 
 impl Aml for VmClock {
     fn append_aml_bytes(&self, v: &mut Vec<u8>) -> Result<(), aml::AmlError> {
+        #[cfg(target_arch = "x86_64")]
+        let interrupt = self.gsi;
+        #[cfg(target_arch = "aarch64")]
+        let interrupt = self.gsi + crate::arch::SPI_START;
         aml::Device::new(
             "_SB_.VCLK".try_into()?,
             vec![
@@ -231,7 +235,7 @@ impl Aml for VmClock {
                             self.guest_address.0,
                             self.guest_address.0 + VMCLOCK_SIZE as u64 - 1,
                         )?,
-                        &aml::Interrupt::new(true, true, false, false, self.gsi),
+                        &aml::Interrupt::new(true, true, false, false, interrupt),
                     ]),
                 )?,
             ],

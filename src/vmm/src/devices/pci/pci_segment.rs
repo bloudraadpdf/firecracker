@@ -11,9 +11,7 @@
 
 use std::sync::{Arc, Mutex};
 
-#[cfg(target_arch = "x86_64")]
 use acpi_tables::{Aml, aml};
-#[cfg(target_arch = "x86_64")]
 use uuid::Uuid;
 
 use crate::arch::{PCI_MMCONFIG_START, PCI_MMIO_CONFIG_SIZE_PER_SEGMENT};
@@ -166,10 +164,8 @@ impl PciSegment {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
 struct PciDsmMethod {}
 
-#[cfg(target_arch = "x86_64")]
 impl Aml for PciDsmMethod {
     fn append_aml_bytes(&self, v: &mut Vec<u8>) -> Result<(), aml::AmlError> {
         // Refer to ACPI spec v6.3 Ch 9.1.1 and PCI Firmware spec v3.3 Ch 4.6.1
@@ -233,7 +229,6 @@ impl Aml for PciDsmMethod {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
 impl Aml for PciSegment {
     fn append_aml_bytes(&self, v: &mut Vec<u8>) -> Result<(), aml::AmlError> {
         let mut pci_dsdt_inner_data: Vec<&dyn Aml> = Vec::new();
@@ -261,7 +256,7 @@ impl Aml for PciSegment {
         pci_dsdt_inner_data.push(&pci_dsm);
 
         #[allow(clippy::if_same_then_else)]
-        let crs = if self.id == 0 {
+        let crs = if cfg!(target_arch = "x86_64") && self.id == 0 {
             aml::Name::new(
                 "_CRS".try_into()?,
                 &aml::ResourceTemplate::new(vec![
@@ -336,7 +331,9 @@ impl Aml for PciSegment {
             .map(|item| item as &dyn Aml)
             .collect();
         let prt = aml::Name::new("_PRT".try_into()?, &aml::Package::new(prt_package_list))?;
-        pci_dsdt_inner_data.push(&prt);
+        if cfg!(target_arch = "x86_64") {
+            pci_dsdt_inner_data.push(&prt);
+        }
 
         aml::Device::new(
             format!("_SB_.PC{:02X}", self.id).as_str().try_into()?,

@@ -57,9 +57,6 @@ macro_rules! extract_bits_64 {
     };
 }
 
-/// Mask to clear the last 3 bits from the page table entry
-const PTE_ADDRESS_MASK: u64 = !0b111u64;
-
 /// Read a u64 value from a guest memory address
 fn read_address(vmm: &Vmm, address: u64) -> Result<u64, GdbTargetError> {
     let mut buf = [0; 8];
@@ -71,9 +68,6 @@ fn read_address(vmm: &Vmm, address: u64) -> Result<u64, GdbTargetError> {
 
     Ok(u64::from_le_bytes(buf))
 }
-
-/// The grainsize used with 4KB paging
-const GRAIN_SIZE: usize = 9;
 
 /// Translates a virtual address according to the Vcpu's current address translation mode.
 /// Returns the GPA (guest physical address)
@@ -111,48 +105,45 @@ pub fn translate_gva(vcpu_fd: &VcpuFd, gva: u64, vmm: &Vmm) -> Result<u64, GdbTa
         _ => return Err(GdbTargetError::GvaTranslateError),
     };
 
-    // A mask of the physical address size for a virtual address
-    let pa_address_mask: u64 = !0u64 >> (64 - pa_size);
-    // A mask used to take the bottom 12 bits of a value this is as we have a grainsize of 9
-    // asserted with our 4kb page, plus the offset of 3
-    let lower_mask: u64 = 0xFFF;
-    // A mask for a physical address mask with the lower 12 bits cleared
-    let desc_mask: u64 = pa_address_mask & !lower_mask;
+    translate_4k(
+        gva,
+        get_sys_reg(TTBR1_EL1, vcpu_fd)?,
+        extract_bits_64!(tcr_el1, 16, 6),
+        pa_size,
+        |address| read_address(vmm, address),
+    )
+}
 
-    let page_indices = [
-        (gva >> (GRAIN_SIZE * 4)) & lower_mask,
-        (gva >> (GRAIN_SIZE * 3)) & lower_mask,
-        (gva >> (GRAIN_SIZE * 2)) & lower_mask,
-        (gva >> GRAIN_SIZE) & lower_mask,
-    ];
-
-    // Transition table base register used for initial table lookup.
-    // Take the bottom 48 bits from the register value.
-    let mut address: u64 = get_sys_reg(TTBR1_EL1, vcpu_fd)? & pa_address_mask;
-    let mut level = 0;
-
-    while level < 4 {
-        // Clear the bottom 3 bits from this address
-        let pte = read_address(vmm, (address + page_indices[level]) & PTE_ADDRESS_MASK)?;
-        address = pte & desc_mask;
-
-        // If this is a valid table entry and we aren't at the end of the page tables
-        // then loop again and check next level
-        if (pte & 2 != 0) && (level < 3) {
-            level += 1;
-            continue;
-        }
-        break;
+fn translate_4k(
+    gva: u64,
+    ttbr: u64,
+    t1sz: u64,
+    pa_size: u32,
+    read: impl Fn(u64) -> Result<u64, GdbTargetError>,
+) -> Result<u64, GdbTargetError> {
+    if !(16..=39).contains(&t1sz) {
+        return Err(GdbTargetError::GvaTranslateError);
     }
-
-    // Generate a mask to split between the page table entry and the GVA. The split point is
-    // dependent on which level we terminate at. This is calculated by taking the level we
-    // hit multiplied by the grainsize then adding the 3 offset
-    let page_size = 1u64 << ((GRAIN_SIZE * (4 - level)) + 3);
-    // Clear bottom bits of page size
-    address &= !(page_size - 1);
-    address |= gva & (page_size - 1);
-    Ok(address)
+    let va_bits = 64 - t1sz;
+    let start_level = 4 - (va_bits - 12).div_ceil(9);
+    let root_bits = va_bits - (12 + 9 * (3 - start_level));
+    let pa_mask = (1_u64 << pa_size) - 1;
+    let mut table = ttbr & pa_mask & !((1 << (root_bits + 3)) - 1);
+    for level in start_level..=3 {
+        let shift = 12 + 9 * (3 - level);
+        let index_bits = if level == start_level { root_bits } else { 9 };
+        let index = (gva >> shift) & ((1 << index_bits) - 1);
+        let descriptor = read(table + index * 8)?;
+        match (descriptor & 3, level) {
+            (3, 0..=2) => table = descriptor & pa_mask & !0xfff,
+            (1, 1..=2) | (3, 3) => {
+                let offset_mask = (1 << shift) - 1;
+                return Ok((descriptor & pa_mask & !offset_mask) | (gva & offset_mask));
+            }
+            _ => return Err(GdbTargetError::GvaTranslateError),
+        }
+    }
+    Err(GdbTargetError::GvaTranslateError)
 }
 
 /// Configures the kvm guest debug regs to register the hardware breakpoints
@@ -183,34 +174,8 @@ fn set_kvm_debug(
     Ok(())
 }
 
-/// Bits in a Vcpu pstate for IRQ
-const IRQ_ENABLE_FLAGS: u64 = 0x80 | 0x40;
 /// Register id for pstate
 const PSTATE_ID: u64 = arm64_core_reg_id!(KVM_REG_SIZE_U64, offset_of!(user_pt_regs, pstate));
-
-/// Disable IRQ interrupts to avoid getting stuck in a loop while single stepping
-///
-/// When GDB hits a single breakpoint and resumes it will follow the steps:
-///  - Clear SW breakpoint we've hit
-///  - Single step
-///  - Re-insert the SW breakpoint
-///  - Resume
-///
-/// However, with IRQ enabled the single step takes us into the IRQ handler so when we resume we
-/// immediately hit the SW breapoint we just re-inserted getting stuck in a loop.
-fn toggle_interrupts(vcpu_fd: &VcpuFd, enable: bool) -> Result<(), GdbTargetError> {
-    let mut pstate = get_sys_reg(PSTATE_ID, vcpu_fd)?;
-
-    if enable {
-        pstate |= IRQ_ENABLE_FLAGS;
-    } else {
-        pstate &= !IRQ_ENABLE_FLAGS;
-    }
-
-    vcpu_fd.set_one_reg(PSTATE_ID, &pstate.to_le_bytes())?;
-
-    Ok(())
-}
 
 /// Configures the Vcpu for debugging and sets the hardware breakpoints on the Vcpu
 pub fn vcpu_set_debug(
@@ -223,16 +188,57 @@ pub fn vcpu_set_debug(
         control |= KVM_GUESTDBG_SINGLESTEP;
     }
 
-    toggle_interrupts(vcpu_fd, step)?;
     set_kvm_debug(control, vcpu_fd, addrs)
 }
 
-/// KVM does not support injecting breakpoints on aarch64 so this is a no-op
+/// Deliver a guest BRK exception to its EL1 vector.
 pub fn vcpu_inject_bp(
-    _vcpu_fd: &VcpuFd,
+    vcpu_fd: &VcpuFd,
     _addrs: &[GuestAddress],
     _step: bool,
+    debug: kvm_bindings::kvm_debug_exit_arch,
 ) -> Result<(), GdbTargetError> {
+    use kvm_bindings::{
+        PSR_C_BIT, PSR_DIT_BIT, PSR_N_BIT, PSR_PAN_BIT, PSR_SSBS_BIT, PSR_V_BIT, PSR_Z_BIT,
+    };
+
+    let pstate = get_sys_reg(PSTATE_ID, vcpu_fd)?;
+    let vector_offset = match pstate & 0x1f {
+        0 => 0x400,
+        4 => 0,
+        5 => 0x200,
+        _ => return Err(GdbTargetError::UnsupportedGuestDebug(debug.hsr)),
+    };
+    if debug.hsr >> 26 != 0x3c {
+        return Err(GdbTargetError::UnsupportedGuestDebug(debug.hsr));
+    }
+    let pc = get_instruction_pointer(vcpu_fd)?;
+    let vector = get_sys_reg(0x603000000013c600, vcpu_fd)? + vector_offset;
+    let sctlr = get_sys_reg(0x603000000013c080, vcpu_fd)?;
+    let mut handler_state = pstate
+        & u64::from(PSR_N_BIT | PSR_Z_BIT | PSR_C_BIT | PSR_V_BIT | PSR_DIT_BIT | PSR_PAN_BIT);
+    handler_state |= 0x3c5;
+    if sctlr & (1 << 23) == 0 {
+        handler_state |= u64::from(PSR_PAN_BIT);
+    }
+    if sctlr & (1 << 44) != 0 {
+        handler_state |= u64::from(PSR_SSBS_BIT);
+    }
+    for (reg, value) in [
+        (
+            arm64_core_reg_id!(KVM_REG_SIZE_U64, offset_of!(kvm_regs, elr_el1)),
+            pc,
+        ),
+        (
+            arm64_core_reg_id!(KVM_REG_SIZE_U64, offset_of!(kvm_regs, spsr)),
+            pstate,
+        ),
+        (0x603000000013c290, u64::from(debug.hsr)),
+        (PSTATE_ID, handler_state),
+        (PC_REG_ID, vector),
+    ] {
+        vcpu_fd.set_one_reg(reg, &value.to_le_bytes())?;
+    }
     Ok(())
 }
 /// The number of general purpose registers
@@ -311,4 +317,153 @@ pub fn write_registers(vcpu_fd: &VcpuFd, regs: &CoreRegs) -> Result<(), GdbTarge
     )?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use kvm_ioctls::VcpuExit;
+
+    use super::*;
+    use crate::arch::aarch64::vcpu::KvmVcpu;
+    use crate::vstate::vm::tests::setup_vm_with_memory;
+
+    #[test]
+    fn test_translate_47_and_48_bit_addresses() {
+        let entries = [
+            (0x805aaf80, 0x1003),
+            (0x1010, 0x2003),
+            (0x2f48, 0x3003),
+            (0x3008, 0x9003),
+        ];
+        for (ttbr, t1sz) in [(0x10000805aa800, 17), (0x10000805aa000, 16)] {
+            let address = translate_4k(0xfffff800bd201234, ttbr, t1sz, 48, |address| {
+                entries
+                    .iter()
+                    .find(|(entry, _)| *entry == address)
+                    .map(|(_, value)| *value)
+                    .ok_or(GdbTargetError::GvaTranslateError)
+            })
+            .unwrap();
+            assert_eq!(address, 0x9234);
+        }
+    }
+
+    #[test]
+    fn test_translate_blocks_and_invalid_descriptors() {
+        assert_eq!(
+            translate_4k(0xffffff8000001234, 0x1000, 25, 48, |address| {
+                assert_eq!(address, 0x1000);
+                Ok(0x80000001)
+            })
+            .unwrap(),
+            0x80001234
+        );
+        assert_eq!(
+            translate_4k(0xffffffffff345678, 0x1000, 39, 48, |address| {
+                assert_eq!(address, 0x1048);
+                Ok(0x80200001)
+            })
+            .unwrap(),
+            0x80345678
+        );
+        for descriptor in [0, 1, 2] {
+            translate_4k(0xfffff800bd201234, 0x1000, 16, 48, |_| Ok(descriptor)).unwrap_err();
+        }
+        for t1sz in [0, 15, 40, 64] {
+            translate_4k(0, 0, t1sz, 48, |_| unreachable!()).unwrap_err();
+        }
+    }
+
+    #[test]
+    fn test_guest_brk_delivery() {
+        fn exception_state(pstate: u64, debug: bool) -> Vec<u64> {
+            let mut vm = setup_vm_with_memory(0x3000);
+            let mut vcpu = KvmVcpu::new(0, &vm).unwrap();
+            vcpu.init(&[]).unwrap();
+            vm.setup_irqchip(1).unwrap();
+            let offset = match pstate & 0xf {
+                0 => 0x400,
+                4 => 0,
+                5 => 0x200,
+                _ => unreachable!(),
+            };
+            // BRK #0xf002; the EL1 handler writes to an unmapped MMIO address.
+            vm.guest_memory()
+                .write_obj(0xd43e0040_u32, GuestAddress(0))
+                .unwrap();
+            vm.guest_memory()
+                .write_obj(0xd2a80000_u32, GuestAddress(0x1000 + offset))
+                .unwrap();
+            vm.guest_memory()
+                .write_obj(0xf900001f_u32, GuestAddress(0x1004 + offset))
+                .unwrap();
+            if debug {
+                vcpu_set_debug(&vcpu.fd, &[], false).unwrap();
+            }
+            for (reg, value) in [
+                (PC_REG_ID, 0_u64),
+                (PSTATE_ID, pstate),
+                (0x603000000013c600, 0x1000),
+            ] {
+                vcpu.fd.set_one_reg(reg, &value.to_le_bytes()).unwrap();
+            }
+            if debug {
+                let VcpuExit::Debug(exit) = vcpu.fd.run().unwrap() else {
+                    panic!("Expected a trapped BRK")
+                };
+                vcpu_inject_bp(&vcpu.fd, &[], false, exit).unwrap();
+            }
+            let exit = vcpu.fd.run().unwrap();
+            assert!(
+                matches!(exit, VcpuExit::MmioWrite(0x40000000, _)),
+                "{exit:?}"
+            );
+            [
+                PC_REG_ID,
+                PSTATE_ID,
+                arm64_core_reg_id!(KVM_REG_SIZE_U64, offset_of!(kvm_regs, elr_el1)),
+                arm64_core_reg_id!(KVM_REG_SIZE_U64, offset_of!(kvm_regs, spsr)),
+                0x603000000013c290,
+            ]
+            .into_iter()
+            .map(|reg| get_sys_reg(reg, &vcpu.fd).unwrap())
+            .collect()
+        }
+        for mode in [0, 4, 5] {
+            let pstate = 0xa00003c0 | mode;
+            assert_eq!(
+                exception_state(pstate, false),
+                exception_state(pstate, true)
+            );
+        }
+    }
+
+    #[test]
+    fn test_debug_controls_preserve_interrupt_masks() {
+        let mut vm = setup_vm_with_memory(0x1000);
+        let mut vcpu = KvmVcpu::new(0, &vm).unwrap();
+        vcpu.init(&[]).unwrap();
+        vm.setup_irqchip(1).unwrap();
+        vm.guest_memory()
+            .write_obj(0xd503201f_u32, GuestAddress(0))
+            .unwrap();
+        for masks in [0, 0x40, 0x80, 0xc0] {
+            let pstate = 0xa0000305_u64 | masks;
+            vcpu.fd
+                .set_one_reg(PSTATE_ID, &pstate.to_le_bytes())
+                .unwrap();
+            for step in [false, true, false] {
+                vcpu_set_debug(&vcpu.fd, &[], step).unwrap();
+                assert_eq!(get_sys_reg(PSTATE_ID, &vcpu.fd).unwrap(), pstate);
+                if step {
+                    vcpu.fd
+                        .set_one_reg(PC_REG_ID, &0_u64.to_le_bytes())
+                        .unwrap();
+                    assert!(matches!(vcpu.fd.run().unwrap(), VcpuExit::Debug(_)));
+                    assert_eq!(get_instruction_pointer(&vcpu.fd).unwrap(), 4);
+                    assert_eq!(get_sys_reg(PSTATE_ID, &vcpu.fd).unwrap(), pstate);
+                }
+            }
+        }
+    }
 }
