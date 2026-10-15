@@ -1442,6 +1442,7 @@ def test_get_full_config_after_restoring_snapshot(microvm_factory, uvm_configure
             uvm_configured.kernel_file
         ),
         "initrd_path": None,
+        "firmware": None,
         "boot_args": "reboot=k panic=1 nomodule swiotlb=noforce console=ttyS0 cryptomgr.notests",
     }
     if not uvm_configured.pci_enabled:
@@ -1490,6 +1491,7 @@ def test_get_full_config(uvm):
         "boot_args": "",
         "kernel_image_path": f"/{test_microvm.kernel_file.name}",
         "initrd_path": None,
+        "firmware": None,
     }
     expected_cfg["drives"] = [
         {

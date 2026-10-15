@@ -1686,6 +1686,7 @@ mod tests {
         let tmp_file = TempFile::new().unwrap();
         let cmdline = "reboot=k panic=1 pci=off nomodule 8250.nr_uarts=0";
         let expected_boot_cfg = BootSourceConfig {
+            firmware: None,
             kernel_image_path: String::from(tmp_file.as_path().to_str().unwrap()),
             initrd_path: Some(String::from(tmp_file.as_path().to_str().unwrap())),
             boot_args: Some(cmdline.to_string()),
