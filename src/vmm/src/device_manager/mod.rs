@@ -74,6 +74,8 @@ mod console_display;
 mod console_optical;
 #[cfg(target_arch = "x86_64")]
 mod console_server;
+#[cfg(target_arch = "x86_64")]
+mod console_usb;
 /// Legacy Device Manager.
 pub mod legacy;
 /// Memory Mapped I/O Manager.
@@ -828,15 +830,17 @@ impl<'a> Persist<'a> for DeviceManager {
         )?;
 
         #[cfg(target_arch = "x86_64")]
-        if state.console.is_some() {
-            for irq in [12, 14] {
-                constructor_args
-                    .vm
-                    .resource_allocator()
-                    .gsi_legacy_allocator
-                    .allocate_id_at(irq)
-                    .map_err(|error| std::io::Error::other(error.to_string()))?;
-            }
+        if state
+            .console
+            .as_ref()
+            .is_some_and(|console| console.has_optical())
+        {
+            constructor_args
+                .vm
+                .resource_allocator()
+                .gsi_legacy_allocator
+                .allocate_id_at(crate::devices::legacy::atapi::IRQ)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
         }
         let virtio_devices = match &state.virtio_state {
             VirtioDevicesState::Pci(pci_state) => {

@@ -89,8 +89,10 @@ supervisor must start a new process for a guest reboot.
 
 1. Shut down QEMU before giving Firecracker writable access to the disk.
 
-Firecracker does not provide the graphical console or CD-ROM controller used by
-Windows Setup. The disk preparation stage therefore uses QEMU. An
+To install directly in Firecracker, use the
+[optional installation console](windows-console.md), which supplies VGA, PS/2
+keyboard, USB HID pointer and ATAPI hardware. That guide records the tested
+editions and limits. An
 [unattended preparation tool](../tools/windows/README.md) generates the answer
 media and a separate raw disk without starting the installer. See the
 [Cloud Hypervisor Windows guide](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/main/docs/windows.md)
@@ -187,20 +189,37 @@ same 2 MiB bidirectional TCP test through a TAP interface; see
 
 ## Snapshots
 
-This branch uses snapshot format 20.0.0. It adds CET control and shadow-stack
-state for guests that expose those CPU features. A native vCPU regression
-verifies nonzero registers across two fresh restores. Server 2025, Windows 10
-and Windows 11 pass the format-20 cold/full/differential TAP and real Tokoloshe
-CONNECT regressions. Windows 7 passes storage, DNS, validated HTTPS and TAP; XP
-passes storage, HTTP and TAP. Both pass cold/full/differential restore and clean
-shutdown. ARM64 passes the same format-20 TAP and CONNECT checks, including
-clean shutdown. The format preserves modern and transitional PCI transport
-state, including the legacy network I/O BAR size. Earlier snapshot formats are
-incompatible. It saves the ACPI PM timer, PM1 status, enable and sleep-type
-registers, CMOS registers, RTC divider phase, pending interrupt flags and guest
-wall-clock adjustment. The RTC follows host UTC plus the saved guest adjustment,
-including elapsed time while the VM is stopped. It provides periodic, alarm and
-update interrupts on reserved IRQ 8. Register C reads acknowledge pending flags.
+This branch uses snapshot format 23.0.0. It extends the optional console state
+with USB controller/HID state, keyboard lock tracking and pending input
+releases. Format 21.0.0 introduced the console devices. Console and headless
+revalidation for the current format is tracked in the
+[console plan](windows.md). The preceding reviewed format 20.0.0 added CET
+control and shadow-stack state for guests that expose those CPU features. A
+native vCPU regression verifies nonzero registers across two fresh restores.
+Server 2025, Windows 10 and Windows 11 pass the format-20 cold/full/differential
+TAP and real Tokoloshe CONNECT regressions. Windows 7 passes storage, DNS,
+validated HTTPS and TAP; XP passes storage, HTTP and TAP. Both pass
+cold/full/differential restore and clean shutdown. ARM64 passes the same
+format-20 TAP and CONNECT checks, including clean shutdown. The format preserves
+modern and transitional PCI transport state, including the legacy network I/O
+BAR size. Earlier snapshot formats are incompatible. It saves the ACPI PM timer,
+PM1 status, enable and sleep-type registers, CMOS registers, RTC divider phase,
+pending interrupt flags and guest wall-clock adjustment. The RTC follows host
+UTC plus the saved guest adjustment, including elapsed time while the VM is
+stopped. It provides periodic, alarm and update interrupts on reserved IRQ 8.
+Register C reads acknowledge pending flags.
+
+The VMClock device publishes generation and disruption counters. Its
+`clock_status` remains `UNKNOWN` and its `counter_id` remains `INVALID`; this
+implementation does not advertise a usable precision clock. AWS provides a
+[null driver package](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/other-windows-device-drivers.html)
+that lets Windows recognise the device without adding clock functionality. AWS
+documents support for Windows Server 2016, 2019, 2022 and 2025. Windows 10
+recognised `AMZNC10C` as `AWS VMClock Device` with device problem code 0 after
+installation of the unmodified signed INF/catalog, without reboot. This verifies
+device recognition, not counter consumption. No functional Windows VMClock
+driver has been verified. Installing the null package does not resolve guest
+time lag; clock accuracy requires separate validation.
 
 The guest CPUID records whether Hyper-V is enabled. Restore derives the machine
 configuration from that state and checks destination-host support. The vCPU

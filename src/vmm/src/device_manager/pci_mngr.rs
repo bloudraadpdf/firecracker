@@ -95,7 +95,7 @@ impl PciDevices {
     }
 
     #[cfg(target_arch = "x86_64")]
-    pub(crate) fn ensure_optical_intx(
+    pub(crate) fn ensure_console_intx(
         &mut self,
         vm: &Arc<KvmVm>,
     ) -> std::io::Result<Arc<Mutex<PciIntxGroup>>> {
@@ -801,8 +801,8 @@ mod tests {
         let mut pci = PciDevices::new(&vm).unwrap();
         assert!(pci.intx.is_none());
         assert_eq!(pci.pci_segment.pci_irq_slots, [0; 32]);
-        let first = pci.ensure_optical_intx(&vm).unwrap();
-        let second = pci.ensure_optical_intx(&vm).unwrap();
+        let first = pci.ensure_console_intx(&vm).unwrap();
+        let second = pci.ensure_console_intx(&vm).unwrap();
         assert!(Arc::ptr_eq(&first, &second));
         assert!(pci.unregistered_intx().is_some());
         assert_eq!(pci.pci_segment.pci_irq_slots, [0; 32]);

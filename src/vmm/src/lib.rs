@@ -467,6 +467,8 @@ impl Vmm {
             .ok_or_else(|| VmmError::NotSupportedOnVmType(self.vm.type_name()))?;
         self.device_manager.kick_virtio_devices();
         kvm_vm.resume_vcpus()?;
+        #[cfg(target_arch = "x86_64")]
+        self.device_manager.set_console_running(true);
         self.instance_info.state = VmState::Running;
         Ok(())
     }
@@ -478,6 +480,8 @@ impl Vmm {
             .as_kvm()
             .ok_or_else(|| VmmError::NotSupportedOnVmType(self.vm.type_name()))?;
         kvm_vm.pause_vcpus()?;
+        #[cfg(target_arch = "x86_64")]
+        self.device_manager.set_console_running(false);
         self.instance_info.state = VmState::Paused;
         Ok(())
     }

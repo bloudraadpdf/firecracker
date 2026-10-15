@@ -1,8 +1,8 @@
 # Graphical CloudHv firmware
 
 This opt-in AMD64 profile adds the existing EDK II Bochs/QEMU graphics output
-driver and PS/2 keyboard/mouse drivers to CloudHv firmware. It uses the same
-pinned EDK II revision as the [headless firmware](../README.md):
+driver, PS/2 keyboard and USB absolute-pointer drivers to CloudHv firmware. It
+uses the same pinned EDK II revision as the [headless firmware](../README.md):
 `97eeb7b0901da9f7b5d98a2e6a5e8694978298e9` (`ch-97eeb7b09`).
 
 Apply the existing `cloudhv-firecracker.patch` first. Then apply
@@ -19,13 +19,23 @@ PCI VGA 1234:1111 -> QemuVideoDxe -> Graphics Output Protocol
                                           ConSplitter
 
 PCI ISA bridge -> SioBusDxe -> PS/2 keyboard -> text input
-                          `-> PS/2 mouse    -> pointer input
+
+PCI UHCI -> UhciDxe -> UsbBusDxe -> HID tablet -> absolute pointer
 ```
 
 CloudHv already contains GraphicsConsoleDxe, ConSplitter and the ATA/ATAPI
-storage stack. The patch adds QemuVideoDxe, SioBusDxe, Ps2KeyboardDxe and
-Ps2MouseDxe. The console-only SIO build adds a `PNP0F13` child for the mouse.
-The existing SIO keyboard child is `PNP0303`.
+storage stack. The patch adds QemuVideoDxe, SioBusDxe and Ps2KeyboardDxe. The
+SIO keyboard child is `PNP0303`; no PS/2 mouse is exposed.
+
+The USB path adds UhciDxe, UsbBusDxe and UsbMouseAbsolutePointerDxe. Upstream's
+absolute-pointer driver accepts only relative boot-mouse reports. The console
+patch also accepts the fork's `1d0f:fc03` nonboot tablet, checks its complete
+HID report descriptor, and reads its six-byte absolute reports directly. Its
+axes are `0..32767`; EFI ConSplitter normalises them to `0..65536`. The tablet
+has left/right buttons and no pressure axis. The USB HID wheel remains available
+to Windows; EFI absolute-pointer input does not expose a scroll wheel. The
+[firmware probe](tests/README.md) checks coordinates and buttons before an OS
+starts.
 
 The VM must expose its legacy devices through an enabled PCI ISA bridge (class
 `0601`, I/O and memory decode enabled). Upstream SioBusDxe matches that class
@@ -78,9 +88,9 @@ QemuVideoDxe directly; the SeaVGABIOS option ROM is for the BIOS path.
 ## Build evidence
 
 The AMD64 release profile built with two jobs and produced a 4 MiB image with
-SHA-256 `4a2e35996ba12792481ebcbb59c60bc6fd2d671a3355e9a2a33b7bb83cc9a75f`.
-Patch application reproduced all five source inputs with normalised line
-endings. Keep firmware images immutable while their guests or snapshots exist.
+SHA-256 `b5a2d30c310d2027d83ed3536ba75d28e2c507dfe5830bb1e9372a50f9c8badd`. The
+USB-enabled image passed the no-OS absolute-pointer probe. Keep firmware images
+immutable while their guests or snapshots exist.
 
 The console platform initialiser was validated with a DEBUG serial build: the
 root bridge reported I/O `0x1000..0xffff`, EDK II identified and booted the

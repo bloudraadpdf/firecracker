@@ -232,7 +232,7 @@ impl OpticalDevice {
         let setup = (|| -> io::Result<_> {
             Ok((
                 make_bars(mapped, state.map(|s| &s.bars))?,
-                pci.ensure_optical_intx(vm)?,
+                pci.ensure_console_intx(vm)?,
             ))
         })();
         let (bars, intx) = match setup {
