@@ -32,13 +32,13 @@ child=
 echo_child=
 stop() {
     if [[ -n "$child" ]]; then
-        if kill -0 "$child" 2>/dev/null; then sudo kill -TERM "$(cat "$run/pid")"; fi
+        if kill -0 "$child" 2>/dev/null; then sudo kill -TERM "$(sudo cat "$run/pid")"; fi
         for retry in {1..100}; do
             if ! kill -0 "$child" 2>/dev/null; then break; fi
             sleep 0.1
         done
         if kill -0 "$child" 2>/dev/null; then
-            sudo kill -KILL "$(cat "$run/pid")"
+            sudo kill -KILL "$(sudo cat "$run/pid")"
             wait "$child" || true
             child=
             return 1

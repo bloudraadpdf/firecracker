@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 set -euo pipefail
 checker=$(realpath "$(dirname "$0")/assert-disk-closed.sh")
+secure_checker=$(realpath "$(dirname "$0")/verify-secure-state.sh")
+mount_helper=$(realpath "$(dirname "$0")/mount-state.sh")
 cd "${WINDOWS_CONNECT_BASE:?Set test directory}"
 prefix=${WINDOWS_CONNECT_PREFIX:?Set guest file prefix}
 tag=${WINDOWS_CONNECT_TAG:?Set guest marker tag}
@@ -24,18 +26,20 @@ mkdir -p mnt
 if mountpoint -q mnt; then exit 1; fi
 loop_args=(--find --show --read-only)
 if [[ -n "$offset" ]]; then loop_args+=(--offset "$offset"); else loop_args+=(--partscan); fi
-loop=$(losetup "${loop_args[@]}" "$disk")
-cleanup() {
-    if mountpoint -q mnt; then umount mnt; fi
-    losetup -d "$loop"
-}
-trap cleanup EXIT
-partition=$loop
-if [[ -z "$offset" ]]; then partition=${loop}p3; fi
+# shellcheck source=mount-state.sh
+source "$mount_helper"
+windows_mount_directory=$PWD/mnt
+windows_mount_loop=$(losetup "${loop_args[@]}" "$disk")
+partition=$windows_mount_loop
+if [[ -z "$offset" ]]; then partition=${windows_mount_loop}p3; fi
 ntfs-3g "$partition" mnt -o ro
 test ! -e mnt/hiberfil.sys
 iconv -f "$encoding" -t UTF-8 "mnt/$prefix-probe.log" > run/guest-transcript.txt
 cp "mnt/$prefix-data.bin" run/final-data.bin
+if [[ ${WINDOWS_SECURE_CHECKS:-0} = 1 ]]; then
+    cp mnt/Users/Public/fc-tpm-state.txt run/tpm-state.txt
+    bash "$secure_checker" run/guest-transcript.txt run/tpm-state.txt
+fi
 for iteration in 1 2 3; do
     test "$(grep -c "^${tag}_PASS iteration=$iteration" run/guest-transcript.txt)" = 1
     if [[ ${WINDOWS_SECURE_CHECKS:-0} = 1 ]]; then

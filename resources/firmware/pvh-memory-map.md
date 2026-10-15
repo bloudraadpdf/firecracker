@@ -71,8 +71,12 @@ Secure Boot image SHA-256:
 `ff6fc396b5eb4daa3de992611814ab9d8084c6981e6bb07a3f44d58a2b948c43`. These are
 firmware-map checks; OS cold/restore acceptance is recorded separately.
 
-The headless `CloudHvX64.dsc` RELEASE build also passes with this patch. Run
-exact-function malformed-map fixtures against the patched source:
+The headless `CloudHvX64.dsc` RELEASE build also passes with this patch. Its
+firmware passes the same actual GetMemoryMap probe using the same VMM
+configuration with the reserved console platform region. Its SHA-256 is
+`dc565fbd5facf9016863f3b91c732ee1196fa11f475a361c52654869f7d81d84`. This checks
+the headless firmware's map publication, not Windows console support in that
+firmware. Run exact-function malformed-map fixtures against the patched source:
 
 ```sh
 bash resources/firmware/cloudhv-console/tests/test-memory-map.sh \
