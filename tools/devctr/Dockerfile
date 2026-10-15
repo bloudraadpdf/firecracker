@@ -166,8 +166,7 @@ RUN apt-get update \
         musl-tools \
         # needed for integration tests
         net-tools iproute2 iperf3 socat fdisk \
-        patch libglib2.0-dev libgnutls28-dev \
-        libjson-glib-1.0-0 libseccomp2 \
+        acpica-tools patch libglib2.0-dev libgnutls28-dev libjson-glib-1.0-0 libseccomp2 \
         numactl \
         iptables \
         openssh-client \

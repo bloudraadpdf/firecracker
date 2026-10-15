@@ -10,6 +10,7 @@ patches in order with `git apply --ignore-whitespace`:
 1. `resources/firmware/cloudhv-firecracker.patch`
 1. `resources/firmware/cloudhv-console/cloudhv-console.patch`
 1. `resources/firmware/cloudhv-secureboot/cloudhv-secureboot.patch`
+1. `resources/firmware/cloudhv-secureboot/cloudhv-physical-presence.patch`
 
 After the normal EDK2 BaseTools setup, build:
 
@@ -19,7 +20,11 @@ build -p OvmfPkg/CloudHv/CloudHvConsoleSecureX64.dsc -a X64 -t GCC -b RELEASE -n
 
 The image is `Build/CloudHvConsoleSecureX64/RELEASE_GCC/FV/CLOUDHV.fd`. Use a
 new immutable filename and record its digest before each validation run. The
-headless and ordinary console profiles keep their previous settings.
+headless and ordinary console profiles keep their previous settings. Both
+`CloudHvX64.dsc` and `CloudHvConsoleX64.dsc` completed RELEASE regression builds
+with the physical-presence patch applied. The ordinary console image remained
+byte-for-byte identical to the USB-only image with SHA-256
+`b5a2d30c310d2027d83ed3536ba75d28e2c507dfe5830bb1e9372a50f9c8badd`.
 
 The secure profile enables `TPM2_ENABLE` and `SECURE_BOOT_ENABLE`, disables TPM1
 support, and uses `VirtMmCommunicationDxe` with `VariableSmmRuntimeDxe`. The
@@ -42,7 +47,7 @@ durable variables across cold boot, and a matched TPM/variable/disk restore. A
 TPM backend must allow firmware to perform Startup and PCR measurements rather
 than preinitialising the TPM in the host launcher.
 
-The first DEBUG build completed with digest
+The pre-PPI DEBUG build completed with digest
 `8e76a0dba5b069e19a300d766d482d486113c276a97d41d22721600b8626351b`. This DEBUG
 image passed the isolated EFI probe with a test-only PK/KEK/db:
 
@@ -62,7 +67,7 @@ production trust policy. Never reuse the probe key for deployed guests. The
 [probe procedure](tests/README.md) gives the build, signing, provisioning and
 bounded execution commands.
 
-The RELEASE image digest is
+The pre-PPI RELEASE image digest is
 `c5e2208aa0c8a00ce45dc77d5c2aa24bad1cca92f9a6aab842a2d9766c90bc3e`. It repeated
 the signed/unsigned, protected-variable, TPM/event-log and durable counter
 checks with the reviewed format-25 VMM and helper containing the large
@@ -95,3 +100,45 @@ file in the rebuilt UDF image against the prepared tree.
 
 The EFI probe runs before ExitBootServices. It does not substitute for Windows
 runtime-variable checks after virtual-address conversion.
+
+## Persistent physical presence interface
+
+The secure profile uses EDK2's variable-backed physical presence library. It
+connects the default consoles before processing requests, then preserves the
+existing ReadyToLock ordering that protects the TPM platform hierarchy. Flags
+are initialised before their variable policy locks them. Missing policy support,
+malformed flags or failed initialisation stops firmware.
+
+Only operations 0, 5, 14, 21 and 22 are accepted. Direct writes of other
+requests receive BIOS failure without changing the TPM. The flags remain locked
+through runtime. TCG PPI 1.30 Table 2 requires confirmation for combined clear
+operations when either the clear or turn-on flag is set; the secure profile
+applies that condition in addition to the pinned library's clear-only test.
+
+Validation uses disposable TPM and variable stores, never an installed guest's
+TPM. The required sequence is:
+
+- [x] Cold boot initialises flags and rejects runtime flag writes.
+- [x] A pending clear displays the confirmation prompt before OS boot.
+- [x] Escape records user abort without executing clear.
+- [x] F12 executes clear, records success, consumes the request and resets.
+- [x] Combined clear with only the turn-on flag set still requires confirmation.
+- [x] Unsupported direct requests record BIOS failure without TPM action.
+- [x] Headless and ordinary graphical firmware builds remain unchanged.
+
+The PPI RELEASE image has SHA-256
+`8686fa6c62eb6ec808efe353a04ec1f86bb71df9c93d7623caf89b4a4dad58d1`. With the
+format-26 VMM and PPI helper it passed the disposable-store sequence above. The
+TPM effect was checked independently of the writable result variable: owner NV
+index `0x01500020` remained readable after Escape, then returned `TPM_RC_HANDLE`
+after F12 and cold restart. The separate UEFI marker remained, so the probe did
+not recreate the index. Secure Boot remained enabled and the signed probe
+completed ACPI S5. This does not authorise clearing an installed Windows guest's
+TPM.
+
+Installed Windows 11 Enterprise Evaluation 26300.9457 also booted this firmware
+with its existing matched disk and TPM state. `Get-Tpm` returned present, ready,
+enabled, activated and owned; its PPI version and WMI physical-presence version
+were 1.3. `Confirm-SecureBootUEFI` returned true, and the public TBS
+`TPM2_GetRandom` probe succeeded. These installed-guest checks only queried the
+TPM; no clear request was submitted.

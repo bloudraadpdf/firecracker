@@ -81,7 +81,6 @@ impl Engine {
         }
         Ok(status)
     }
-    #[cfg(test)]
     pub fn set_variable(
         &mut self,
         name: &str,
@@ -189,7 +188,6 @@ impl Engine {
         Ok(e)
     }
 }
-#[cfg(test)]
 fn set_message(name: &str, vendor: [u8; 16], attributes: u32, data: &[u8]) -> Vec<u8> {
     let name: Vec<u8> = name
         .encode_utf16()
