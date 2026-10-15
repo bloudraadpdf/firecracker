@@ -1,0 +1,22 @@
+$ErrorActionPreference = 'Stop'
+Start-Transcript -Path C:\legacy-install.log -Force
+try {
+    & certutil.exe -addstore -f Root C:\Drivers\VIOSock\test-signing.cer
+    if ($LASTEXITCODE -ne 0) { throw 'Root certificate import failed' }
+    & certutil.exe -addstore -f TrustedPublisher C:\Drivers\VIOSock\test-signing.cer
+    if ($LASTEXITCODE -ne 0) { throw 'Publisher certificate import failed' }
+    & bcdedit.exe /set '{current}' testsigning on
+    if ($LASTEXITCODE -ne 0) { throw 'Test-signing configuration failed' }
+    & C:\install-driver-x64.exe
+    $result = $LASTEXITCODE
+    "INSTALL_RESULT=$result"
+    if ($result -ne 0 -and $result -ne 3010) { throw "Driver installation failed: $result" }
+    Get-WmiObject Win32_PnPEntity | Where-Object { $_.DeviceID -like '*VEN_1AF4&DEV_1053*' } | Format-List Name,DeviceID,ConfigManagerErrorCode,Status
+    Set-Content C:\legacy-install-result.txt 0
+} catch {
+    $_ | Out-File C:\legacy-install-error.txt
+    Set-Content C:\legacy-install-result.txt 1
+} finally {
+    Stop-Transcript
+    & shutdown.exe /s /t 0
+}
