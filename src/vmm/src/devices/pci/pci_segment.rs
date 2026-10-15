@@ -262,11 +262,6 @@ impl Aml for PciSegment {
                 &aml::ResourceTemplate::new(vec![
                     &aml::AddressSpace::new_bus_number(0x0u16, 0x0u16)?,
                     &aml::Io::new(0xcf8, 0xcf8, 1, 0x8),
-                    &aml::Memory32Fixed::new(
-                        true,
-                        self.mmio_config_address.try_into().unwrap(),
-                        PCI_MMIO_CONFIG_SIZE_PER_SEGMENT.try_into().unwrap(),
-                    ),
                     &aml::AddressSpace::new_memory(
                         aml::AddressSpaceCacheable::NotCacheable,
                         true,
@@ -279,8 +274,7 @@ impl Aml for PciSegment {
                         self.start_of_mem64_area,
                         self.end_of_mem64_area,
                     )?,
-                    &aml::AddressSpace::new_io(0u16, 0x0cf7u16)?,
-                    &aml::AddressSpace::new_io(0x0d00u16, 0xffffu16)?,
+                    &aml::AddressSpace::new_io(0x1000u16, 0xffffu16)?,
                 ]),
             )?
         } else {
@@ -288,11 +282,6 @@ impl Aml for PciSegment {
                 "_CRS".try_into()?,
                 &aml::ResourceTemplate::new(vec![
                     &aml::AddressSpace::new_bus_number(0x0u16, 0x0u16)?,
-                    &aml::Memory32Fixed::new(
-                        true,
-                        self.mmio_config_address.try_into().unwrap(),
-                        PCI_MMIO_CONFIG_SIZE_PER_SEGMENT.try_into().unwrap(),
-                    ),
                     &aml::AddressSpace::new_memory(
                         aml::AddressSpaceCacheable::NotCacheable,
                         true,
@@ -339,6 +328,24 @@ impl Aml for PciSegment {
             format!("_SB_.PC{:02X}", self.id).as_str().try_into()?,
             pci_dsdt_inner_data,
         )
+        .append_aml_bytes(v)?;
+
+        let ecam_uid = format!("ECAM{:04X}", self.id);
+        aml::Device::new(
+            format!("_SB_.EC{:02X}", self.id).as_str().try_into()?,
+            vec![
+                &aml::Name::new("_HID".try_into()?, &aml::EisaName::new("PNP0C02")?)?,
+                &aml::Name::new("_UID".try_into()?, &ecam_uid)?,
+                &aml::Name::new(
+                    "_CRS".try_into()?,
+                    &aml::ResourceTemplate::new(vec![&aml::Memory32Fixed::new(
+                        true,
+                        self.mmio_config_address.try_into().unwrap(),
+                        PCI_MMIO_CONFIG_SIZE_PER_SEGMENT.try_into().unwrap(),
+                    )]),
+                )?,
+            ],
+        )
         .append_aml_bytes(v)
     }
 }
@@ -350,6 +357,52 @@ mod tests {
     use crate::arch;
     use crate::builder::tests::default_vmm;
     use crate::utils::u64_to_usize;
+
+    fn segment_aml() -> Vec<u8> {
+        let vmm = default_vmm();
+        let vm = vmm.vm.as_kvm().unwrap().clone();
+        let segment = PciSegment::new(0, &vm, &[0; 32]).unwrap();
+        let mut bytes = Vec::new();
+        segment.append_aml_bytes(&mut bytes).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn test_ecam_is_a_motherboard_resource() {
+        let bytes = segment_aml();
+        let range = aml::Memory32Fixed::new(
+            true,
+            arch::PCI_MMCONFIG_START.try_into().unwrap(),
+            PCI_MMIO_CONFIG_SIZE_PER_SEGMENT.try_into().unwrap(),
+        );
+        let mut reservation = Vec::new();
+        aml::Device::new(
+            "_SB_.EC00".try_into().unwrap(),
+            vec![
+                &aml::Name::new(
+                    "_HID".try_into().unwrap(),
+                    &aml::EisaName::new("PNP0C02").unwrap(),
+                )
+                .unwrap(),
+                &aml::Name::new("_UID".try_into().unwrap(), &"ECAM0000").unwrap(),
+                &aml::Name::new(
+                    "_CRS".try_into().unwrap(),
+                    &aml::ResourceTemplate::new(vec![&range]),
+                )
+                .unwrap(),
+            ],
+        )
+        .append_aml_bytes(&mut reservation)
+        .unwrap();
+        assert!(bytes.ends_with(&reservation));
+        let mut descriptor = Vec::new();
+        range.append_aml_bytes(&mut descriptor).unwrap();
+        assert!(
+            !bytes[..bytes.len() - reservation.len()]
+                .windows(descriptor.len())
+                .any(|window| window == descriptor)
+        );
+    }
 
     #[test]
     fn test_pci_segment_build() {
@@ -378,6 +431,28 @@ mod tests {
         assert_eq!(pci_segment.mmio_config_address, arch::PCI_MMCONFIG_START);
         assert_eq!(pci_segment.proximity_domain, 0);
         assert_eq!(pci_segment.pci_irq_slots, [0u8; 32]);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_pci_io_window_excludes_platform_ports() {
+        let bytes = segment_aml();
+        let mut window = Vec::new();
+        aml::AddressSpace::new_io(0x1000u16, 0xffffu16)
+            .unwrap()
+            .append_aml_bytes(&mut window)
+            .unwrap();
+        assert!(bytes.windows(window.len()).any(|data| data == window));
+        let mut legacy_window = Vec::new();
+        aml::AddressSpace::new_io(0u16, 0x0cf7u16)
+            .unwrap()
+            .append_aml_bytes(&mut legacy_window)
+            .unwrap();
+        assert!(
+            !bytes
+                .windows(legacy_window.len())
+                .any(|data| data == legacy_window)
+        );
     }
 
     #[cfg(target_arch = "x86_64")]
