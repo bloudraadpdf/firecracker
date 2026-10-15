@@ -6,9 +6,9 @@
 // found in the THIRD-PARTY file.
 
 use std::os::fd::AsRawFd;
+use std::sync::Arc;
 use std::sync::atomic::{Ordering, fence};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel};
-use std::sync::{Arc, Barrier};
+use std::sync::mpsc::{Receiver, RecvError, RecvTimeoutError, Sender, TryRecvError, channel};
 use std::time::Duration;
 use std::{fmt, io, thread};
 
@@ -183,20 +183,21 @@ impl Vcpu {
         mut self,
         vm: &KvmVm,
         seccomp_filter: Arc<BpfProgram>,
-        barrier: Arc<Barrier>,
     ) -> Result<VcpuHandle, StartThreadedError> {
         let event_sender = self.event_sender.take().expect("vCPU already started");
         let response_receiver = self.response_receiver.take().unwrap();
         let vcpu_fd = self
             .copy_kvm_vcpu_fd(vm)
             .map_err(StartThreadedError::CopyFd)?;
+        let (ready_sender, ready_receiver) = channel();
         let vcpu_thread = thread::Builder::new()
             .name(format!("fc_vcpu {}", self.kvm_vcpu.index))
             .spawn(move || {
                 let filter = &*seccomp_filter;
                 self.register_kick_signal_handler();
-                // Synchronization to make sure thread local data is initialized.
-                barrier.wait();
+                ready_sender
+                    .send(())
+                    .expect("vCPU handle dropped during startup");
                 self.run(filter);
             })
             .map_err(StartThreadedError::Spawn)?;
@@ -206,6 +207,7 @@ impl Vcpu {
             response_receiver,
             vcpu_fd,
             vcpu_thread,
+            ready_receiver,
         ))
     }
 
@@ -582,6 +584,7 @@ impl fmt::Debug for VcpuResponse {
 pub struct VcpuHandle {
     event_sender: Sender<VcpuEvent>,
     response_receiver: Receiver<VcpuResponse>,
+    startup: Option<Receiver<()>>,
     /// VcpuFd
     pub vcpu_fd: VcpuFd,
     // Rust JoinHandles have to be wrapped in Option if you ever plan on 'join()'ing them.
@@ -590,9 +593,13 @@ pub struct VcpuHandle {
 }
 
 /// Error type for [`VcpuHandle::send_event`].
-#[derive(Debug, derive_more::From, thiserror::Error)]
-#[error("Failed to signal vCPU: {0}")]
-pub struct VcpuSendEventError(pub vmm_sys_util::errno::Error);
+#[derive(Debug, derive_more::From, thiserror::Error, displaydoc::Display)]
+pub enum VcpuSendEventError {
+    /// Failed to signal vCPU: {0}
+    Signal(vmm_sys_util::errno::Error),
+    /// vCPU exited before signal handler initialisation: {0}
+    Startup(RecvError),
+}
 
 impl VcpuHandle {
     /// Creates a new [`VcpuHandle`].
@@ -606,24 +613,33 @@ impl VcpuHandle {
         response_receiver: Receiver<VcpuResponse>,
         vcpu_fd: VcpuFd,
         vcpu_thread: thread::JoinHandle<()>,
+        startup: Receiver<()>,
     ) -> Self {
         Self {
             event_sender,
             response_receiver,
             vcpu_fd,
             vcpu_thread: Some(vcpu_thread),
+            startup: Some(startup),
         }
     }
     /// Sends event to vCPU.
     ///
     /// # Errors
     ///
-    /// When [`vmm_sys_util::linux::signal::Killable::kill`] errors.
+    /// When startup disconnects or [`vmm_sys_util::linux::signal::Killable::kill`] errors.
     pub fn send_event(&mut self, event: VcpuEvent) -> Result<(), VcpuSendEventError> {
         // Use expect() to crash if the other thread closed this channel.
         self.event_sender
             .send(event)
             .expect("event sender channel closed on vcpu end.");
+        if let Some(startup) = &self.startup {
+            // The first command wakes the paused receiver without a signal.
+            // Later commands must wait until the kick handler has TLS.
+            startup.recv()?;
+            self.startup = None;
+            return Ok(());
+        }
         // Kick the vcpu so it picks up the message.
         // Add a fence to ensure the write is visible to the vpu thread
         self.vcpu_fd.set_kvm_immediate_exit(1);
@@ -948,16 +964,9 @@ pub(crate) mod tests {
             .expect("failed to configure vcpu");
 
         let mut seccomp_filters = get_empty_filters();
-        let barrier = Arc::new(Barrier::new(2));
         let vcpu_handle = vcpu
-            .start_threaded(
-                &vm,
-                seccomp_filters.remove("vcpu").unwrap(),
-                barrier.clone(),
-            )
+            .start_threaded(&vm, seccomp_filters.remove("vcpu").unwrap())
             .expect("failed to start vcpu");
-        // Wait for vCPUs to initialize their TLS before moving forward.
-        barrier.wait();
 
         (vm, vcpu_handle, vcpu_exit_evt)
     }
@@ -1055,6 +1064,21 @@ pub(crate) mod tests {
             vcpu.kvm_vcpu.fd.get_kvm_run().immediate_exit,
             "Immediate Exit should have been disabled by sending Resume to a paused VM"
         )
+    }
+
+    #[test]
+    fn test_initial_pause_does_not_kick_vcpu() {
+        let (_vm, mut handle, _) = vcpu_configured_for_boot();
+        queue_event_expect_response(&mut handle, VcpuEvent::Pause, VcpuResponse::Paused);
+        assert_eq!(handle.vcpu_fd.get_kvm_run().immediate_exit, 0);
+        handle.send_event(VcpuEvent::Finish).unwrap();
+    }
+
+    #[test]
+    fn test_finish_before_first_resume() {
+        let (_vm, mut handle, _) = vcpu_configured_for_boot();
+        handle.send_event(VcpuEvent::Finish).unwrap();
+        drop(handle);
     }
 
     #[test]

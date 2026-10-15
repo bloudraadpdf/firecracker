@@ -10,7 +10,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Barrier, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 #[cfg(target_arch = "x86_64")]
 use kvm_bindings::KVM_IRQCHIP_IOAPIC;
@@ -242,15 +242,14 @@ impl KvmVm {
     /// Starts the microVM vCPUs.
     ///
     /// Sets the terminal to raw/non-blocking mode, then spawns a thread per vCPU
-    /// and stores the resulting handles. The barrier is used to synchronize TLS
-    /// initialization across all vCPU threads before returning.
+    /// and stores the resulting handles. Each handle waits for TLS initialisation
+    /// when it sends its first command.
     pub fn start_vcpus(
         self: &Arc<Self>,
         mut vcpus: Vec<Vcpu>,
         vcpu_seccomp_filter: Arc<crate::seccomp::BpfProgram>,
     ) -> Result<(), StartVcpusError> {
         let vcpu_count = vcpus.len();
-        let barrier = Arc::new(Barrier::new(vcpu_count + 1));
 
         let stdin = std::io::stdin().lock();
         stdin.set_raw_mode().inspect_err(|&err| {
@@ -267,14 +266,8 @@ impl KvmVm {
             #[cfg(target_arch = "x86_64")]
             vcpu.kvm_vcpu.set_pio_bus(self.pio_bus.clone());
 
-            handles.push(vcpu.start_threaded(
-                self,
-                vcpu_seccomp_filter.clone(),
-                barrier.clone(),
-            )?);
+            handles.push(vcpu.start_threaded(self, vcpu_seccomp_filter.clone())?);
         }
-        drop(handles);
-        barrier.wait();
 
         Ok(())
     }
