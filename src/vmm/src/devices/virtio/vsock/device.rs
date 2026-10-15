@@ -32,14 +32,19 @@ use super::{VsockBackend, defs};
 use crate::devices::virtio::ActivateError;
 use crate::devices::virtio::device::{ActiveState, DeviceState, VirtioDevice, VirtioDeviceType};
 use crate::devices::virtio::generated::virtio_config::{VIRTIO_F_IN_ORDER, VIRTIO_F_VERSION_1};
-use crate::devices::virtio::generated::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
-use crate::devices::virtio::queue::{InvalidAvailIdx, Queue as VirtQueue};
+use crate::devices::virtio::generated::virtio_ring::{
+    VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC,
+};
+use crate::devices::virtio::iovec::IoVecBufferMut;
+use crate::devices::virtio::queue::{
+    FIRECRACKER_MAX_QUEUE_SIZE, InvalidAvailIdx, Queue as VirtQueue,
+};
 use crate::devices::virtio::transport::{VirtioInterrupt, VirtioInterruptType};
 use crate::devices::virtio::vsock::VsockError;
 use crate::devices::virtio::vsock::metrics::METRICS;
 use crate::impl_device_type;
 use crate::logger::{IncMetric, error, info, warn};
-use crate::vstate::memory::{ByteValued, Bytes, GuestMemoryMmap};
+use crate::vstate::memory::{ByteValued, GuestMemoryMmap};
 
 pub(crate) const RXQ_INDEX: usize = 0;
 pub(crate) const TXQ_INDEX: usize = 1;
@@ -53,9 +58,11 @@ pub(crate) const VIRTIO_VSOCK_EVENT_TRANSPORT_RESET: u32 = 0;
 ///   them available.
 /// - VIRTIO_RING_F_EVENT_IDX: the device supports used_event/avail_event notification
 ///   suppression.
+/// - VIRTIO_RING_F_INDIRECT_DESC: packet buffers may use indirect descriptor tables.
 pub(crate) const AVAIL_FEATURES: u64 = (1 << VIRTIO_F_VERSION_1 as u64)
     | (1 << VIRTIO_F_IN_ORDER as u64)
-    | (1 << VIRTIO_RING_F_EVENT_IDX as u64);
+    | (1 << VIRTIO_RING_F_EVENT_IDX as u64)
+    | (1 << VIRTIO_RING_F_INDIRECT_DESC as u64);
 
 /// Structure representing the vsock device.
 #[derive(Debug)]
@@ -255,6 +262,8 @@ where
     pub fn send_transport_reset_event(&mut self) -> Result<(), DeviceError> {
         // This is safe since we checked in the caller function that the device is activated.
         let mem = &self.device_state.active_state().unwrap().mem;
+        let mut buffer =
+            IoVecBufferMut::<FIRECRACKER_MAX_QUEUE_SIZE>::new().map_err(VsockError::IovDeque)?;
 
         let queue = &mut self.queues[EVQ_INDEX];
         let head = queue.pop()?.ok_or_else(|| {
@@ -262,10 +271,25 @@ where
             DeviceError::VsockError(VsockError::EmptyQueue)
         })?;
 
-        mem.write_obj::<u32>(VIRTIO_VSOCK_EVENT_TRANSPORT_RESET, head.addr)
-            .unwrap_or_else(|err| error!("Failed to write virtio vsock reset event: {:?}", err));
+        let result = (|| -> Result<(), VsockError> {
+            // SAFETY: event buffers are consumed sequentially and this buffer is dropped
+            // before the guest is notified that the descriptor has been used.
+            unsafe { buffer.load_descriptor_chain(mem, head)? };
+            if buffer.len() < 4 {
+                return Err(VsockError::GuestMemoryBounds);
+            }
+            buffer
+                .write_all_volatile_at(&VIRTIO_VSOCK_EVENT_TRANSPORT_RESET.to_le_bytes(), 0)
+                .map_err(vm_memory::GuestMemoryError::from)
+                .map_err(VsockError::GuestMemoryMmap)
+        })();
+        if let Err(error) = result {
+            queue.undo_pop();
+            return Err(error.into());
+        }
+        drop(buffer);
 
-        queue.add_used(head.index, head.len).unwrap_or_else(|err| {
+        queue.add_used(head.index, 4).unwrap_or_else(|err| {
             error!("Failed to add used descriptor {}: {}", head.index, err);
         });
         queue.advance_used_ring_idx();
@@ -340,6 +364,25 @@ where
             "virtio config requires a little-endian target"
         );
         self.cid.as_slice()
+    }
+
+    fn read_config(&self, offset: u64, data: &mut [u8]) {
+        let config = self.cid.to_le_bytes();
+        data.fill(0);
+        if let Ok(offset) = usize::try_from(offset)
+            && let Some(source) = config.get(offset..)
+        {
+            let len = source.len().min(data.len());
+            data[..len].copy_from_slice(&source[..len]);
+            // Reset handling requires a CID read, but not an event-queue kick.
+            // Windows uses this path; schedule the RX drain on the event loop.
+            if len > 0
+                && self.pending_event_ack
+                && let Err(error) = self.queue_events[EVQ_INDEX].write(1)
+            {
+                error!("Failed to schedule vsock reset acknowledgement: {error}");
+            }
+        }
     }
 
     fn write_config(&mut self, offset: u64, data: &[u8]) {
@@ -483,7 +526,7 @@ mod tests {
     use crate::devices::virtio::queue::VIRTQ_DESC_F_WRITE;
     use crate::devices::virtio::vsock::test_utils::{EventHandlerContext, TestContext};
     use crate::utils::byte_order;
-    use crate::vstate::memory::GuestAddress;
+    use crate::vstate::memory::{Bytes, GuestAddress};
 
     /// Guest address used for the writable evq descriptor payload in tests.
     const EVQ_PAYLOAD_GUEST_ADDR: u64 = 0x0040_2000;
@@ -580,6 +623,45 @@ mod tests {
             .read_slice(&mut buf, GuestAddress(EVQ_PAYLOAD_GUEST_ADDR))
             .unwrap();
         assert_eq!(u32::from_le_bytes(buf), VIRTIO_VSOCK_EVENT_TRANSPORT_RESET);
+        let mut cid = [0; 8];
+        ctx.device.read_config(0, &mut cid);
+        assert_eq!(u64::from_le_bytes(cid), ctx.device.cid);
+        assert_eq!(ctx.device.queue_events[EVQ_INDEX].read().unwrap(), 1);
+    }
+
+    #[test]
+    fn unrelated_config_reads_do_not_acknowledge_reset() {
+        let mut ctx = TestContext::new();
+        let mut data = [0xff; 8];
+        ctx.device.read_config(0, &mut data);
+        assert_eq!(
+            ctx.device.queue_events[EVQ_INDEX]
+                .read()
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+
+        ctx.device.pending_event_ack = true;
+        for offset in [8, u64::MAX] {
+            ctx.device.read_config(offset, &mut data);
+            assert_eq!(data, [0; 8]);
+            assert_eq!(
+                ctx.device.queue_events[EVQ_INDEX]
+                    .read()
+                    .unwrap_err()
+                    .kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        }
+        ctx.device.read_config(0, &mut []);
+        assert_eq!(
+            ctx.device.queue_events[EVQ_INDEX]
+                .read()
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::WouldBlock
+        );
     }
 
     #[test]
@@ -598,6 +680,70 @@ mod tests {
             !ctx.device.pending_event_ack,
             "flag must not be armed if the event was never published"
         );
+    }
+
+    #[test]
+    fn transport_reset_uses_indirect_event_buffers() {
+        use crate::devices::virtio::queue::{Descriptor, VIRTQ_DESC_F_INDIRECT, VIRTQ_DESC_F_NEXT};
+
+        let test_ctx = TestContext::new();
+        let mut ctx = test_ctx.create_event_handler_context();
+        ctx.mock_activate(test_ctx.mem.clone(), test_ctx.interrupt.clone());
+        publish_evq_descriptor(&mut ctx);
+        let table = GuestAddress(EVQ_PAYLOAD_GUEST_ADDR + 0x100);
+        ctx.guest_evvq.dtable[0].set(table.0, 32, VIRTQ_DESC_F_INDIRECT, 0);
+        for index in 0..2 {
+            test_ctx
+                .mem
+                .write_obj(
+                    Descriptor {
+                        addr: EVQ_PAYLOAD_GUEST_ADDR + index * 2,
+                        len: 2,
+                        flags: VIRTQ_DESC_F_WRITE | if index == 0 { VIRTQ_DESC_F_NEXT } else { 0 },
+                        next: 1,
+                    },
+                    GuestAddress(table.0 + index * 16),
+                )
+                .unwrap();
+        }
+        test_ctx
+            .mem
+            .write_slice(&[0xff; 4], GuestAddress(EVQ_PAYLOAD_GUEST_ADDR))
+            .unwrap();
+        ctx.device.send_transport_reset_event().unwrap();
+        let mut event = [0xff; 4];
+        test_ctx
+            .mem
+            .read_slice(&mut event, GuestAddress(EVQ_PAYLOAD_GUEST_ADDR))
+            .unwrap();
+        assert_eq!(event, VIRTIO_VSOCK_EVENT_TRANSPORT_RESET.to_le_bytes());
+        assert_eq!(ctx.guest_evvq.used.ring[0].get().len, 4);
+        assert!(ctx.device.pending_event_ack);
+    }
+
+    #[test]
+    fn transport_reset_rejects_read_only_or_short_event_buffers() {
+        for (len, flags) in [(4, 0), (3, VIRTQ_DESC_F_WRITE)] {
+            let test_ctx = TestContext::new();
+            let mut ctx = test_ctx.create_event_handler_context();
+            ctx.mock_activate(test_ctx.mem.clone(), test_ctx.interrupt.clone());
+            publish_evq_descriptor(&mut ctx);
+            ctx.guest_evvq.dtable[0].set(EVQ_PAYLOAD_GUEST_ADDR, len, flags, 0);
+            test_ctx
+                .mem
+                .write_slice(&[0xff; 4], GuestAddress(EVQ_PAYLOAD_GUEST_ADDR))
+                .unwrap();
+            ctx.device.send_transport_reset_event().unwrap_err();
+            assert!(!ctx.device.pending_event_ack);
+            assert_eq!(ctx.guest_evvq.used.idx.get(), 0);
+            assert_eq!(ctx.device.queues[EVQ_INDEX].next_avail.0, 0);
+            let mut event = [0; 4];
+            test_ctx
+                .mem
+                .read_slice(&mut event, GuestAddress(EVQ_PAYLOAD_GUEST_ADDR))
+                .unwrap();
+            assert_eq!(event, [0xff; 4]);
+        }
     }
 
     #[test]
