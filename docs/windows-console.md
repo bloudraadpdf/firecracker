@@ -3,7 +3,7 @@
 The optional console adds VGA/VBE graphics, PS/2 keyboard input, a USB HID
 pointer and read-only ATAPI installation media to Firecracker. It does not
 require guest networking or vsock. See the validation matrix below and the
-[execution plan](windows.md).
+[validation record](windows-validation.md).
 
 ```text
 remote browser or VNC viewer
@@ -83,12 +83,15 @@ response follows
 
 Installation media must contain the correct virtio storage driver for the target
 Windows version. The preparation tools preserve the source media and require a
-new output directory:
+new output directory. Follow the
+[build prerequisites](../tools/windows/README.md#build-prerequisites), then run
+from the repository root:
 
 ```sh
-mise exec -- rustc --edition 2024 tools/windows/prepare-xp.rs \
+mkdir -p build/windows/console
+rustc --edition 2024 tools/windows/prepare-xp.rs \
   -o build/windows/console/prepare-xp
-mise exec -- rustc --edition 2024 tools/windows/prepare-nt6.rs \
+rustc --edition 2024 tools/windows/prepare-nt6.rs \
   -o build/windows/console/prepare-nt6
 ```
 
@@ -105,8 +108,9 @@ checks that the `I386` directory fits below VGA memory when XP's boot loader
 loads it. Rock Ridge metadata is disabled: it can enlarge that directory beyond
 the loader's buffer. The tool does not supply a product key.
 
-The NT6 tool takes an explicit `win7`, `win10`, `win11` or `server2025` profile,
-a matching pinned AMD64 Windows ISO and `virtio-win-0.1.302.iso`:
+The NT6 tool takes an explicit `win7`, `win10`, `win11`, `win11-enterprise-26h2`
+or `server2025` profile, a matching pinned AMD64 Windows ISO and
+`virtio-win-0.1.302.iso`:
 
 ```sh
 build/windows/console/prepare-nt6 win7 windows7.iso virtio-win-0.1.302.iso \
@@ -120,6 +124,13 @@ removes staging files after verification. Normal errors remove the newly created
 output directory, including partial images. Existing output directories are
 refused. Keep `media.rs` beside both standalone tool sources; it supplies shared
 checksum, boot-catalogue and cleanup helpers.
+
+`win11` selects the tested IoT Enterprise LTSC image. For standard Enterprise
+Evaluation and its 2023-signed boot files, use `win11-enterprise-26h2` with the
+[secure firmware and media procedure](../resources/firmware/cloudhv-secureboot/README.md#current-windows-installation-media).
+The accepted source digests are in
+[`profile_config`](../tools/windows/prepare-nt6.rs); the tool rejects other
+images.
 
 Use **Load driver** in Windows Setup to select that folder. The profile chooses
 the corresponding AMD64 viostor driver (`w7`, `w10`, `w11` or `2k25`); the tool
@@ -179,7 +190,7 @@ would otherwise select installation media again.
 Console snapshots contain display memory and registers, keyboard/mouse queues,
 held input, pending releases, keyboard LEDs and pending lock updates, USB
 controller/HID state, PCI state, optical transfer state and media identity. The
-current snapshot format is 27.0.0. Display state adds about 16 MiB; the bounded
+current snapshot format is 28.0.0. Display state adds about 16 MiB; the bounded
 snapshot reader accepts at most 32 MiB. The guest disk remains a separate
 artifact, as with ordinary Firecracker snapshots.
 
@@ -263,105 +274,9 @@ implemented. Port `0x92` and the i8042 output port record A20 requests, but KVM
 does not provide the CPU address wrapping used by an A20-disabled software
 emulator.
 
-## Initial installation evidence (format 21)
+## Validation
 
-The [final acceptance plan](windows.md) tracks current installation and egress
-checks, including standard Windows 11. The following results belong to the
-initial console implementation.
-
-These installations ran in native AMD64 Firecracker with the default seccomp
-filter, no guest NIC and no vsock device. BIOS guests use transitional virtio
-PCI; UEFI guests use modern virtio PCI.
-
-| Guest                                                           | Firmware     | Installed desktop | Full/differential restore | Final cold boot without optical hardware |
-| --------------------------------------------------------------- | ------------ | ----------------- | ------------------------- | ---------------------------------------- |
-| XP SP3 x86, 5.1.2600                                            | SeaBIOS PVH  | Pass              | Pass                      | Pass                                     |
-| Windows 7 Enterprise SP1 x64, 6.1.7601                          | SeaBIOS PVH  | Pass              | Pass                      | Pass                                     |
-| Windows 10 Enterprise LTSC 2021, 19044.1288                     | CloudHv UEFI | Pass              | Pass                      | Pass                                     |
-| Windows 11 IoT Enterprise LTSC 2024, 26100.1742                 | CloudHv UEFI | Pass              | Pass                      | Pass                                     |
-| Server 2025 Standard Evaluation Desktop Experience, 26100.32230 | CloudHv UEFI | Pass              | Pass                      | Pass                                     |
-
-Every row includes remote keyboard commands at the installed desktop and after
-each restore, a binary comparison between a CD-ROM file and its copy on the
-installed disk, eject detection and clean ACPI S5 shutdown. Windows 7 and
-Windows 11 also accepted mouse movement and right-click after differential
-restore. XP and Windows 7 passed additional full/differential restores during
-installation. Windows 11 and Server used the documented offline DISM step to
-persist the storage driver; `drvload` alone did not stage it in the installed
-image.
-
-RFB through SSH and authenticated WebSocket access delivered frames and keys to
-a real VM. Chrome with the vendored noVNC application displayed Windows 10 Setup
-over the SSH-forwarded WebSocket bridge. Browser key events typed `echo browser`
-into the guest command prompt; both browser and host captures showed the command
-and its output. Closing the tab left the VM running.
-
-An unchanged Windows 11 ISO also mounted as UDF and exposed its complete
-4,332,322,774-byte `install.wim`. READ TOC format 1 supplies the session
-information required for UDF recognition; no registry change or split WIM was
-needed. The prepared media tools verified each extracted file against the source
-and injected driver files.
-
-That revision passed 964 native VMM tests. It includes a real KVM MMX
-framebuffer load, slot relocation and decode changes, snapshot validation,
-failed attachment cleanup and backing retention after failed slot removal. The
-console bridge passes 11 tests and strict Clippy. AMD64 and ARM64 VMM Clippy
-checks and formatting pass. The final reset logging change also passes all 20
-reset tests with the required TAP privileges.
-
-Headless Linux passed cold boot and full/differential restore with both PCI
-transports. The existing Server 2025 Core image also booted and restored from
-both snapshot types; SAC accepted commands, reported increasing uptime and
-completed ACPI S5 shutdown. These format-21 checks supplement the earlier
-[headless networking and Tokoloshe proxy validation](windows.md).
-
-## Native viewer and minimal-device follow-up
-
-The final console exposes one PS/2 keyboard and one USB absolute HID mouse. The
-PS/2 auxiliary device, its IRQ12 and its ACPI/UEFI descriptions are removed. The
-local protocol rejects obsolete relative-pointer requests. Pointer events are
-ignored until USB is configured; keyboard input remains independent.
-
-Native macOS Screen Sharing uses the `rfb-macos` bridge mode with a private VNC
-password file over SSH. Command maps to the Windows key and Option to Alt. RFB
-3.3, 3.7 and 3.8 authentication is covered by protocol tests. Printable keypad
-digits and navigation no longer depend on the guest's Num Lock state. The bridge
-queries keyboard LEDs and pending lock transitions in the VMM; this state and
-deferred input releases survive snapshots.
-
-Format-23 revalidation uses the native musl `firecracker-usb-fifth` build and
-`cloudhv-console-usb-v4.fd` (SeaBIOS for XP). The firmware SHA-256 is
-`b5a2d30c310d2027d83ed3536ba75d28e2c507dfe5830bb1e9372a50f9c8badd`. All five
-guests enumerate one mouse, with no PS/2 pointing device. XP, Windows 7 and
-Windows 10 also have explicit one-keyboard enumeration evidence.
-
-| Guest           | Cold input | Full restore input | Differential restore input |
-| --------------- | ---------- | ------------------ | -------------------------- |
-| XP x86          | Pass       | Pass               | Pass                       |
-| Windows 7 x64   | Pass       | Pass               | Pass                       |
-| Windows 10 x64  | Pass       | Pass               | Pass                       |
-| Windows 11 x64  | Pass       | Pass               | Pass                       |
-| Server 2025 x64 | Pass       | Pass               | Pass                       |
-
-Checks cover mixed-case input, restored lock state, disconnect release, absolute
-clicks and wheel scrolling. Windows 10's three upward wheel ticks scroll nine
-lines. Server reports exact cursor coordinates `(123,234)` after full restore
-and `(777,555)` after differential restore. Numeric keypad input is verified
-with Num Lock both off and on. Server's present-device error count is zero after
-installation of the signed VMClock null package.
-
-The UEFI absolute-pointer protocol probe also passes without an OS; its
-[source and procedure](../resources/firmware/cloudhv-console/tests/README.md)
-are retained.
-
-The format-23 VMM suite passed 989 tests; the bridge passed 29 tests. AMD64 and
-ARM64 strict VMM Clippy, bridge Clippy and formatting pass. Headless Linux
-passes format-23 cold/full/differential checks with modern and transitional PCI
-transports. These results supplement the earlier installation matrix; the five
-complete installations were not repeated for the USB-only refinement.
-
-XP still reports missing drivers for VMClock (`AMZNC10C`), the ACPI GED
-(`ACPI0013`), VM generation counter (`VMGENCTR`) and VGA (`1234:1111`). These
-are separate from input-device enumeration. The tested keyboard and USB mouse
-use inbox drivers. The AWS VMClock null package has been verified on Windows 10
-and Server 2025, not XP or Windows 7.
+The [validation record](windows-validation.md) lists exact tested editions and
+installation, input, egress and restore checks. The
+[console bridge](../tools/windows/console/README.md) describes native VNC and
+browser access, authentication and the bounded input protocol.

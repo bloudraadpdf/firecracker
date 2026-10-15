@@ -74,8 +74,8 @@ git -C build/windows/console/edk2 apply --ignore-whitespace \
   "$PWD/resources/firmware/cloudhv-pvh-memory-map.patch"
 cd build/windows/console/edk2
 . edksetup.sh
-mise exec -- make -C BaseTools -j2
-mise exec -- build -p OvmfPkg/CloudHv/CloudHvConsoleX64.dsc \
+make -C BaseTools -j2
+build -p OvmfPkg/CloudHv/CloudHvConsoleX64.dsc \
   -a X64 -t GCC -b RELEASE -n 2
 ```
 
@@ -90,9 +90,11 @@ QemuVideoDxe directly; the SeaVGABIOS option ROM is for the BIOS path.
 ## Build evidence
 
 The AMD64 release profile built with two jobs and produced a 4 MiB image with
-SHA-256 `b5a2d30c310d2027d83ed3536ba75d28e2c507dfe5830bb1e9372a50f9c8badd`. The
-USB-enabled image passed the no-OS absolute-pointer probe. Keep firmware images
-immutable while their guests or snapshots exist.
+SHA-256 `730de0fca7791d7623336b5c87d53e076c941e53f1118cb3b26d91445cbf7a16`. The
+corrected image passes the UEFI memory-map probe and the recorded Windows
+installation/restore matrix. The USB profile also passes the no-OS
+absolute-pointer probe. Keep firmware images immutable while their guests or
+snapshots exist.
 
 The console platform initialiser was validated with a DEBUG serial build: the
 root bridge reported I/O `0x1000..0xffff`, EDK II identified and booted the
@@ -101,7 +103,7 @@ both channels and the CD-ROM driver. WinPE read the prepared ISO's
 `Drivers\viostor` directory. Windows Setup displayed at 800 by 600 pixels;
 remote input accepted the CD boot prompt, opened Shift+F10, ran commands and
 moved the pointer. Completed installation is tracked in the
-[console execution plan](../../../docs/windows.md).
+[validation record](../../../docs/windows-validation.md).
 
 The optical controller's single-session READ TOC format 1 response also passes
 an unchanged Windows 11 ISO test: WinPE mounts UDF and reads the full

@@ -5,6 +5,37 @@ a Windows answer ISO, a copy of the OVMF variable store, and an installation
 command. It never starts a VM. Existing output directories are rejected so
 preparation cannot overwrite a previous disk.
 
+## Build prerequisites
+
+Run the commands from the Firecracker repository root on Linux. Use upstream's
+Rustup toolchain from `rust-toolchain.toml`; it currently selects Rust 1.98.1.
+Put the Rustup proxies first on `PATH`, including when another Rust installation
+is present:
+
+```sh
+export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
+rustup show active-toolchain
+```
+
+For the standalone crates' formatting and Clippy checks, install the components:
+
+```sh
+rustup component add rustfmt clippy
+```
+
+For Windows probe builds, also install their target libraries:
+
+```sh
+rustup target add i686-pc-windows-msvc x86_64-pc-windows-msvc
+```
+
+The
+[upstream developer tool](../../CONTRIBUTING.md#contribution-quality-standards)
+provides the normal build and style checks. Each tool's README gives its build
+commands and additional dependencies.
+
+## Prepare Server Core
+
 Prerequisites: Rust, `xorriso`, `qemu-img`, the official English-US Windows
 Server 2025 ISO, a virtio-win ISO with `viostor/2k25/amd64` and
 `NetKVM/2k25/amd64`, and matching OVMF code and variable-store files. The
@@ -14,7 +45,8 @@ Windows image index must select Server Core. Check it against the ISO's
 From the worktree on the AMD64 Linux host:
 
 ```sh
-mise exec -- rustc --edition 2024 -D warnings tools/windows/prepare.rs \
+mkdir -p build/windows
+rustc --edition 2024 -D warnings tools/windows/prepare.rs \
   -o build/windows/prepare
 build/windows/prepare amd64 build/windows/server-core 1 \
   build/windows/media/windows-server-2025.iso \
@@ -88,7 +120,7 @@ The ARM TAP test encountered this shutdown after full restore; its Application
 log recorded WLMS events 100 and 101. A clean Firecracker exit is therefore
 insufficient evidence of workload success. Check all guest pass markers and the
 activation state. The activation-gated retry passed both TAP and CONNECT checks;
-see the [final validation record](../../docs/windows.md).
+see the [validation record](../../docs/windows-validation.md).
 
 ## ARM64 installation
 

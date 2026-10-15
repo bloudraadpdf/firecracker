@@ -38,6 +38,11 @@ Add these fields to the ordinary AMD64 VM configuration:
 }
 ```
 
+Use swtpm 0.10.2 with libtpms 0.10.x. The development container builds both from
+pinned sources. Older distribution packages can lack checkpoint storage locking;
+swtpm 0.10.2 also fixes a storage-header length check. See the
+[swtpm release notes](https://github.com/stefanberger/swtpm/releases/tag/v0.10.2).
+
 The TPM socket is swtpm's control socket, not its data channel. Firecracker
 passes an owned socketpair endpoint for TPM commands before entering its
 sandbox. Commands progress asynchronously and have a bounded deadline. The ACPI
@@ -58,13 +63,12 @@ update.
 
 ## Checkpoints
 
-Snapshot format 25.0.0 added the complete TPM and variable-service state. Format
-26.0.0 added the physical-presence mailbox registers. Format 27.0.0 persists the
-optional CloudHv firmware profile and stable system UUID. Earlier snapshots
-require the matching earlier VMM; there is no implicit conversion. Display
-memory, TPM state and variables remain within the bounded 32 MiB snapshot
-reader. Guest disks remain separate artifacts. Snapshots contain secrets and
-require the same access control as the VM's TPM store and guest disk.
+Snapshot format 28.0.0 includes complete TPM and variable-service state,
+physical-presence registers and the firmware profile/system UUID. Earlier
+snapshots require the matching earlier VMM; there is no implicit conversion.
+Display memory, TPM state and variables fit the bounded 32 MiB snapshot reader.
+Guest disks remain separate artifacts. Snapshots contain secrets and require the
+same access control as the VM's TPM store and guest disk.
 
 A snapshot requires quiescent device commands. If a request is in flight, resume
 the guest, let it complete, then pause and retry. Do not copy live helper files
@@ -99,61 +103,52 @@ An intentional restore also restores old revocation policy and TPM state. It
 cannot preserve a later dbx update while restoring an older matched checkpoint.
 A software TPM and host-managed variables do not protect against the host owner.
 
-## Acceptance evidence
+## Validation
 
-The TPM core has passed real swtpm startup, PCR extension, checkpoint export and
-fresh-helper import tests. A Linux guest has passed discovery, identity and PCR
-checks across cold boot, full restore and differential restore with the default
-sandbox enabled, including the combined format-25 platform build.
+The [validation matrix](windows-validation.md) records the exact installed
+Windows edition, build and snapshot format. Standard Enterprise Evaluation
+passes Secure Boot, Get-Tpm readiness, public TBS GetRandom, PCR 7 and existing
+persistent-object identity checks after cold boot and both restore types.
+Installation uses Microsoft's CA2023 boot files with the current revocation
+database and a signed viostor driver, without hardware-check bypasses or forced
+unsigned drivers. Public TPM baselines also match across the cold boot between
+TAP and CONNECT runs.
 
-The variable transport has focused malformed-frame, partial-response, deadline,
-DMA-bound, frozen-destination and RESET-isolation tests. The helper has signed
-update, tamper, replay and policy tests. A signed EFI probe has verified
-`SecureBoot=1`, `SetupMode=0`, unsigned-image rejection, TPM discovery and its
-event log. Unauthenticated PK deletion and writes to derived SecureBoot state
-were rejected. Persistent variables survived a second cold boot and a full
-restore into isolated stores. Disconnecting the helper caused the next variable
-request to stop Firecracker with exit code 1.
+BitLocker automatically encrypted the guest volume. The recorded volume is
+unlocked, protection is off and no key protectors are configured. Read-only
+validation uses its existing clear key and matching TPM state. This does not
+qualify TPM-sealed recovery or attestation. The desktop's evaluation status and
+legacy registry branding are recorded in the validation matrix; no licence or
+activation changes were made.
 
-The EFI probe runs before `ExitBootServices`. It does not establish Windows
-runtime variable access after the OS switches the firmware's virtual addresses;
-the installed-guest checks must establish that separately.
+Host and firmware regressions cover real swtpm startup, PCR extension,
+export/import; bounded variable frames, deadlines and DMA; RESET isolation;
+signed updates, tamper, replay and policy; staged restore failure; and helper
+disconnection. A signed EFI probe verifies Secure Boot, unsigned-image
+rejection, TPM discovery and the event log. Persistent variables survive cold
+boot and isolated full/differential restores. Unauthenticated PK deletion and
+writes to derived Secure Boot state are rejected. Runtime Windows checks
+exercise services after `ExitBootServices`, separately from the EFI probe.
 
-A deliberately failed restore advanced only its staging store; the original
-store stayed unchanged. The failed staging copy was discarded. A rebased
-differential restore also passed with separate stores, continued variable reads
-and clean guest shutdown.
+## Physical presence
 
-Standard Windows 11 Enterprise Evaluation 26H2 (26300.9457) subsequently reached
-its desktop. Its signed viostor driver was installed through offline DISM
-without forcing unsigned drivers. The installation media uses Microsoft's CA2023
-boot files with the current revocation database; hardware checks were not
-bypassed. On format 25, the installed guest passed Confirm-SecureBootUEFI and a
-public TBS TPM2_GetRandom command after cold boot, full restore and differential
-restore. These Windows checks exercise firmware runtime services after
-ExitBootServices. The staged device inventory reported no PnP configuration
-errors.
+The ACPI physical-presence interface uses a bounded mailbox in the existing
+variable-service page and the standard EDK II physical-presence library.
+Requests and results persist in `Tcg2PhysicalPresence`; firmware locks the
+confirmation flags against OS writes after initialisation. The mandatory TPM2
+operations are 0, 5, 14, 21 and 22. Firmware requires console confirmation
+before executing destructive operations. A privileged guest can submit requests
+and update runtime results; confirmation flags and TPM authorisation remain the
+security boundary.
 
-On format 26 with the qualified physical-presence firmware, the installed guest
-also passes Get-Tpm: present, ready, enabled, activated and owned are true,
-restart pending is false, and PPI version is 1.3. The WMI physical-presence
-transition query returns success and transition 2 (reboot). Secure Boot and the
-tracked public TBS probe pass in the same boot. This closes the previous
-missing-interface error `0x80284001`. Final format-27 restore and egress checks
-also pass, as recorded below. Windows automatically enabled BitLocker;
-validation preserves the encrypted disk and matched TPM state. At handoff the
-volume was unlocked, protection was off and no key protectors were configured.
-Read-only verification uses the volume's existing clear key; this does not
-qualify TPM-sealed BitLocker recovery or attestation.
+Malformed calls, helper failure, busy snapshots and request persistence have
+host regressions. Disposable firmware tests retain an owner NV index after
+refused clear and remove it after confirmed clear. Windows Get-Tpm and WMI
+transition queries pass. See [the validation record](windows-validation.md).
 
-On corrected secure firmware and format 27, TAP and real Tokoloshe CONNECT
-egress pass after cold boot, full restore and differential restore. All three
-phases retain Secure Boot, TPM readiness, SHA-256 PCR 7 and the existing
-persistent TPM object's public identity. Read-only checks of the encrypted disk
-verify the final stored data. The tested guest is Enterprise Evaluation 26H2,
-build 26300.9457. Its desktop reports an expired evaluation licence; the legacy
-registry ProductName reads Windows 10 Enterprise Evaluation. No activation or
-licence changes were made.
+References:
 
-The complete public TPM baseline also matches across the cold boot between the
-two runs. Both paths pass offline data verification and clean S5 shutdown.
+- [Cloud Hypervisor TPM interfaces](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/c7dd43dbc3b625a7a21b9cb84d4a49b1663e902c/docs/tpm.md).
+- [swtpm control protocol](https://github.com/stefanberger/swtpm/blob/v0.10.1/man/man3/swtpm_ioctls.pod).
+- [TCG PC Client TPM profile](https://trustedcomputinggroup.org/wp-content/uploads/PC-Client-Specific-Platform-TPM-Profile-for-TPM-2p0-v1p05p_r14_pub.pdf).
+- [EDK II variable protection](https://tianocore-docs.github.io/edk2-TrustedBootChain/release-1.00/3_TCG_Trusted_Boot_Chain_in_EDKII.html).

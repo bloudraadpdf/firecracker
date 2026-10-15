@@ -1,8 +1,9 @@
 # Secure graphical firmware
 
-This opt-in profile is under validation. It adds TPM2 measured boot and a
-required host-authenticated variable service to the graphical CloudHv profile.
-It does not provide SMM, a writable flash device or a RAM-variable fallback.
+This experimental profile passes the recorded standard Windows 11 checks. It
+adds TPM2 measured boot and a required host-authenticated variable service to
+the graphical CloudHv profile. It does not provide SMM, a writable flash device
+or a RAM-variable fallback.
 
 Use EDK2 revision `97eeb7b0901da9f7b5d98a2e6a5e8694978298e9`. Apply these
 patches in order with `git apply --ignore-whitespace`:
@@ -21,11 +22,9 @@ build -p OvmfPkg/CloudHv/CloudHvConsoleSecureX64.dsc -a X64 -t GCC -b RELEASE -n
 
 The image is `Build/CloudHvConsoleSecureX64/RELEASE_GCC/FV/CLOUDHV.fd`. Use a
 new immutable filename and record its digest before each validation run. The
-headless and ordinary console profiles keep their previous settings. Both
-`CloudHvX64.dsc` and `CloudHvConsoleX64.dsc` completed RELEASE regression builds
-with the physical-presence patch applied. The ordinary console image remained
-byte-for-byte identical to the USB-only image with SHA-256
-`b5a2d30c310d2027d83ed3536ba75d28e2c507dfe5830bb1e9372a50f9c8badd`.
+corrected secure image has SHA-256
+`ff6fc396b5eb4daa3de992611814ab9d8084c6981e6bb07a3f44d58a2b948c43`. The
+[memory-map guide](../pvh-memory-map.md) records current firmware validation.
 
 The secure profile enables `TPM2_ENABLE` and `SECURE_BOOT_ENABLE`, disables TPM1
 support, and uses `VirtMmCommunicationDxe` with `VariableSmmRuntimeDxe`. The
