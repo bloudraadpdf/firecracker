@@ -4,18 +4,8 @@ This separately built GPL-2.0-or-later helper reuses QEMU's variable service. It
 is not linked into Firecracker. The firmware uses EDK2's BSD-licensed
 `VirtMmCommunicationDxe` transport and `VariableSmmRuntimeDxe` client.
 
-Implementation checklist:
-
-- [x] Inspect upstream authentication, policy and firmware transport boundaries.
-- [x] Pin and preserve the upstream engine, notices and reproducible build
-  inputs.
-- [x] Add bounded IPC and persistent state without replacing upstream
-  authentication.
-- [x] Test authentication failures, replay, policy locks and checkpoint
-  consistency.
-- [x] Enable the console firmware client and test signed and unsigned EFI
-  images.
-- [ ] Verify standard Windows 11 installation and measured boot.
+See the [validation record](../../docs/windows-validation.md) for the tested
+Windows builds, Secure Boot checks and checkpoint results.
 
 ## Boundary
 
@@ -36,10 +26,10 @@ The TPM CRB page at `0xfed40000` is separate.
 One connected Unix stream carries serial requests. Each header is 16 bytes:
 `FCUV`, little-endian u16 version `1`, u16 opcode, u32 request ID and u32
 payload length. Replies repeat the ID and set opcode bit 15. The reply starts
-with a u32 service status: zero success, one invalid request, two invalid state,
-three persistence failure, four authentication/provisioning failure. Malformed
-frames, wrong versions and lengths above 4 MiB close the connection. No
-pipelining or unsolicited messages are allowed.
+with a u32 service status: zero success, one invalid request, two invalid state.
+Persistence or engine failures close the connection; provisioning is a separate
+host command. Malformed frames, wrong versions and lengths above 4 MiB close the
+connection. No pipelining or unsolicited messages are allowed.
 
 | Opcode | Request                                               | Successful reply after service status                     |
 | ------ | ----------------------------------------------------- | --------------------------------------------------------- |
@@ -172,12 +162,20 @@ the actual upstream engine to verify it.
 Install a C compiler, patch, pkg-config, GLib development headers and GnuTLS
 development headers. On Debian these packages are
 `build-essential patch pkg-config libglib2.0-dev libgnutls28-dev`. Build and
-test the separate workspace:
+test the separate workspace from the repository root. Follow the shared
+[Rust build prerequisites](../windows/README.md#build-prerequisites).
 
 ```sh
-mise exec -- cargo +1.98.1 test --locked --manifest-path tools/uefi-vars-helper/Cargo.toml
-mise exec -- cargo +1.98.1 clippy --locked --manifest-path tools/uefi-vars-helper/Cargo.toml --all-targets -- -D warnings
-mise exec -- cargo +1.98.1 build --release --locked --manifest-path tools/uefi-vars-helper/Cargo.toml
+cargo test --locked --manifest-path tools/uefi-vars-helper/Cargo.toml
+cargo clippy --locked --manifest-path tools/uefi-vars-helper/Cargo.toml --all-targets -- -D warnings
+cargo build --release --locked --manifest-path tools/uefi-vars-helper/Cargo.toml
+```
+
+The executable is `build/cargo_target/release/firecracker-uefi-vars`. Commands
+below use its name; add that directory to `PATH` before changing directories:
+
+```sh
+export PATH="$PWD/build/cargo_target/release:$PATH"
 ```
 
 Provision with `firecracker-uefi-vars provision STORE SEED_JSON`, then serve

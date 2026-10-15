@@ -6,9 +6,10 @@ root. It reserves its own 1-2 MiB range and the legacy BIOS area, loads the
 embedded SeaBIOS ELF segments below 1 MiB, then enters SeaBIOS.
 
 Use `pci_transport: "transitional"` and `--enable-pci`. This path was tested
-with Windows XP SP3 x86, one vCPU and 2 GiB. It does not provide VGA or an
-interactive display. See the
-[guest results](../../../docs/windows.md#legacy-windows-validation).
+with Windows XP SP3 x86, one vCPU and 2 GiB. The handoff alone provides serial
+output. Add the [installation console](../../../docs/windows-console.md) and
+SeaVGABIOS for graphics and input. See the
+[guest results](../../../docs/windows.md#legacy-windows).
 
 The source is SeaBIOS 1.17.0, commit `b52ca86e094d19b58e2304417787e96b940e39c6`.
 The patch writes ACKNOWLEDGE before DRIVER during virtio initialisation. The
@@ -19,8 +20,9 @@ the tested platform.
 ## Build on AMD64 Linux
 
 Install GCC with 32-bit compilation support, binutils, GNU make, Python 3, Rust
-1.98.1 and its `i686-unknown-linux-gnu` target. From the Firecracker root, use a
-new output directory:
+1.98.1 and its `i686-unknown-linux-gnu` target. Follow the
+[Rust build prerequisites](../../../tools/windows/README.md#build-prerequisites).
+From the Firecracker root, use a new output directory:
 
 ```sh
 mkdir -p build/windows
@@ -32,16 +34,16 @@ test "$(git -C build/windows/seabios-pvh/source rev-parse HEAD)" = \
 git -C build/windows/seabios-pvh/source apply \
   "$PWD/resources/firmware/seabios/seabios-ordered-status.patch"
 cp resources/firmware/seabios/seabios.config build/windows/seabios-pvh/source/.config
-mise exec -- make -C build/windows/seabios-pvh/source -j4 PYTHON=python3
+make -C build/windows/seabios-pvh/source -j4 PYTHON=python3
 cp resources/firmware/seabios/main.rs resources/firmware/seabios/link.ld \
   build/windows/seabios-pvh/
 cp build/windows/seabios-pvh/source/out/bios.bin.elf build/windows/seabios-pvh/bios.elf
-mise exec -- "$HOME/.cargo/bin/rustup" run 1.98.1 rustc --edition 2024 --target i686-unknown-linux-gnu \
+rustc --edition 2024 --target i686-unknown-linux-gnu \
   -D warnings -O -C panic=abort -C relocation-model=static -C linker=gcc \
   -C link-arg=-nostdlib -C link-arg=-static \
   -C link-arg=-Wl,-T,build/windows/seabios-pvh/link.ld \
   build/windows/seabios-pvh/main.rs -o build/windows/seabios-pvh/firmware32.elf
-mise exec -- objcopy -O elf64-x86-64 build/windows/seabios-pvh/firmware32.elf \
+objcopy -O elf64-x86-64 build/windows/seabios-pvh/firmware32.elf \
   build/windows/seabios-pvh/firmware.elf
 sha256sum build/windows/seabios-pvh/firmware.elf
 ```

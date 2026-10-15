@@ -176,57 +176,35 @@ Windows client opens a provider socket to that endpoint, sends
 line, then waits for status 200 before sending tunnel data. Bind the granted
 host Unix socket at `windows.vsock_4750` in the Firecracker namespace.
 
-The format-19 AMD64 test uses the actual `tokoloshe-egress` sidecar and a grant
-for one host loopback echo endpoint. Windows writes and flushes 2,097,152 random
-bytes, reads them back, then checks every byte through CONNECT. Another port
-returns 403. These checks pass after cold boot, full restore and differential
-restore, without a guest network device. Sealed proxy accounting records three
-connected tunnels, each with 2,097,152 bytes in each direction, and three policy
-denials with zero payload bytes. After S5, read-only disk inspection confirms
-the final file's recorded hash. Evidence is retained in
-`build/windows/server19/`.
+The [validation matrix](windows-validation.md) records native Firecracker tests
+with the actual `tokoloshe-egress` sidecar, allowed transfers, policy denials,
+independent byte accounting and offline storage verification after cold boot and
+both restore types. The tested Windows clients use the native Winsock provider.
+Tokoloshe's Windows job runtime is outside this scope. HTTPS certificate
+validation and proxy configuration remain application responsibilities.
 
-This validates the Windows transport and proxy protocol. The test used a native
-Winsock probe; the full Tokoloshe guest agent is not ported to Windows. HTTPS
-certificate validation and proxy configuration in Windows applications remain
-application responsibilities.
+## Conventional network egress
 
-## Conventional network egress validation
-
-Windows Server 2025 also passes a conventional IPv4 egress test with NetKVM, one
-Firecracker TAP interface and no vsock device. A separate host network namespace
-routes guest traffic over a veth pair, with source NAT on the host uplink. The
-test verifies DNS resolution, HTTPS with certificate validation and proxies
-disabled, and byte equality for a 2 MiB bidirectional TCP echo transfer.
-Independent server accounting confirms the byte count. Windows then requests
-ACPI S5 and Firecracker exits successfully.
-
-This result covers static IPv4 configuration. It does not establish DHCP, IPv6
-or legacy Windows compatibility. Windows ARM64 also passes DNS, HTTPS and the
-same 2 MiB bidirectional TCP test through a TAP interface; see
-[ARM64 validation](windows-arm64.md).
+The TAP tests use NetKVM, a separate host network namespace, a veth route and
+source NAT on the host uplink. They verify static IPv4 configuration, name
+resolution and a byte-checked 2 MiB TCP echo transfer. Modern guest probes also
+verify HTTPS certificates with proxies disabled; XP uses HTTP. The results do
+not establish DHCP or IPv6 support. See the
+[egress tools](../tools/windows/egress/README.md) for setup and offline checks,
+and the separate [ARM64 validation](windows-arm64.md) for that architecture.
 
 ## Snapshots
 
-This branch uses snapshot format 27.0.0, which persists the optional CloudHv
-firmware profile and system UUID. Format 26.0.0 added the physical-presence
-mailbox. Format 25.0.0 added optional TPM and authenticated firmware variable
-state; see [the secure platform](windows-secure-boot.md). Format 23.0.0 added
-USB controller/HID state, keyboard lock tracking and pending input releases.
-Format 21.0.0 introduced the console devices. Console and headless revalidation
-for the current format is tracked in the [console plan](windows.md). The
-preceding reviewed format 20.0.0 added CET control and shadow-stack state for
-guests that expose those CPU features. A native vCPU regression verifies nonzero
-registers across two fresh restores. Server 2025, Windows 10 and Windows 11 pass
-the format-20 cold/full/differential TAP and real Tokoloshe CONNECT regressions.
-Windows 7 passes storage, DNS, validated HTTPS and TAP; XP passes storage, HTTP
-and TAP. Both pass cold/full/differential restore and clean shutdown. ARM64
-passes the same format-20 TAP and CONNECT checks, including clean shutdown. The
-format preserves modern and transitional PCI transport state, including the
-legacy network I/O BAR size. Earlier snapshot formats are incompatible. It saves
-the ACPI PM timer, PM1 status, enable and sleep-type registers, CMOS registers,
-RTC divider phase, pending interrupt flags and guest wall-clock adjustment. The
-RTC follows host UTC plus the saved guest adjustment, including elapsed time
+This branch uses snapshot format 28.0.0. It saves the selected PCI transport,
+firmware profile and system UUID, CET/Hyper-V processor state, ACPI timer/power
+registers, CMOS/RTC state and optional console, TPM and authenticated-variable
+checkpoints. Restore rejects incompatible formats; use the matching earlier VMM
+for older snapshots. The optical media path is part of console configuration and
+is not duplicated in the optical device checkpoint. See
+[the validation record](windows-validation.md) and
+[the secure platform](windows-secure-boot.md).
+
+The RTC follows host UTC plus the saved guest adjustment, including elapsed time
 while the VM is stopped. It provides periodic, alarm and update interrupts on
 reserved IRQ 8. Register C reads acknowledge pending flags.
 
@@ -251,34 +229,14 @@ than writing its read-only counter MSR.
 
 The x86 FADT publishes conventional ACPI fixed hardware and an aligned FACS. The
 PM timer resumes from its saved count and signals SCI when an enabled
-timer-status event is pending. Register/event restore tests and Windows Server
-2025 full restore pass. The restored authenticated session reads its saved file
-and requests S5. Server 2025 also passes format-19 cold, full and differential
-workloads for storage, TAP and Tokoloshe CONNECT, then requests S5. ARM64
-retains hardware-reduced ACPI; see its separate
-[validation results](windows-arm64.md#egress-and-validation).
-
-## Validated behaviour
-
-Windows Server 2025 Standard Evaluation Core, build 26100.32230, was tested with
-two vCPUs and 4 GiB RAM on an AMD64 Linux/KVM host:
-
-- Boot and authenticated commands through SAC.
-- Boot with synchronous and asynchronous block I/O; file writes and reads
-  through the authenticated command session.
-- NetKVM networking through an isolated TAP, with guest-to-host ping.
-- Full snapshot restore and differential snapshot rebase/restore, preserving the
-  command session, stored file and network traffic.
-- A new full snapshot after differential restore.
-- ACPI S5 shutdown and a guest-requested reboot followed by a new process.
-
-Linux 6.18.38 also passed direct boot, full restore and differential restore
-with `hyperv: false`. Focused unit tests, Clippy and the musl release build
-pass. The full upstream integration suite has not been run.
+timer-status event is pending. ARM64 retains hardware-reduced ACPI; see its
+separate [validation results](windows-arm64.md#egress-and-validation).
 
 Snapshots do not include the disk. Preserve a matching disk when retaining or
 copying a memory snapshot. Do not restore old memory against a disk that has
 since changed. Only one VM may write the disk at a time.
+
+## Guest clock policy
 
 Firecracker's virtual CMOS clock uses UTC. Prepare modern Windows images with a
 matching RTC policy: use the UTC timezone (`tzutil /s "UTC"`), or retain the
@@ -291,97 +249,29 @@ AWS documents the
 These are image configuration choices; Firecracker does not change the guest's
 timezone or registry.
 
-The final Server test had Pacific time selected and no `RealTimeIsUniversal`
-value. Its cold UTC was seven hours ahead of the host. Windows System event 1
-records a correction of -25,194,836 ms, and Time-Service event 35 identifies
-`time.windows.com` as the NTP source. This explains the apparent seven-hour
-change during the TAP run. The subsequent no-NIC cold boot used Local CMOS Clock
-and reproduced the initial offset. Host timestamps, rather than the guest wall
-clock, identify each network-test phase. The diagnostic did not change guest
-time settings.
+Windows images with a local RTC policy can report a timezone offset after cold
+boot. Network time synchronisation can later change that clock. Use host
+timestamps to identify validation phases independently of guest wall time.
 
-A controlled Windows 10 AMD64 check with Hyper-V enabled and the format-23
-`firecracker-usb-fifth` binary distinguishes pause from restore. During a
-30.014-second pause, UTC and the performance counter both advanced. Full restore
-with the default `clock_realtime: false` omitted the 33.977-second stopped
-interval. Differential restore with `clock_realtime: true` compensated its
-31.018-second stopped interval in both clocks. The performance-counter frequency
-was 10 MHz. Evidence is retained in `build/windows/acceptance23/clock`.
-
-That guest reported `Pacific Standard Time` and had no `RealTimeIsUniversal`
-registry value; its initial UTC offset of seven hours was separate from restore
-accounting. The test did not change the timezone. These short measurements do
-not establish long-running clock accuracy or functional VMClock-driver use. No
-VMBus time synchronisation service is provided. Cross-host migration and
+The Windows 10 clock check distinguishes pause from restore: UTC and the
+performance counter advance during pause. With `clock_realtime: false`, restore
+omits the stopped interval; with `clock_realtime: true`, it compensates that
+interval. These short measurements do not establish long-term accuracy. No VMBus
+time synchronisation service is provided. Cross-host migration and
 firmware-stage snapshots remain unvalidated.
 
-These Toets AMD64 goldens pass with four vCPUs, 8 GiB, SeaBIOS and transitional
-PCI:
+## Legacy Windows
 
-| Guest                               | Build      |
-| ----------------------------------- | ---------- |
-| Windows 10 Enterprise LTSC 2021     | 19044.7725 |
-| Windows 11 IoT Enterprise LTSC 2024 | 26100.1742 |
+Use the [validation matrix](windows-validation.md) for exact tested builds. XP
+SP3 x86 uses SeaBIOS, transitional PCI and one vCPU with its uniprocessor HAL.
+Its checks do not establish SMP or HTTPS support. Windows 7 SP1 x64 uses a
+GPT/EFI disk with the corrected CloudHv firmware. Both require drivers matched
+to their OS version. Contemporary virtio-win media has no compatible Viosock
+package; the tested historical drivers require the documented receive, reset and
+DMA fixes. These packages are test-signed. Build and installation instructions
+are in [legacy-vsock](../tools/windows/legacy-vsock/README.md).
 
-Cold boot, full restore and differential restore each pass flushed storage, DNS,
-certificate-validated TLS 1.2 HTTPS and a byte-checked 2 MiB TAP transfer. A
-separate NIC-free run passes the real Tokoloshe CONNECT proxy over Viosock in
-all three stages: three allowed 2 MiB transfers each way and three policy
-denials with zero bytes. Each run ends with guest S5 and Firecracker exit zero.
-Offline checks verify guest transcripts, absence of hibernation and the final
-disk hashes.
-
-This boot requires preserving PCI MSI-X configuration across virtio resets;
-reset clears virtio event assignments and pending state, while retaining the
-MSI-X table, mask and enable bits. No guest driver or kernel patch is used.
-
-Progress and test evidence are tracked in [the implementation plan](windows.md).
-
-## Legacy Windows validation
-
-Fresh Windows XP SP3 32-bit and Windows 7 Enterprise SP1 64-bit installations
-made with Toets' pinned media pass Firecracker cold boot, storage, TAP egress,
-full and differential restore, real Tokoloshe CONNECT over vsock, and ACPI S5
-shutdown with format 20 and default seccomp:
-
-| Guest             | Firecracker result                                                                                                     | Remaining platform requirements                                                           |
-| ----------------- | ---------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| XP SP3 x86        | Passes with SeaBIOS, transitional PCI and one vCPU using its UP HAL.                                                   | HTTPS and SMP are not established by this test. Viosock uses a custom test-signed driver. |
-| Windows 7 SP1 x64 | Boots, writes files, passes TAP egress after cold boot and full/differential restores, and shuts down through ACPI S5. | Viosock uses a custom test-signed driver.                                                 |
-
-Windows 7 is tested on a separate GPT/EFI copy of its installed disk. The
-original `0xc0000225` loader error occurs with QEMU and OVMF 2025.11, both with
-and without VGA. A debugger trace isolates it to a 512 KiB allocation at address
-zero: firmware advertises that page as free but rejects the allocation. The
-CloudHv firmware patch now reserves the page. The original, unmodified Windows 7
-loader passes that stage in Firecracker. Windows Server 2025 also passes boot,
-console login, file write/read and S5 shutdown with the changed firmware.
-Restoring UGA in an earlier experiment did not resolve the allocation failure.
-
-The kernel's next failure is `MISMATCHED_HAL` (`0x79`, parameter 6): its HAL
-requires the MADT `PCAT_COMPAT` flag. Firecracker now declares the dual 8259
-controllers that it already creates in KVM. That check passes. The conventional
-FADT now publishes the PM timer, and unmodified Windows reads port `0x608`. It
-next stops with `HAL_INITIALIZATION_FAILED` (`0x5c`, parameters
-`0x10b, 1, 0, 0`) while waiting for an RTC clock interrupt. The RTC
-implementation passes this stage. The next `0x7b` failure comes from the PCI
-root bus failing resource allocation: its I/O window overlaps the active RTC.
-The PCI aperture now starts at `0x1000`, above the fixed platform ports. ECAM is
-reserved by a separate PNP0C02 motherboard device with a unique ID. A separate
-KVM regression also found and corrected lost legacy interrupt routes when
-installing device/MSI routes.
-
-The production build with default seccomp boots Windows 7 without guest kernel
-patches. A startup command records Windows version `6.1.7601`, the `win7\build`
-identity, the process list and a file-write marker. It then requests shutdown;
-Firecracker records ACPI S5 and exits zero. The proof file is recovered from the
-stopped disk with a read-only mount. Evidence is in
-`build/windows/legacy/win7-storage-boot/userspace-proof.txt` and the matching
-`pci-io-vmm.log`.
-
-Windows 7 also passes DNS resolution, direct TLS 1.2 HTTPS with certificate
-validation and a 2 MiB TCP payload-equality test through NetKVM and TAP. Fresh
-SP1 media needs a current trust root for this HTTPS test. The tested
+Windows 7's TLS test requires a current trusted root. The tested
 `www.microsoft.com` chain terminates at DigiCert Global Root G2. Download the
 [official DER certificate](https://cacerts.digicert.com/DigiCertGlobalRootG2.crt)
 and require SHA-256
@@ -389,31 +279,17 @@ and require SHA-256
 copying it into the isolated guest. In an elevated command prompt, run
 `certutil -addstore -f Root C:\DigiCertGlobalRootG2.crt`.
 [DigiCert's root catalogue](https://knowledge.digicert.com/general-information/digicert-trusted-root-authority-certificates)
-identifies this root. Certificate validation remains enabled; this guest
-trust-store prerequisite is separate from Firecracker support. A changed server
-certificate chain can require a different trusted root. The
-[egress regression tools](../tools/windows/egress/README.md) preserve the TAP
-probes, bounded snapshot controller and offline result checks. The checks pass
-after cold boot, a full format-20 snapshot restored in a new Firecracker
-process, and a differential snapshot rebased onto the full memory file and
-restored in another process. Each stage opens fresh connections; this does not
-test preserving live TCP sessions. The host independently records each complete
-echo transfer. Evidence is retained under `build/windows/win7-reset20/run1`.
+identifies this root. Certificate validation remains enabled. A changed server
+chain can require a different trusted root; this guest trust-store prerequisite
+is separate from Firecracker support.
 
-XP checks a flushed 65,536-byte patterned file, direct HTTP 200 and a 2 MiB TCP
-echo after cold boot and both restore types. Read-only inspection checks the
-final file after S5. Evidence is in `build/windows/xp-reset20/run2`. Both legacy
-guests also pass the real Tokoloshe HTTP CONNECT proxy test without a guest NIC,
-after cold boot and both restore types. Each stage verifies 2 MiB in each
-direction, policy denial with zero payload, and flushed storage. Sealed proxy
-accounting and offline disk inspection confirm the guest results. The current
-driver ISO has no compatible package; these tests use custom builds from
-historical Viosock source with receive, reset event and DMA completion fixes,
-plus XP build support. The packages are test-signed, not production-signed.
-Reproducible patches and build instructions are in
-[legacy-vsock](../tools/windows/legacy-vsock/README.md); runtime evidence is in
-the [validation record](windows.md). These results do not establish that
-Tokoloshe can replace Toets' QEMU backend for its legacy Windows jobs.
+The [egress regression tools](../tools/windows/egress/README.md) open fresh
+connections after each restore; they do not test preservation of live TCP
+sessions. XP also verifies a flushed 65,536-byte patterned file. CONNECT runs
+omit the guest NIC and check allowed byte transfers, zero-payload denials and
+flushed storage. Read-only disk checks and host accounting verify the guest
+reports. These platform results do not establish that Tokoloshe can replace
+Toets' QEMU backend for Windows jobs.
 
 ### Transitional PCI platform
 
