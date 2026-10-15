@@ -40,6 +40,24 @@ const OEM_REVISION: u32 = 0;
 // guest know that it runs within a Firecracker microVM.
 const HYPERVISOR_VENDOR_ID: [u8; 8] = *b"FIRECKVM";
 
+#[derive(Clone, Copy)]
+pub(crate) enum DeviceScope {
+    SystemBus,
+    #[cfg(target_arch = "x86_64")]
+    PciRoot,
+}
+
+impl DeviceScope {
+    pub(crate) fn device_path(self, name: &str) -> Result<aml::Path, aml::AmlError> {
+        let parent = match self {
+            Self::SystemBus => "_SB_",
+            #[cfg(target_arch = "x86_64")]
+            Self::PciRoot => "_SB_.PC00",
+        };
+        format!("{parent}.{name}").as_str().try_into()
+    }
+}
+
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 /// Error type for ACPI related operations
 pub enum AcpiError {
@@ -252,6 +270,57 @@ mod tests {
     use crate::vstate::vm::tests::setup_vm_with_memory;
 
     struct MockSdt(Vec<u8>);
+
+    #[test]
+    fn platform_interrupt_devices_follow_pci_enumeration() {
+        use crate::builder::tests::default_vmm_with_pci_mode;
+        use crate::pci::PciTransportMode;
+
+        for (vmm, parent) in [
+            (default_vmm(), &b"\x2e_SB_"[..]),
+            (
+                default_vmm_with_pci_mode(PciTransportMode::Modern),
+                &b"\x2e_SB_"[..],
+            ),
+            (
+                default_vmm_with_pci_mode(PciTransportMode::Transitional),
+                &b"\x2f\x03_SB_PC00"[..],
+            ),
+        ] {
+            let mut bytes = Vec::new();
+            vmm.device_manager.append_aml_bytes(&mut bytes).unwrap();
+            super::setup_arch_dsdt(&mut bytes, &vmm.device_manager).unwrap();
+            for (name, irq) in [
+                (b"VCLK", 6u32),
+                (b"GED_", 5),
+                (b"RTC0", 8),
+                (b"COM1", 4),
+                (b"PS2_", 1),
+            ] {
+                let path = [parent, name].concat();
+                let start = bytes
+                    .windows(path.len())
+                    .position(|value| value == path)
+                    .unwrap_or_else(|| panic!("missing device path {path:?}"));
+                let device = bytes[..start]
+                    .windows(2)
+                    .rposition(|value| value == [0x5b, 0x82])
+                    .unwrap();
+                let length_start = device + 2;
+                let lead = bytes[length_start];
+                let follow = usize::from(lead >> 6);
+                let mut length = usize::from(lead & if follow == 0 { 0x3f } else { 0x0f });
+                for i in 0..follow {
+                    length |= usize::from(bytes[length_start + 1 + i]) << (4 + 8 * i);
+                }
+                let body = &bytes[start + path.len()..length_start + length];
+                let resource = [&[0x89, 6, 0, 3, 1][..], &irq.to_le_bytes()].concat();
+                assert!(body.windows(resource.len()).any(|value| value == resource));
+            }
+            let notify = b"\x86\\\x2e_SB_VGEN\x0a\x80";
+            assert!(bytes.windows(notify.len()).any(|value| value == notify));
+        }
+    }
 
     #[test]
     fn x86_root_tables_include_32_bit_addresses() {
