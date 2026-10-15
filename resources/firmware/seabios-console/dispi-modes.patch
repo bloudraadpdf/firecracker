@@ -1,0 +1,12 @@
+--- a/vgasrc/bochsvga.c
++++ b/vgasrc/bochsvga.c
+@@ -367,7 +367,8 @@
+         u32 mem = (height * DIV_ROUND_UP(width * vga_bpp(&m->info), 8)
+                    * stdvga_vram_ratio(&m->info));
+ 
+-        if (width > max_xres || depth > max_bpp || mem > totalmem) {
++        if (depth == 4 || width > max_xres || depth > max_bpp
++            || mem > totalmem) {
+             dprintf(1, "Removing mode %x\n", GET_GLOBAL(m->mode));
+             SET_VGA(m->mode, 0xffff);
+         }

@@ -65,6 +65,9 @@ use crate::{EventManager, Vmm, VmmError};
 /// Errors associated with starting the instance.
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum StartMicrovmError {
+    /// Graphical console configuration or attachment failed: {0}
+    #[cfg(target_arch = "x86_64")]
+    Console(std::io::Error),
     /// The transitional PCI platform requires --enable-pci.
     PciDisabled,
     /// Unable to attach block device to Vmm: {0}
@@ -151,6 +154,16 @@ pub fn build_microvm_for_boot(
     if !vm_resources.pci_enabled && !vm_resources.machine_config.pci_transport.is_modern() {
         return Err(StartMicrovmError::PciDisabled);
     }
+    #[cfg(target_arch = "x86_64")]
+    if vm_resources.console.is_some()
+        && (!vm_resources.pci_enabled
+            || vm_resources.machine_config.huge_pages.is_hugetlbfs()
+            || vm_resources.machine_config.mem_size_mib < 64)
+    {
+        return Err(StartMicrovmError::Console(std::io::Error::other(
+            "console requires PCI, at least 64 MiB and non-hugetlbfs memory",
+        )));
+    }
     // Timestamp for measuring microVM boot duration.
     let request_ts = TimestampUs::default();
 
@@ -182,6 +195,22 @@ pub fn build_microvm_for_boot(
     // Build custom CPU config if a custom template is provided.
     let mut vm = KvmVm::new(kvm)?;
     vm.resource_allocator().pci_transport = vm_resources.machine_config.pci_transport;
+    #[cfg(target_arch = "x86_64")]
+    if vm_resources.console.is_some() {
+        vm.resource_allocator().system_memory = vm_allocator::AddressAllocator::new(
+            crate::arch::x86_64::layout::CONSOLE_SYSTEM_MEM_START,
+            crate::arch::x86_64::layout::CONSOLE_SYSTEM_MEM_SIZE,
+        )
+        .map_err(|error| StartMicrovmError::Console(std::io::Error::other(error.to_string())))?;
+        for irq in [12, 14] {
+            vm.resource_allocator()
+                .gsi_legacy_allocator
+                .allocate_id_at(irq)
+                .map_err(|error| {
+                    StartMicrovmError::Console(std::io::Error::other(error.to_string()))
+                })?;
+        }
+    }
     let mut vcpus = vm.create_vcpus(vm_resources.machine_config.vcpu_count)?;
     vm.register_dram_memory_regions(guest_memory)?;
 
@@ -308,6 +337,12 @@ pub fn build_microvm_for_boot(
         vm_resources.serial_rate_limiter(),
     )?;
 
+    #[cfg(target_arch = "x86_64")]
+    if let Some(console) = &vm_resources.console {
+        device_manager
+            .attach_console(&kvm_vm, console, None)
+            .map_err(StartMicrovmError::Console)?;
+    }
     device_manager.attach_vmgenid_device(&kvm_vm)?;
     device_manager.attach_vmclock_device(&kvm_vm)?;
 
@@ -329,6 +364,11 @@ pub fn build_microvm_for_boot(
         &initrd,
         boot_cmdline,
     )?;
+
+    #[cfg(target_arch = "x86_64")]
+    let console_registration = device_manager
+        .register_console(event_manager)
+        .map_err(StartMicrovmError::Console)?;
 
     let vmm = Vmm {
         instance_info: instance_info.clone(),
@@ -368,6 +408,8 @@ pub fn build_microvm_for_boot(
         debug!("No GDB socket provided not starting gdb server.");
     }
 
+    #[cfg(target_arch = "x86_64")]
+    console_registration.commit();
     event_manager.add_subscriber(vmm.clone());
 
     Ok(vmm)
@@ -531,6 +573,11 @@ pub fn build_microvm_from_snapshot(
     let mut device_manager =
         DeviceManager::restore(device_ctor_args, &microvm_state.device_states)?;
 
+    #[cfg(target_arch = "x86_64")]
+    let console_registration = device_manager
+        .register_console(event_manager)
+        .map_err(StartMicrovmError::Console)?;
+
     let vmm = Vmm {
         instance_info: instance_info.clone(),
         machine_config: vm_resources.machine_config.clone(),
@@ -549,6 +596,8 @@ pub fn build_microvm_from_snapshot(
     )?;
     let vmm = Arc::new(Mutex::new(vmm));
     vmm.lock().unwrap().instance_info.state = VmState::Paused;
+    #[cfg(target_arch = "x86_64")]
+    console_registration.commit();
     event_manager.add_subscriber(vmm.clone());
 
     debug!("event_end: build microvm from snapshot");

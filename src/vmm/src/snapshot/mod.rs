@@ -45,8 +45,8 @@ const SNAPSHOT_MAGIC_ID: u64 = 0x0710_1984_AAAA_0000u64;
 
 /// Maximum size in bytes for snapshot deserialization to prevent DOS attacks.
 /// Snapshots contain VM state which can be large, but we set a reasonable upper bound.
-/// This limit is 10MB which should be sufficient for any legitimate snapshot.
-const SNAPSHOT_DESERIALIZATION_BYTES_LIMIT: usize = 10_000_000;
+/// Includes the optional console's 16 MiB display memory and other device state.
+const SNAPSHOT_DESERIALIZATION_BYTES_LIMIT: usize = 32 * 1024 * 1024;
 
 /// Error definitions for the Snapshot API.
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
@@ -232,6 +232,22 @@ impl<Data: Serialize> Snapshot<Data> {
 mod tests {
     use super::*;
     use crate::persist::MicrovmState;
+
+    #[test]
+    fn console_sized_snapshot_round_trip_and_size_limit() {
+        let data: Vec<u8> = (0..=255).cycle().take(16 * 1024 * 1024).collect();
+        let mut encoded = Vec::new();
+        Snapshot::new(&data).save(&mut encoded).unwrap();
+        let restored = Snapshot::<Vec<u8>>::load(&mut encoded.as_slice()).unwrap();
+        assert_eq!(restored.data, data);
+
+        let mut oversized =
+            std::io::repeat(0).take((SNAPSHOT_DESERIALIZATION_BYTES_LIMIT + 1) as u64);
+        assert!(matches!(
+            Snapshot::<Vec<u8>>::load(&mut oversized),
+            Err(SnapshotError::SizeLimitExceeded(_))
+        ));
+    }
 
     #[test]
     fn test_snapshot_restore() {

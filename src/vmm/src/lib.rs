@@ -413,6 +413,8 @@ impl Vmm {
         // in resources.rs which is used to retrieve the config before the VM
         // is started.
         VmmConfig {
+            #[cfg(target_arch = "x86_64")]
+            console: self.device_manager.console_config(),
             balloon,
             drives: block,
             boot_source: self.boot_source_config.clone(),
