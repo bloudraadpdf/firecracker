@@ -45,7 +45,6 @@ use crate::logger::warn;
 use crate::persist::{MicrovmState, MicrovmStateError};
 use crate::resources::VmResources;
 use crate::seccomp::BpfThreadMap;
-use crate::snapshot::Persist;
 use crate::utils::{u32_mib_to_bytes, u64_to_usize};
 use crate::vmm_config::boot_source::{
     DEFAULT_KERNEL_CMDLINE, append_root_device_cmdline, build_cmdline,
@@ -65,9 +64,18 @@ use crate::{EventManager, Vmm, VmmError};
 /// Errors associated with starting the instance.
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum StartMicrovmError {
+    /// Protected UEFI variable service attachment failed: {0}
+    #[cfg(target_arch = "x86_64")]
+    UefiVars(std::io::Error),
+    /// TPM attachment failed: {0}
+    #[cfg(target_arch = "x86_64")]
+    Tpm(std::io::Error),
     /// Graphical console configuration or attachment failed: {0}
     #[cfg(target_arch = "x86_64")]
     Console(std::io::Error),
+    /// Cannot register platform events: {0}
+    #[cfg(target_arch = "x86_64")]
+    PlatformRegistration(std::io::Error),
     /// The transitional PCI platform requires --enable-pci.
     PciDisabled,
     /// Unable to attach block device to Vmm: {0}
@@ -343,6 +351,18 @@ pub fn build_microvm_for_boot(
             .attach_console(&kvm_vm, console, None)
             .map_err(StartMicrovmError::Console)?;
     }
+    #[cfg(target_arch = "x86_64")]
+    if let Some(tpm) = &vm_resources.tpm {
+        device_manager
+            .attach_tpm(&kvm_vm, tpm, None)
+            .map_err(StartMicrovmError::Tpm)?;
+    }
+    #[cfg(target_arch = "x86_64")]
+    if let Some(variables) = &vm_resources.uefi_vars {
+        device_manager
+            .attach_uefi_vars(&kvm_vm, variables, None)
+            .map_err(StartMicrovmError::UefiVars)?;
+    }
     device_manager.attach_vmgenid_device(&kvm_vm)?;
     device_manager.attach_vmclock_device(&kvm_vm)?;
 
@@ -366,9 +386,9 @@ pub fn build_microvm_for_boot(
     )?;
 
     #[cfg(target_arch = "x86_64")]
-    let console_registration = device_manager
-        .register_console(event_manager)
-        .map_err(StartMicrovmError::Console)?;
+    let platform_registration = device_manager
+        .register_platform_devices(event_manager)
+        .map_err(StartMicrovmError::PlatformRegistration)?;
 
     let vmm = Vmm {
         instance_info: instance_info.clone(),
@@ -409,7 +429,7 @@ pub fn build_microvm_for_boot(
     }
 
     #[cfg(target_arch = "x86_64")]
-    console_registration.commit();
+    platform_registration.commit();
     event_manager.add_subscriber(vmm.clone());
 
     Ok(vmm)
@@ -574,9 +594,9 @@ pub fn build_microvm_from_snapshot(
         DeviceManager::restore(device_ctor_args, &microvm_state.device_states)?;
 
     #[cfg(target_arch = "x86_64")]
-    let console_registration = device_manager
-        .register_console(event_manager)
-        .map_err(StartMicrovmError::Console)?;
+    let platform_registration = device_manager
+        .register_platform_devices(event_manager)
+        .map_err(StartMicrovmError::PlatformRegistration)?;
 
     let vmm = Vmm {
         instance_info: instance_info.clone(),
@@ -597,7 +617,7 @@ pub fn build_microvm_from_snapshot(
     let vmm = Arc::new(Mutex::new(vmm));
     vmm.lock().unwrap().instance_info.state = VmState::Paused;
     #[cfg(target_arch = "x86_64")]
-    console_registration.commit();
+    platform_registration.commit();
     event_manager.add_subscriber(vmm.clone());
 
     debug!("event_end: build microvm from snapshot");
@@ -938,6 +958,78 @@ pub(crate) mod tests {
             &Default::default(),
         );
         assert!(matches!(result, Err(StartMicrovmError::PciDisabled)));
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn console_reserves_only_attached_optical_irq_on_boot_and_restore() {
+        use std::io::Write;
+        use vmm_sys_util::tempdir::TempDir;
+
+        use crate::device_manager::DeviceRestoreArgs;
+        use crate::snapshot::Persist;
+        use crate::test_utils::mock_resources::{MockBootSourceConfig, MockVmResources};
+        use crate::vmm_config::console::ConsoleConfig;
+        use crate::vstate::resources::ResourceAllocator;
+
+        let directory = TempDir::new().unwrap();
+        let rom = TempFile::new().unwrap();
+        rom.as_file().write_all(&[0x55, 0xaa, 1]).unwrap();
+        rom.as_file().set_len(512).unwrap();
+        let iso = TempFile::new().unwrap();
+        iso.as_file().set_len(2048).unwrap();
+
+        for optical in [false, true] {
+            let mut resources: VmResources = MockVmResources::new()
+                .with_boot_source(MockBootSourceConfig::new().into())
+                .into();
+            resources.pci_enabled = true;
+            resources.console = Some(ConsoleConfig {
+                socket_path: directory.as_path().join("console.sock"),
+                vga_rom_path: rom.as_path().to_owned(),
+                optical_image_path: optical.then(|| iso.as_path().to_owned()),
+            });
+            let mut events = EventManager::new().unwrap();
+            let source = build_microvm_for_boot(
+                &InstanceInfo::default(),
+                &resources,
+                &mut events,
+                &crate::seccomp::get_empty_filters(),
+            )
+            .unwrap();
+            let (devices, allocations) = {
+                let vmm = source.lock().unwrap();
+                let vm = vmm.vm.as_kvm().unwrap();
+                let allocator = vm.resource_allocator();
+                assert!(!allocator.gsi_legacy_allocator.is_allocated(12));
+                assert_eq!(allocator.gsi_legacy_allocator.is_allocated(14), optical);
+                (vmm.device_manager.save().unwrap(), allocator.save())
+            };
+            drop(source);
+            drop(events);
+
+            let target = Arc::new(setup_vm_with_memory(mib_to_bytes(128)));
+            target.setup_irqchip().unwrap();
+            *target.resource_allocator() = ResourceAllocator::restore((), &allocations).unwrap();
+            let mut events = EventManager::new().unwrap();
+            let _restored = DeviceManager::restore(
+                DeviceRestoreArgs {
+                    mem: target.guest_memory(),
+                    vm: &target,
+                    event_manager: &mut events,
+                    vcpus_exit_evt: target.vcpus_exit_evt(),
+                    vm_resources: &mut resources,
+                    instance_id: "console-irq-test",
+                    vmgenid_notification: Default::default(),
+                    vmclock_notification: Default::default(),
+                },
+                &devices,
+            )
+            .unwrap();
+            let allocator = target.resource_allocator();
+            assert!(!allocator.gsi_legacy_allocator.is_allocated(12));
+            assert_eq!(allocator.gsi_legacy_allocator.is_allocated(14), optical);
+        }
     }
 
     pub(crate) fn default_vmm_with_pci() -> Vmm {

@@ -1343,6 +1343,10 @@ mod tests {
                 resume_vm: false,
                 network_overrides: vec![],
                 vsock_override: None,
+                #[cfg(target_arch = "x86_64")]
+                tpm: None,
+                #[cfg(target_arch = "x86_64")]
+                uefi_vars: None,
                 clock_realtime: false,
                 huge_pages: SnapshotLoadHugePageConfig::Snapshot,
                 vmclock_restore_notification: Default::default(),

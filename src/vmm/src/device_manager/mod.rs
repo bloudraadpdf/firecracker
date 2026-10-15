@@ -84,6 +84,12 @@ pub mod mmio;
 pub mod pci_mngr;
 /// Device managers (de)serialization support.
 pub mod persist;
+#[cfg(target_arch = "x86_64")]
+mod platform;
+#[cfg(target_arch = "x86_64")]
+mod tpm;
+#[cfg(target_arch = "x86_64")]
+mod uefi_vars;
 
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 /// Error while creating a new [`DeviceManager`]
@@ -130,6 +136,10 @@ pub enum FindDeviceError {
 #[derive(Debug, Default)]
 /// A manager of all peripheral devices of Firecracker
 pub struct DeviceManager {
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) uefi_vars: Option<Arc<Mutex<uefi_vars::UefiVarsDevice>>>,
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) tpm: Option<Arc<Mutex<tpm::TpmDevice>>>,
     /// Optional graphical console hardware.
     #[cfg(target_arch = "x86_64")]
     pub console: Option<console::ConsoleHardware>,
@@ -250,8 +260,6 @@ impl DeviceManager {
             )),
         };
         legacy_devices.register_devices(vm)?;
-        event_manager.add_subscriber(legacy_devices.acpi_power.clone());
-        event_manager.add_subscriber(legacy_devices.cmos.clone());
         Ok(legacy_devices)
     }
 
@@ -277,6 +285,10 @@ impl DeviceManager {
         Ok(DeviceManager {
             #[cfg(target_arch = "x86_64")]
             console: None,
+            #[cfg(target_arch = "x86_64")]
+            tpm: None,
+            #[cfg(target_arch = "x86_64")]
+            uefi_vars: None,
             mmio_platform_devices: MMIOPlatformDevices::new(),
             #[cfg(target_arch = "x86_64")]
             legacy_devices: Some(legacy_devices),
@@ -356,6 +368,8 @@ impl DeviceManager {
         }
 
         self.append_console_aml(dsdt_data)?;
+        self.append_tpm_aml(dsdt_data)?;
+        self.append_uefi_vars_aml(dsdt_data)?;
         self.acpi_devices
             .append_aml_bytes_in_scope(self.acpi_device_scope(), dsdt_data)
     }
@@ -643,6 +657,12 @@ impl Default for VirtioDevicesState {
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 /// State of devices in the system
 pub struct DevicesState {
+    /// Complete authenticated firmware store and transport state.
+    #[cfg(target_arch = "x86_64")]
+    pub uefi_vars: Option<crate::devices::uefi_vars::UefiVarsState>,
+    /// Complete quiescent TPM state; the destination socket is supplied on restore.
+    #[cfg(target_arch = "x86_64")]
+    pub tpm: Option<crate::devices::tpm::TpmState>,
     /// Optional graphical console and installation hardware.
     #[cfg(target_arch = "x86_64")]
     pub console: Option<console::ConsoleState>,
@@ -740,20 +760,36 @@ impl std::fmt::Debug for DeviceRestoreArgs<'_> {
     }
 }
 
-impl<'a> Persist<'a> for DeviceManager {
-    type State = DevicesState;
-    type ConstructorArgs = DeviceRestoreArgs<'a>;
-    type Error = DeviceManagerPersistError;
+/// A checkpoint cannot omit state when an external device cannot be captured.
+#[derive(Debug, thiserror::Error)]
+pub enum DeviceManagerSaveError {
+    /// Cannot capture TPM state: {0}
+    #[cfg(target_arch = "x86_64")]
+    #[error("Cannot capture TPM state: {0}")]
+    Tpm(std::io::Error),
+    /// Cannot capture protected firmware variables: {0}
+    #[cfg(target_arch = "x86_64")]
+    #[error("Cannot capture protected firmware variables: {0}")]
+    UefiVars(std::io::Error),
+}
 
-    fn save(&self) -> Self::State {
+impl DeviceManager {
+    /// Capture every device or fail without producing an incomplete checkpoint.
+    pub fn save(&self) -> Result<DevicesState, DeviceManagerSaveError> {
         let virtio_state = match &self.virtio_devices {
             VirtioDevices::Mmio(mmio_devices) => VirtioDevicesState::Mmio(mmio_devices.save()),
             VirtioDevices::Pci(pci_devices) => VirtioDevicesState::Pci(pci_devices.save()),
         };
 
-        DevicesState {
+        Ok(DevicesState {
             #[cfg(target_arch = "x86_64")]
             console: self.save_console(),
+            #[cfg(target_arch = "x86_64")]
+            tpm: self.snapshot_tpm().map_err(DeviceManagerSaveError::Tpm)?,
+            #[cfg(target_arch = "x86_64")]
+            uefi_vars: self
+                .snapshot_uefi_vars()
+                .map_err(DeviceManagerSaveError::UefiVars)?,
             virtio_state,
             mmio_platform_state: self.mmio_platform_devices.save(),
             acpi_state: self.acpi_devices.save(),
@@ -768,13 +804,14 @@ impl<'a> Persist<'a> for DeviceManager {
                 .legacy_devices
                 .as_ref()
                 .map(|legacy| legacy.acpi_power.lock().expect("Poisoned lock").save()),
-        }
+        })
     }
 
-    fn restore(
-        constructor_args: Self::ConstructorArgs,
-        state: &Self::State,
-    ) -> Result<Self, Self::Error> {
+    /// Restore devices before the VM is published to its caller.
+    pub fn restore(
+        constructor_args: DeviceRestoreArgs<'_>,
+        state: &DevicesState,
+    ) -> Result<Self, DeviceManagerPersistError> {
         // Setup legacy devices in case of x86
         #[cfg(target_arch = "x86_64")]
         let serial_state: Option<vm_superio::serial::SerialState> =
@@ -872,6 +909,10 @@ impl<'a> Persist<'a> for DeviceManager {
         let manager = DeviceManager {
             #[cfg(target_arch = "x86_64")]
             console: None,
+            #[cfg(target_arch = "x86_64")]
+            tpm: None,
+            #[cfg(target_arch = "x86_64")]
+            uefi_vars: None,
             mmio_platform_devices,
             #[cfg(target_arch = "x86_64")]
             legacy_devices: Some(legacy_devices),
@@ -881,6 +922,35 @@ impl<'a> Persist<'a> for DeviceManager {
         #[cfg(target_arch = "x86_64")]
         let manager = {
             let mut manager = manager;
+            if let Some(variables) = &state.uefi_vars {
+                let config = constructor_args
+                    .vm_resources
+                    .uefi_vars
+                    .as_ref()
+                    .ok_or_else(|| {
+                        std::io::Error::other("UEFI variables restore requires a dedicated backend")
+                    })?;
+                let restore = constructor_args
+                    .vm_resources
+                    .uefi_vars_restore
+                    .as_ref()
+                    .ok_or_else(|| {
+                        std::io::Error::other(
+                            "UEFI variables restore requires an expected generation",
+                        )
+                    })?;
+                manager.attach_uefi_vars(
+                    constructor_args.vm,
+                    config,
+                    Some((restore, variables)),
+                )?;
+            }
+            if let Some(tpm) = &state.tpm {
+                let config = constructor_args.vm_resources.tpm.as_ref().ok_or_else(|| {
+                    std::io::Error::other("TPM restore requires a dedicated backend socket")
+                })?;
+                manager.attach_tpm(constructor_args.vm, config, Some(tpm))?;
+            }
             if let Some(console) = &state.console {
                 manager.restore_console(constructor_args.vm, console)?;
                 constructor_args.vm_resources.console = manager.console_config();
@@ -925,6 +995,10 @@ pub(crate) mod tests {
         DeviceManager {
             #[cfg(target_arch = "x86_64")]
             console: None,
+            #[cfg(target_arch = "x86_64")]
+            tpm: None,
+            #[cfg(target_arch = "x86_64")]
+            uefi_vars: None,
             mmio_platform_devices,
             #[cfg(target_arch = "x86_64")]
             legacy_devices: Some(legacy_devices),
@@ -937,6 +1011,39 @@ pub(crate) mod tests {
         let mut device_manager = default_device_manager();
         device_manager.virtio_devices = VirtioDevices::Pci(PciDevices::new(vm).unwrap());
         device_manager
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) fn assert_legacy_registration_failure(
+        manager: DeviceManager,
+        conflict: event_manager::Events,
+        message: &str,
+    ) {
+        use crate::devices::legacy::cmos::Rtc;
+
+        let mut events = EventManager::new().unwrap();
+        let legacy = manager.legacy_devices.as_ref().unwrap();
+        let power = Arc::downgrade(&legacy.acpi_power);
+        let rtc = Arc::downgrade(&legacy.cmos);
+        let owner = events.add_subscriber(Arc::new(Mutex::new(Rtc::new().unwrap())));
+        events.event_ops(owner).unwrap().add(conflict).unwrap();
+        let error = manager
+            .register_platform_devices(&mut events)
+            .map(|_| ())
+            .unwrap_err();
+        assert!(error.to_string().contains(message));
+        legacy
+            .acpi_power
+            .lock()
+            .unwrap()
+            .check_registered()
+            .unwrap_err();
+        legacy.cmos.lock().unwrap().check_registered().unwrap_err();
+        events.event_ops(owner).unwrap().remove(conflict).unwrap();
+        drop(manager);
+        assert!(power.upgrade().is_none());
+        assert!(rtc.upgrade().is_none());
+        events.remove_subscriber(owner).unwrap();
     }
 
     #[cfg(target_arch = "aarch64")]

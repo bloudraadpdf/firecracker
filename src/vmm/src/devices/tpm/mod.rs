@@ -75,6 +75,20 @@ pub struct Tpm {
 }
 
 impl TpmState {
+    #[cfg(test)]
+    pub(crate) fn maximum_test_state() -> Self {
+        Self {
+            buffer: (0..=255).cycle().take(BUFFER_SIZE).collect(),
+            locality: true,
+            idle: false,
+            fatal: false,
+            interface_locked: true,
+            cancel_latched: false,
+            established: false,
+            blobs: backend::maximum_test_blobs(),
+        }
+    }
+
     /// Validate before connecting to or mutating the destination backend.
     pub fn validate(&self) -> io::Result<()> {
         if self.buffer.len() != BUFFER_SIZE || (self.idle && self.fatal) {

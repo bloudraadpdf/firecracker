@@ -690,14 +690,14 @@ mod tests {
 
     #[test]
     fn failed_boot_rolls_back_subscription_and_allows_socket_reuse() {
-        use super::super::console::ConsoleRegistration;
+        use super::super::platform::PlatformRegistration;
         let mut events = crate::EventManager::new().unwrap();
         let fixture = Fixture::new();
         let path = fixture._socket_path.path.clone();
         let server = Arc::new(Mutex::new(fixture.server));
         let weak = Arc::downgrade(&server);
         let fail_boot = |events: &mut crate::EventManager| -> io::Result<()> {
-            let _registration = ConsoleRegistration::new(events, Some(&server))?;
+            let _registration = PlatformRegistration::new(events, Some(&server))?;
             assert_eq!(Arc::strong_count(&server), 2);
             Err(io::Error::other("injected vCPU startup failure"))
         };
@@ -724,13 +724,13 @@ mod tests {
 
     #[test]
     fn successful_boot_commits_console_subscription() {
-        use super::super::console::ConsoleRegistration;
+        use super::super::platform::PlatformRegistration;
         let mut events = crate::EventManager::new().unwrap();
         let fixture = Fixture::new();
         let path = fixture._socket_path.path.clone();
         let server = Arc::new(Mutex::new(fixture.server));
         let weak = Arc::downgrade(&server);
-        ConsoleRegistration::new(&mut events, Some(&server))
+        PlatformRegistration::new(&mut events, Some(&server))
             .unwrap()
             .commit();
         drop(server);

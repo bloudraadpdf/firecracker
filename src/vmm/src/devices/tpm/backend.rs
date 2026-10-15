@@ -34,6 +34,24 @@ pub(super) struct Blob {
     bytes: Vec<u8>,
 }
 
+#[cfg(test)]
+pub(super) fn maximum_test_blobs() -> Vec<Blob> {
+    vec![
+        Blob {
+            flags: 0,
+            bytes: (0..=255).cycle().take(STATE_LIMIT - 2).collect(),
+        },
+        Blob {
+            flags: 0,
+            bytes: vec![1],
+        },
+        Blob {
+            flags: 0,
+            bytes: vec![2],
+        },
+    ]
+}
+
 impl std::fmt::Debug for Blob {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Blob")
