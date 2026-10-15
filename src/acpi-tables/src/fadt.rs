@@ -134,6 +134,34 @@ impl Fadt {
         self.x_dsdt = U64::new(addr);
     }
 
+    /// Configure ACPI-only fixed hardware with a 32-bit PM timer.
+    pub fn set_pm_registers(&mut self, sci: u16, event: u32, control: u32, timer: u32) {
+        self.dsdt = U32::new(u32::try_from(self.x_dsdt.get()).unwrap_or(0));
+        self.flags = U32::new((self.flags.get() & !(1 << FADT_F_HW_REDUCED_ACPI)) | (1 << 8));
+        self.sci_int = U16::new(sci);
+        self.pm1a_evt_blk = U32::new(event);
+        self.pm1a_cnt_blk = U32::new(control);
+        self.pm_tmr_blk = U32::new(timer);
+        self.pm1_evt_len = 4;
+        self.pm1_cnt_len = 2;
+        self.pm_tmr_len = 4;
+        self.x_pm1a_evt_blk = GenericAddressStructure::new(1, 32, 0, 2, event.into());
+        self.x_pm1a_cnt_blk = GenericAddressStructure::new(1, 16, 0, 2, control.into());
+        self.x_pm_tmr_blk = GenericAddressStructure::new(1, 32, 0, 3, timer.into());
+        self.p_lvl2_lat = U16::new(u16::MAX);
+        self.p_lvl3_lat = U16::new(u16::MAX);
+    }
+
+    /// Set the firmware control pointer in the supported address width.
+    pub fn set_facs(&mut self, addr: u64) {
+        self.firmware_control = U32::new(u32::try_from(addr).unwrap_or(0));
+        self.x_firmware_ctrl = U64::new(if self.firmware_control.get() == 0 {
+            addr
+        } else {
+            0
+        });
+    }
+
     /// Set the FADT flags
     pub fn set_flags(&mut self, flags: u32) {
         self.flags = U32::new(flags);

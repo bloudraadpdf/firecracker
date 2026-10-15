@@ -24,7 +24,7 @@ pub fn event_loop(
     gdb_event_receiver: Receiver<crate::gdb::GdbEvent>,
     entry_addr: GuestAddress,
 ) {
-    let target = FirecrackerTarget::new(vmm, gdb_event_receiver, entry_addr);
+    let mut target = FirecrackerTarget::new(vmm, gdb_event_receiver, entry_addr);
     let connection: Box<dyn ConnectionExt<Error = std::io::Error>> = { Box::new(connection) };
     let debugger = GdbStub::new(connection);
 
@@ -33,6 +33,10 @@ pub fn event_loop(
         .gdb_event
         .recv()
         .expect("Error getting initial gdb event");
+
+    target
+        .pause_all_vcpus()
+        .expect("Error pausing Vcpus for GDB");
 
     gdb_event_loop_thread(debugger, target);
 }
@@ -85,6 +89,9 @@ impl run_blocking::BlockingEventLoop for GdbBlockingEventLoop {
                         continue;
                     };
 
+                    target
+                        .pause_all_vcpus()
+                        .map_err(WaitForStopReasonError::Target)?;
                     trace!("Returned stop reason to gdb: {stop_response:?}");
                     return Ok(run_blocking::Event::TargetStopped(stop_response));
                 }
@@ -112,7 +119,7 @@ impl run_blocking::BlockingEventLoop for GdbBlockingEventLoop {
         // notify the target that a ctrl-c interrupt has occurred.
         let main_core = vcpuid_to_tid(0)?;
 
-        target.pause_vcpu(main_core)?;
+        target.pause_all_vcpus()?;
         target.set_paused_vcpu(main_core);
 
         let exit_reason = MultiThreadStopReason::SignalWithThread {

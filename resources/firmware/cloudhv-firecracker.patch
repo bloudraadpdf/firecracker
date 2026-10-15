@@ -1,3 +1,34 @@
+diff --git a/OvmfPkg/AcpiPlatformDxe/CloudHvAcpi.c b/OvmfPkg/AcpiPlatformDxe/CloudHvAcpi.c
+index 4629fa26036..504a8e02cdc 100644
+--- a/OvmfPkg/AcpiPlatformDxe/CloudHvAcpi.c
++++ b/OvmfPkg/AcpiPlatformDxe/CloudHvAcpi.c
+@@ -193,9 +193,26 @@ InstallCloudHvTables (
+       // Get the X-DSDT table address from the table FADT
+       //
+       if (!AsciiStrnCmp ((CHAR8 *)&CurrentTable->Signature, "FACP", 4)) {
++        EFI_ACPI_2_0_FIRMWARE_ACPI_CONTROL_STRUCTURE  *Facs;
++
+         Fadt2Table = (EFI_ACPI_2_0_FIXED_ACPI_DESCRIPTION_TABLE *)
+                      (UINTN)CurrentTablePointer;
+         DsdtTable = (EFI_ACPI_DESCRIPTION_HEADER *)(UINTN)Fadt2Table->XDsdt;
++        Facs = (EFI_ACPI_2_0_FIRMWARE_ACPI_CONTROL_STRUCTURE *)(UINTN)
++                 (Fadt2Table->XFirmwareCtrl != 0 ?
++                  Fadt2Table->XFirmwareCtrl : Fadt2Table->FirmwareCtrl);
++        if (Facs != NULL) {
++          Status = AcpiProtocol->InstallAcpiTable (
++                                   AcpiProtocol,
++                                   Facs,
++                                   Facs->Length,
++                                   &TableHandle
++                                   );
++          if (EFI_ERROR (Status)) {
++            ASSERT_EFI_ERROR (Status);
++            return Status;
++          }
++        }
+       }
+     }
+   } else {
 diff --git a/OvmfPkg/CloudHv/CloudHvX64.dsc b/OvmfPkg/CloudHv/CloudHvX64.dsc
 index e64548d9e14..bcbe0afb837 100644
 --- a/OvmfPkg/CloudHv/CloudHvX64.dsc
@@ -55,7 +86,7 @@ index c36b6f34c4a..d8228f897d5 100644
 
  /**
 diff --git a/OvmfPkg/Library/PlatformInitLib/MemDetect.c b/OvmfPkg/Library/PlatformInitLib/MemDetect.c
-index b4ba998fe12..5fee0fb7c24 100644
+index b4ba998fe12..d4d3fde4031 100644
 --- a/OvmfPkg/Library/PlatformInitLib/MemDetect.c
 +++ b/OvmfPkg/Library/PlatformInitLib/MemDetect.c
 @@ -1083,9 +1083,9 @@ PlatformAddressWidthInitialization (
@@ -70,6 +101,17 @@ index b4ba998fe12..5fee0fb7c24 100644
 
      return;
    }
+@@ -1284,6 +1284,10 @@ PlatformQemuInitializeRam (
+   //
+   QemuInitializeRamBelow1gb (PlatformInfoHob);
+
++  if (PlatformInfoHob->HostBridgeDevId == CLOUDHV_DEVICE_ID) {
++    BuildMemoryAllocationHob (0, EFI_PAGE_SIZE, EfiReservedMemoryType);
++  }
++
+   if (PlatformInfoHob->SmmSmramRequire) {
+     UINT32                TsegSize;
+     EFI_PHYSICAL_ADDRESS  TsegBase;
 diff --git a/OvmfPkg/Library/PlatformInitLib/Platform.c b/OvmfPkg/Library/PlatformInitLib/Platform.c
 index db01c45c63b..1db05ac080b 100644
 --- a/OvmfPkg/Library/PlatformInitLib/Platform.c

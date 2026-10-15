@@ -284,6 +284,14 @@ impl FirecrackerTarget {
             .stop(FcExitCode::Ok)
     }
 
+    /// Stops every Vcpu before reporting an all-stop debugger event.
+    pub fn pause_all_vcpus(&mut self) -> Result<(), GdbTargetError> {
+        for cpu_id in 0..self.vcpu_state.len() {
+            self.pause_vcpu(vcpuid_to_tid(cpu_id)?)?;
+        }
+        Ok(())
+    }
+
     /// Pauses the requested Vcpu
     pub fn pause_vcpu(&mut self, tid: Tid) -> Result<(), GdbTargetError> {
         let vcpu_state = &mut self.vcpu_state[tid_to_vcpuid(tid)];
