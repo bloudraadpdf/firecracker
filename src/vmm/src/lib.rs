@@ -122,7 +122,6 @@ use std::time::Duration;
 
 use device_manager::DeviceManager;
 use event_manager::{EventManager as BaseEventManager, EventOps, Events, MutEventSubscriber};
-use snapshot::Persist;
 use vm_memory::GuestMemoryBackend;
 use vmm_sys_util::epoll::EventSet;
 use vmm_sys_util::terminal::Terminal;
@@ -415,6 +414,10 @@ impl Vmm {
         VmmConfig {
             #[cfg(target_arch = "x86_64")]
             console: self.device_manager.console_config(),
+            #[cfg(target_arch = "x86_64")]
+            tpm: self.device_manager.tpm_config(),
+            #[cfg(target_arch = "x86_64")]
+            uefi_vars: self.device_manager.uefi_vars_config(),
             balloon,
             drives: block,
             boot_source: self.boot_source_config.clone(),
@@ -509,7 +512,10 @@ impl Vmm {
         // might modify the VirtIO transport and send an interrupt to the guest. If we save KVM
         // state before we save device state, that interrupt will never be delivered to the guest
         // upon resuming from the snapshot.
-        let device_states = self.device_manager.save();
+        let device_states = self
+            .device_manager
+            .save()
+            .map_err(MicrovmStateError::SaveDevices)?;
         let kvm_vm = self
             .vm
             .as_kvm()
@@ -803,6 +809,10 @@ impl MutEventSubscriber for Vmm {
                     let _ = kvm_vm.vcpus_exit_evt().read();
 
                     let exit_code = 'exit_code: {
+                        #[cfg(target_arch = "x86_64")]
+                        if self.device_manager.uefi_vars_failed() {
+                            break 'exit_code FcExitCode::GenericError;
+                        }
                         // Query each vcpu for their exit_code.
                         let handles = kvm_vm.vcpus_handles();
                         for handle in handles.iter() {

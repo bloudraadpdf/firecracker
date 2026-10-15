@@ -294,6 +294,7 @@ pub struct Rtc {
     start: Instant,
     base_ticks: u64,
     asserted: bool,
+    registration: Result<(), String>,
 }
 
 impl Rtc {
@@ -305,7 +306,16 @@ impl Rtc {
             start: Instant::now(),
             base_ticks: 0,
             asserted: false,
+            registration: Err("RTC timer not registered".to_owned()),
         })
+    }
+
+    pub(crate) fn check_registered(&self) -> std::io::Result<()> {
+        self.registration.clone().map_err(std::io::Error::other)
+    }
+
+    pub(crate) fn reset_registration(&mut self) {
+        self.registration = Err("RTC timer not registered".to_owned());
     }
 
     fn update(&mut self) {
@@ -407,9 +417,9 @@ impl BusDevice for Rtc {
 
 impl MutEventSubscriber for Rtc {
     fn init(&mut self, ops: &mut EventOps) {
-        if let Err(err) = ops.add(Events::new(&self.timer, EventSet::IN)) {
-            error!("Failed to register RTC timer: {err}");
-        }
+        self.registration = ops
+            .add(Events::new(&self.timer, EventSet::IN))
+            .map_err(|err| format!("Failed to register RTC timer: {err}"));
     }
 
     fn process(&mut self, event: Events, _ops: &mut EventOps) {
@@ -424,6 +434,18 @@ impl MutEventSubscriber for Rtc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rtc_registration_failure_rolls_back_platform_subscriptions() {
+        let manager = crate::device_manager::tests::default_device_manager();
+        let legacy = manager.legacy_devices.as_ref().unwrap();
+        let event = Events::new(&legacy.cmos.lock().unwrap().timer, EventSet::IN);
+        crate::device_manager::tests::assert_legacy_registration_failure(
+            manager,
+            event,
+            "Failed to register RTC timer",
+        );
+    }
 
     #[test]
     fn divider_restart_waits_half_a_second_and_exposes_uip() {

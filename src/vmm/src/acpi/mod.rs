@@ -239,8 +239,18 @@ pub(crate) fn create_acpi_tables(
         apic_addr(),
     )?;
     let mcfg_addr = writer.build_mcfg(resource_allocator, layout::PCI_MMCONFIG_START)?;
-    let xsdt_addr = writer.build_xsdt(resource_allocator, vec![fadt_addr, madt_addr, mcfg_addr])?;
-    let tables = [fadt_addr, madt_addr, mcfg_addr]
+    let mut tables = vec![fadt_addr, madt_addr, mcfg_addr];
+    if device_manager.tpm.is_some() {
+        let mut tpm = acpi_tables::Tpm2::new(
+            OEM_ID,
+            *b"FCVMTPM2",
+            OEM_REVISION,
+            crate::devices::tpm::MMIO_BASE + 0x40,
+        );
+        tables.push(writer.write_acpi_table(resource_allocator, &mut tpm)?);
+    }
+    let xsdt_addr = writer.build_xsdt(resource_allocator, tables.clone())?;
+    let tables = tables
         .into_iter()
         .map(u32::try_from)
         .collect::<Result<Vec<_>, _>>()

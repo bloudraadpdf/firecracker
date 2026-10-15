@@ -43,6 +43,7 @@ pub struct AcpiPower {
     start: Instant,
     base_ticks: u64,
     sci_asserted: bool,
+    registration: Result<(), String>,
 }
 
 impl AcpiPower {
@@ -56,9 +57,18 @@ impl AcpiPower {
             start: Instant::now(),
             base_ticks: 0,
             sci_asserted: false,
+            registration: Err("ACPI events not registered".to_owned()),
         };
         device.arm_timer();
         Ok(device)
+    }
+
+    pub(crate) fn check_registered(&self) -> std::io::Result<()> {
+        self.registration.clone().map_err(std::io::Error::other)
+    }
+
+    pub(crate) fn reset_registration(&mut self) {
+        self.registration = Err("ACPI events not registered".to_owned());
     }
 
     fn elapsed_ticks(elapsed: Duration) -> u64 {
@@ -194,9 +204,11 @@ impl MutEventSubscriber for AcpiPower {
             Events::with_data(&self.resample_evt, 1, EventSet::IN),
         ] {
             if let Err(err) = ops.add(event) {
-                error!("Failed to register ACPI event: {err}");
+                self.registration = Err(format!("Failed to register ACPI event: {err}"));
+                return;
             }
         }
+        self.registration = Ok(());
     }
 
     fn process(&mut self, event: Events, _ops: &mut EventOps) {
