@@ -441,6 +441,16 @@ pub fn build_microvm_from_snapshot(
 
     let kvm = Kvm::new(microvm_state.kvm_state.kvm_cap_modifiers.clone())
         .map_err(StartMicrovmError::Kvm)?;
+    #[cfg(target_arch = "x86_64")]
+    if microvm_state
+        .vcpu_states
+        .iter()
+        .any(|state| crate::arch::x86_64::hyperv::enabled(&state.cpuid))
+    {
+        crate::arch::x86_64::hyperv::validate_host(&kvm.fd)
+            .map_err(ConfigurationError::Hyperv)
+            .map_err(StartMicrovmError::ConfigureSystem)?;
+    }
     // Set up KVM VM and register memory regions.
     // Build custom CPU config if a custom template is provided.
     let mut vm = KvmVm::new(kvm).map_err(StartMicrovmError::KvmVm)?;

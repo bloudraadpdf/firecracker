@@ -11,6 +11,8 @@ use std::sync::{Arc, Mutex};
 use acpi_tables::aml::AmlError;
 use acpi_tables::{Aml, aml};
 
+use crate::devices::legacy::acpi::{AcpiPower, AcpiTimer, POWER_PORT, TIMER_PORT};
+use crate::devices::legacy::cmos::{CMOS_PORT, Cmos};
 use crate::devices::legacy::{I8042Device, SerialDevice};
 use crate::vstate::bus::BusError;
 use crate::vstate::vm::KvmVm;
@@ -24,14 +26,19 @@ pub enum LegacyDeviceError {
     EventFd(std::io::Error),
 }
 
-/// The `PortIODeviceManager` is a wrapper that is used for registering legacy devices
-/// on an I/O Bus. It currently manages the uart and i8042 devices.
+/// Registers serial, i8042 and ACPI power/timer devices on the I/O bus.
 #[derive(Debug)]
 pub struct PortIODeviceManager {
     // BusDevice::Serial
     pub stdio_serial: Arc<Mutex<SerialDevice>>,
     // BusDevice::I8042Device
     pub i8042: Arc<Mutex<I8042Device>>,
+    /// ACPI reset and shutdown registers.
+    pub acpi_power: Arc<Mutex<AcpiPower>>,
+    /// ACPI PM timer used by CloudHv firmware.
+    pub acpi_timer: Arc<Mutex<AcpiTimer>>,
+    /// Firmware CMOS real-time clock.
+    pub cmos: Arc<Mutex<Cmos>>,
 }
 
 impl PortIODeviceManager {
@@ -54,6 +61,9 @@ impl PortIODeviceManager {
     /// Register supported legacy devices.
     pub fn register_devices(&mut self, vm: &KvmVm) -> Result<(), LegacyDeviceError> {
         let io_bus = &vm.pio_bus;
+        io_bus.insert(self.acpi_power.clone(), POWER_PORT, 2)?;
+        io_bus.insert(self.acpi_timer.clone(), TIMER_PORT, 4)?;
+        io_bus.insert(self.cmos.clone(), CMOS_PORT, 2)?;
         io_bus.insert(
             self.stdio_serial.clone(),
             Self::SERIAL_PORT_ADDRESS,
@@ -85,6 +95,36 @@ impl PortIODeviceManager {
     }
 
     pub(crate) fn append_aml_bytes(bytes: &mut Vec<u8>) -> Result<(), AmlError> {
+        aml::Device::new(
+            "_SB_.PRES".try_into()?,
+            vec![
+                &aml::Name::new("_HID".try_into()?, &aml::EisaName::new("PNP0C02")?)?,
+                &aml::Name::new(
+                    "_CRS".try_into()?,
+                    &aml::ResourceTemplate::new(vec![
+                        &aml::Io::new(
+                            CMOS_PORT.try_into().unwrap(),
+                            CMOS_PORT.try_into().unwrap(),
+                            1,
+                            2,
+                        ),
+                        &aml::Io::new(
+                            POWER_PORT.try_into().unwrap(),
+                            POWER_PORT.try_into().unwrap(),
+                            1,
+                            2,
+                        ),
+                        &aml::Io::new(
+                            TIMER_PORT.try_into().unwrap(),
+                            TIMER_PORT.try_into().unwrap(),
+                            1,
+                            4,
+                        ),
+                    ]),
+                )?,
+            ],
+        )
+        .append_aml_bytes(bytes)?;
         // Setup COM1
         aml::Device::new(
             "_SB_.COM1".try_into()?,
@@ -171,6 +211,11 @@ mod tests {
             i8042: Arc::new(Mutex::new(
                 I8042Device::new(EventFd::new(libc::EFD_NONBLOCK).unwrap()).unwrap(),
             )),
+            acpi_power: Arc::new(Mutex::new(AcpiPower::new(
+                EventFd::new(libc::EFD_NONBLOCK).unwrap(),
+            ))),
+            acpi_timer: Arc::new(Mutex::new(AcpiTimer::default())),
+            cmos: Arc::new(Mutex::new(Cmos::default())),
         };
         ldm.register_devices(&vm).unwrap();
     }

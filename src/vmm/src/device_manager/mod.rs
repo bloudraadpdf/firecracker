@@ -221,6 +221,15 @@ impl DeviceManager {
         let mut legacy_devices = PortIODeviceManager {
             stdio_serial: serial,
             i8042,
+            acpi_power: Arc::new(Mutex::new(crate::devices::legacy::acpi::AcpiPower::new(
+                vcpus_exit_evt
+                    .try_clone()
+                    .map_err(DeviceManagerCreateError::EventFd)?,
+            ))),
+            acpi_timer: Arc::new(Mutex::new(
+                crate::devices::legacy::acpi::AcpiTimer::default(),
+            )),
+            cmos: Arc::new(Mutex::new(crate::devices::legacy::cmos::Cmos::default())),
         };
         legacy_devices.register_devices(vm)?;
         Ok(legacy_devices)
@@ -608,6 +617,9 @@ pub struct DevicesState {
     pub acpi_state: persist::ACPIDeviceManagerState,
     /// Serial device state
     pub serial_state: Option<persist::SerialState>,
+    /// Firmware RTC registers and wall-clock adjustment.
+    #[cfg(target_arch = "x86_64")]
+    pub cmos_state: Option<crate::devices::legacy::cmos::Cmos>,
 }
 
 /// Errors for (de)serialization of the devices.
@@ -701,6 +713,11 @@ impl<'a> Persist<'a> for DeviceManager {
             mmio_platform_state: self.mmio_platform_devices.save(),
             acpi_state: self.acpi_devices.save(),
             serial_state: self.serial_state(),
+            #[cfg(target_arch = "x86_64")]
+            cmos_state: self
+                .legacy_devices
+                .as_ref()
+                .map(|legacy| legacy.cmos.lock().expect("Poisoned lock").clone()),
         }
     }
 
@@ -721,6 +738,11 @@ impl<'a> Persist<'a> for DeviceManager {
             serial_state.as_ref(),
             constructor_args.vm_resources.serial_rate_limiter(),
         )?;
+
+        #[cfg(target_arch = "x86_64")]
+        if let Some(cmos) = &state.cmos_state {
+            *legacy_devices.cmos.lock().expect("Poisoned lock") = cmos.clone();
+        }
 
         // Restore MMIO platform devices
         let platform_ctor_args = MMIOPlatformDevicesConstructorArgs {
@@ -815,6 +837,13 @@ pub(crate) mod tests {
             )),
             i8042: Arc::new(Mutex::new(
                 I8042Device::new(EventFd::new(libc::EFD_NONBLOCK).unwrap()).unwrap(),
+            )),
+            acpi_power: Arc::new(Mutex::new(crate::devices::legacy::acpi::AcpiPower::new(
+                EventFd::new(libc::EFD_NONBLOCK).unwrap(),
+            ))),
+            cmos: Arc::new(Mutex::new(crate::devices::legacy::cmos::Cmos::default())),
+            acpi_timer: Arc::new(Mutex::new(
+                crate::devices::legacy::acpi::AcpiTimer::default(),
             )),
         };
 

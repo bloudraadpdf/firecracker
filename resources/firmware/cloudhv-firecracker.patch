@@ -1,0 +1,86 @@
+diff --git a/OvmfPkg/CloudHv/CloudHvX64.dsc b/OvmfPkg/CloudHv/CloudHvX64.dsc
+index e64548d9e14..bcbe0afb837 100644
+--- a/OvmfPkg/CloudHv/CloudHvX64.dsc
++++ b/OvmfPkg/CloudHv/CloudHvX64.dsc
+@@ -490,6 +490,7 @@
+ !endif
+
+ [PcdsFixedAtBuild]
++  gEfiMdeModulePkgTokenSpaceGuid.PcdPciDisableBusEnumeration|TRUE
+   gEfiMdeModulePkgTokenSpaceGuid.PcdStatusCodeMemorySize|1
+ !if $(SMM_REQUIRE) == FALSE
+   gEfiMdeModulePkgTokenSpaceGuid.PcdResetOnMemoryTypeInformationChange|FALSE
+diff --git a/OvmfPkg/Library/PciHostBridgeLib/PciHostBridgeLib.c b/OvmfPkg/Library/PciHostBridgeLib/PciHostBridgeLib.c
+index c36b6f34c4a..d8228f897d5 100644
+--- a/OvmfPkg/Library/PciHostBridgeLib/PciHostBridgeLib.c
++++ b/OvmfPkg/Library/PciHostBridgeLib/PciHostBridgeLib.c
+@@ -7,6 +7,7 @@
+   SPDX-License-Identifier: BSD-2-Clause-Patent
+
+ **/
++#include <IndustryStandard/CloudHv.h>
+ #include <IndustryStandard/Pci.h>                     // PCI_MAX_BUS
+ #include <IndustryStandard/Q35MchIch9.h>              // INTEL_Q35_MCH_DEVIC...
+ #include <Library/BaseMemoryLib.h>                    // ZeroMem()
+@@ -38,6 +39,8 @@ PciHostBridgeGetRootBridges (
+   PCI_ROOT_BRIDGE_APERTURE  Io;
+   PCI_ROOT_BRIDGE_APERTURE  Mem;
+   PCI_ROOT_BRIDGE_APERTURE  MemAbove4G;
++  PCI_ROOT_BRIDGE           *RootBridges;
++  UINTN                     Index;
+
+   ZeroMem (&Io, sizeof (Io));
+   ZeroMem (&Mem, sizeof (Mem));
+@@ -66,7 +69,7 @@ PciHostBridgeGetRootBridges (
+   Mem.Base  = PcdGet64 (PcdPciMmio32Base);
+   Mem.Limit = PcdGet64 (PcdPciMmio32Base) + (PcdGet64 (PcdPciMmio32Size) - 1);
+
+-  return PciHostBridgeUtilityGetRootBridges (
++  RootBridges = PciHostBridgeUtilityGetRootBridges (
+            Count,
+            Attributes,
+            AllocationAttributes,
+@@ -80,6 +83,13 @@ PciHostBridgeGetRootBridges (
+            &mNonExistAperture,
+            &mNonExistAperture
+            );
++  if ((RootBridges != NULL) &&
++      (PcdGet16 (PcdOvmfHostBridgePciDevId) == CLOUDHV_DEVICE_ID)) {
++    for (Index = 0; Index < *Count; Index++) {
++      RootBridges[Index].ResourceAssigned = TRUE;
++    }
++  }
++  return RootBridges;
+ }
+
+ /**
+diff --git a/OvmfPkg/Library/PlatformInitLib/MemDetect.c b/OvmfPkg/Library/PlatformInitLib/MemDetect.c
+index b4ba998fe12..5fee0fb7c24 100644
+--- a/OvmfPkg/Library/PlatformInitLib/MemDetect.c
++++ b/OvmfPkg/Library/PlatformInitLib/MemDetect.c
+@@ -1083,9 +1083,9 @@ PlatformAddressWidthInitialization (
+       PlatformInfoHob->FirstNonAddress = BASE_4GB + PlatformGetSystemMemorySizeAbove4gb ();
+     }
+
+-    PlatformInfoHob->PcdPciMmio64Base = PlatformInfoHob->FirstNonAddress;
+     PlatformAddressWidthFromCpuid (PlatformInfoHob, FALSE);
+-    PlatformInfoHob->PcdPciMmio64Size = PlatformInfoHob->FirstNonAddress - PlatformInfoHob->PcdPciMmio64Base;
++    PlatformInfoHob->PcdPciMmio64Base = 0x4000000000ULL;
++    PlatformInfoHob->PcdPciMmio64Size = 0x4000000000ULL;
+
+     return;
+   }
+diff --git a/OvmfPkg/Library/PlatformInitLib/Platform.c b/OvmfPkg/Library/PlatformInitLib/Platform.c
+index db01c45c63b..1db05ac080b 100644
+--- a/OvmfPkg/Library/PlatformInitLib/Platform.c
++++ b/OvmfPkg/Library/PlatformInitLib/Platform.c
+@@ -182,6 +182,9 @@ PlatformMemMapInitialization (
+     ASSERT (PlatformInfoHob->LowMemory <= PciExBarBase);
+     ASSERT (PciExBarBase <= MAX_UINT32 - SIZE_256MB);
+     PciSize = (UINT32)(PciExBarBase - PciBase);
++  } else if (PlatformInfoHob->HostBridgeDevId == CLOUDHV_DEVICE_ID) {
++    PciBase = 0xC0001000;
++    PciSize = 0xEEC00000 - PciBase;
+   } else {
+     ASSERT (PlatformInfoHob->LowMemory <= PlatformInfoHob->Uc32Base);
+     PciSize = 0xFC000000 - PciBase;
