@@ -55,6 +55,19 @@ pub struct ResourceAllocator {
     pub system_memory: AddressAllocator,
 }
 
+fn legacy_gsi_allocator() -> IdAllocator {
+    let allocator = IdAllocator::new(arch::GSI_LEGACY_START, arch::GSI_LEGACY_END).unwrap();
+    #[cfg(target_arch = "x86_64")]
+    let allocator = {
+        let mut allocator = allocator;
+        allocator
+            .allocate_id_at(crate::devices::legacy::cmos::RTC_GSI)
+            .unwrap();
+        allocator
+    };
+    allocator
+}
+
 impl Default for ResourceAllocator {
     fn default() -> Self {
         ResourceAllocator::new()
@@ -67,8 +80,7 @@ impl ResourceAllocator {
         // It is fine for us to unwrap the following since we know we are passing valid ranges for
         // all allocators
         Self {
-            gsi_legacy_allocator: IdAllocator::new(arch::GSI_LEGACY_START, arch::GSI_LEGACY_END)
-                .unwrap(),
+            gsi_legacy_allocator: legacy_gsi_allocator(),
             gsi_msi_allocator: IdAllocator::new(arch::GSI_MSI_START, arch::GSI_MSI_END).unwrap(),
             mmio32_memory: AddressAllocator::new(
                 arch::MEM_32BIT_DEVICES_START,
@@ -150,7 +162,7 @@ impl<'a> Persist<'a> for ResourceAllocator {
         state: &Self::State,
     ) -> Result<Self, Self::Error> {
         Ok(ResourceAllocator {
-            gsi_legacy_allocator: IdAllocator::new(arch::GSI_LEGACY_START, arch::GSI_LEGACY_END)?,
+            gsi_legacy_allocator: legacy_gsi_allocator(),
             gsi_msi_allocator: IdAllocator::new(arch::GSI_MSI_START, arch::GSI_MSI_END)?,
             mmio32_memory: state.mmio32_memory.clone(),
             mmio64_memory: state.mmio64_memory.clone(),
@@ -281,7 +293,9 @@ mod tests {
             // But allocating all of them at once should work
             assert_eq!(
                 allocator.allocate_gsi_legacy(GSI_LEGACY_NUM),
-                Ok((arch::GSI_LEGACY_START..=arch::GSI_LEGACY_END).collect::<Vec<_>>())
+                Ok((arch::GSI_LEGACY_START..=arch::GSI_LEGACY_END)
+                    .filter(|gsi| !cfg!(target_arch = "x86_64") || *gsi != 8)
+                    .collect::<Vec<_>>())
             );
             // And now we ran out of GSIs
             assert_eq!(
@@ -308,7 +322,9 @@ mod tests {
                 Ok(vec![arch::GSI_LEGACY_START + 1])
             );
             // Let's allocate the rest in a loop
-            for i in arch::GSI_LEGACY_START + 2..=arch::GSI_LEGACY_END {
+            for i in (arch::GSI_LEGACY_START + 2..=arch::GSI_LEGACY_END)
+                .filter(|gsi| !cfg!(target_arch = "x86_64") || *gsi != 8)
+            {
                 assert_eq!(allocator.allocate_gsi_legacy(1), Ok(vec![i]));
             }
         }

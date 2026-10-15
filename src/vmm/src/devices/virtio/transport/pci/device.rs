@@ -1120,8 +1120,19 @@ impl PciDevice for VirtioPciDevice {
                 ..u64::from(NOTIFICATION_BAR_OFFSET + NOTIFICATION_SIZE))
                 .contains(&o) =>
             {
-                // Handled with ioeventfds.
-                warn!("pci: unexpected write to notification BAR. Offset {o:#x}");
+                // PCI configuration access bypasses the MMIO ioeventfd path.
+                if let Ok(bytes) = <[u8; 2]>::try_from(data) {
+                    let queue = u16::from_le_bytes(bytes);
+                    let queue_offset = u64::from(queue) * u64::from(NOTIFY_OFF_MULTIPLIER);
+                    if o - u64::from(NOTIFICATION_BAR_OFFSET) == queue_offset {
+                        let device = self.device.lock().unwrap();
+                        if let Some(event) = device.queue_events().get(usize::from(queue))
+                            && let Err(err) = event.write(1)
+                        {
+                            error!("Failed to notify virtio PCI queue {queue}: {err}");
+                        }
+                    }
+                }
             }
             o if (u64::from(MSIX_TABLE_BAR_OFFSET)
                 ..u64::from(MSIX_TABLE_BAR_OFFSET + MSIX_TABLE_SIZE))
@@ -1894,13 +1905,48 @@ mod tests {
         // use-cases such as multiple queue pairs in network devices
         assert!(u32::from(notify_cap.cap.length) >= 15 * multiplier + 2);
 
-        // Reads and writes to the notification region of the BAR are handled by IoEvent file
-        // descriptors. Any such accesses should have no effects.
+        // Oversized writes are ignored; notification reads return zero.
         let data = [0x42u8; NOTIFICATION_SIZE as usize];
         locked_virtio_pci_device.write_bar(0, u64::from(NOTIFICATION_BAR_OFFSET), &data);
         let mut buffer = [0x0; NOTIFICATION_SIZE as usize];
         locked_virtio_pci_device.read_bar(0, u64::from(NOTIFICATION_BAR_OFFSET), &mut buffer);
         assert_eq!(buffer, [0u8; NOTIFICATION_SIZE as usize]);
+    }
+
+    #[test]
+    fn configuration_access_notifies_queue() {
+        let vmm = create_vmm_with_virtio_pci_device();
+        let device = get_virtio_device(&vmm);
+        let mut transport = device.lock().unwrap();
+        let event = transport.device.lock().unwrap().queue_events()[0]
+            .try_clone()
+            .unwrap();
+
+        cap_pci_cfg_write(
+            &mut transport,
+            NOTIFICATION_BAR_OFFSET,
+            2,
+            &0u16.to_le_bytes(),
+        );
+        assert_eq!(event.read().unwrap(), 1);
+
+        for offset in [
+            NOTIFICATION_BAR_OFFSET + 1,
+            NOTIFICATION_BAR_OFFSET + NOTIFY_OFF_MULTIPLIER,
+        ] {
+            cap_pci_cfg_write(&mut transport, offset, 2, &0u16.to_le_bytes());
+        }
+        cap_pci_cfg_write(
+            &mut transport,
+            NOTIFICATION_BAR_OFFSET + NOTIFY_OFF_MULTIPLIER,
+            2,
+            &1u16.to_le_bytes(),
+        );
+        cap_pci_cfg_write(&mut transport, NOTIFICATION_BAR_OFFSET, 1, &[0]);
+        assert_eq!(
+            event.read().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
     }
 
     const COMMON_CFG: u64 = COMMON_CONFIG_BAR_OFFSET as u64;

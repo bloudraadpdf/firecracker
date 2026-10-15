@@ -28,8 +28,8 @@ pub const HIMEM_START: u64 = 0x0010_0000; // 1 MB.
 pub const GSI_LEGACY_START: u32 = 5;
 /// Last usable GSI for legacy interrupts (IRQ) on x86_64.
 pub const GSI_LEGACY_END: u32 = 23;
-/// Number of legacy GSI (IRQ) available on x86_64.
-pub const GSI_LEGACY_NUM: u32 = GSI_LEGACY_END - GSI_LEGACY_START + 1;
+/// Number of allocatable legacy GSIs, excluding RTC interrupt 8.
+pub const GSI_LEGACY_NUM: u32 = GSI_LEGACY_END - GSI_LEGACY_START;
 /// First GSI used by MSI after legacy GSI.
 pub const GSI_MSI_START: u32 = GSI_LEGACY_END + 1;
 /// The highest available GSI in KVM (KVM_MAX_IRQ_ROUTES=4096).

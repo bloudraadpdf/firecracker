@@ -95,5 +95,5 @@ pub(crate) fn create_acpi_tables(
         tables.push(writer.write_acpi_table(allocator, &mut table)?);
     }
     let xsdt = writer.build_xsdt(allocator, tables)?;
-    writer.build_rsdp(xsdt)
+    writer.build_rsdp(xsdt, None)
 }
