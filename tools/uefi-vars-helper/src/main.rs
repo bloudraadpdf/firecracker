@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 mod engine;
 mod policy;
+mod ppi;
 mod service;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args_os().collect();

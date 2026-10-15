@@ -206,6 +206,17 @@ fn connection(store: &mut Store, stream: &mut UnixStream) -> io::Result<()> {
                 }
             }
             2 if payload.is_empty() => reply = encode(&store.checkpoint)?,
+            5 if initialised => {
+                started = true;
+                match crate::ppi::transact(&mut store.engine, &payload) {
+                    Ok(values) => {
+                        store.commit()?;
+                        reply.extend(values.into_iter().flat_map(u32::to_le_bytes));
+                    }
+                    Err(crate::ppi::Error::InvalidRequest) => status = 1,
+                    Err(crate::ppi::Error::InvalidState) => status = 2,
+                }
+            }
             3 if !started => match serde_json::from_slice::<Restore>(&payload) {
                 Ok(request) => {
                     store.restore(request)?;
@@ -299,6 +310,23 @@ pub fn provision(path: &Path, seed: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct TestDirectory(PathBuf);
+    impl TestDirectory {
+        fn new(name: &str) -> Self {
+            let root = std::env::current_dir()
+                .unwrap()
+                .join("build")
+                .join(format!("uefi-vars-{name}-{}", std::process::id()));
+            fs::create_dir_all(root.parent().unwrap()).unwrap();
+            fs::create_dir(&root).unwrap();
+            Self(root)
+        }
+    }
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
     #[test]
     fn relative_store_directory() {
         assert_eq!(directory(Path::new("store.json")), Path::new("."));
@@ -321,20 +349,97 @@ mod tests {
         assert_eq!(&bytes[20..], b"test");
     }
     #[test]
-    fn generation_mismatch_and_staged_rollback_preserve_live_store() {
-        let root = std::env::current_dir()
-            .unwrap()
-            .join("build")
-            .join(format!("uefi-vars-state-test-{}", std::process::id()));
-        fs::create_dir_all(root.parent().unwrap()).unwrap();
-        fs::create_dir(&root).unwrap();
-        struct Cleanup(PathBuf);
-        impl Drop for Cleanup {
-            fn drop(&mut self) {
-                fs::remove_dir_all(&self.0).unwrap();
-            }
+    fn ppi_wire_commit_cold_reopen_and_checkpoint_restore() {
+        let directory = TestDirectory::new("ppi-wire-test");
+        let path = directory.0.join("store.json");
+        let mut engine = Engine::new();
+        engine.cold_boot();
+        for (name, data) in [
+            (crate::ppi::REQUEST, vec![0; 16]),
+            (crate::ppi::FLAGS, 0x700e2u32.to_le_bytes().to_vec()),
+        ] {
+            assert_eq!(engine.set_variable(name, crate::ppi::GUID, 7, &data), Ok(0));
         }
-        let _cleanup = Cleanup(root.clone());
+        let original = Checkpoint {
+            version: 1,
+            identity: [0x51; 16],
+            generation: 0,
+            state: engine.save(),
+        };
+        persist(&path, &original).unwrap();
+        let (mut client, mut server) = UnixStream::pair().unwrap();
+        let client_thread = std::thread::spawn(move || {
+            let mut exchange = |opcode: u16, words: &[u32]| {
+                let mut request = Vec::from(*b"FCUV");
+                request.extend(1u16.to_le_bytes());
+                request.extend(opcode.to_le_bytes());
+                request.extend(12u32.to_le_bytes());
+                request.extend(u32::try_from(words.len() * 4).unwrap().to_le_bytes());
+                request.extend(words.iter().flat_map(|word| word.to_le_bytes()));
+                client.write_all(&request).unwrap();
+                let mut header = [0; 16];
+                client.read_exact(&mut header).unwrap();
+                assert_eq!(&header[..4], b"FCUV");
+                assert_eq!(&header[6..8], &(opcode | 0x8000).to_le_bytes());
+                assert_eq!(&header[8..12], &12u32.to_le_bytes());
+                let mut reply =
+                    vec![0; u32::from_le_bytes(header[12..].try_into().unwrap()) as usize];
+                client.read_exact(&mut reply).unwrap();
+                reply
+            };
+            assert_eq!(exchange(5, &[7, 2, 5, 0]), 1u32.to_le_bytes());
+            assert_eq!(exchange(4, &[]), [0; 4]);
+            let cold = exchange(2, &[]);
+            let cold: Checkpoint = serde_json::from_slice(&cold[4..]).unwrap();
+            assert_eq!(exchange(5, &[7, 2, 5, 0]), [0; 16]);
+            let checkpoint = exchange(2, &[]);
+            assert_eq!(&checkpoint[..4], &[0; 4]);
+            assert_eq!(exchange(5, &[7, 3, 5, 0]), 1u32.to_le_bytes());
+            assert_eq!(exchange(4, &[]), 1u32.to_le_bytes());
+            let checkpoint: Checkpoint = serde_json::from_slice(&checkpoint[4..]).unwrap();
+            assert_eq!(checkpoint.generation, cold.generation + 1);
+            checkpoint
+        });
+        let mut store = Store::open(&path).unwrap();
+        connection(&mut store, &mut server).unwrap();
+        let checkpoint = client_thread.join().unwrap();
+        let generation = checkpoint.generation;
+        drop(store);
+        let mut reopened = Store::open(&path).unwrap();
+        reopened.engine.cold_boot();
+        let query = [3u32, 2, 0, 0]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            crate::ppi::transact(&mut reopened.engine, &query),
+            Ok([0, 5, 0])
+        );
+        reopened
+            .restore(Restore {
+                expected_generation: generation,
+                checkpoint: original,
+            })
+            .unwrap();
+        assert_eq!(
+            crate::ppi::transact(&mut reopened.engine, &query),
+            Ok([0, 0, 0])
+        );
+        reopened
+            .restore(Restore {
+                expected_generation: generation + 1,
+                checkpoint,
+            })
+            .unwrap();
+        assert_eq!(
+            crate::ppi::transact(&mut reopened.engine, &query),
+            Ok([0, 5, 0])
+        );
+    }
+    #[test]
+    fn generation_mismatch_and_staged_rollback_preserve_live_store() {
+        let directory = TestDirectory::new("state-test");
+        let root = &directory.0;
         let path = root.join("live.json");
         let mut engine = Engine::new();
         engine.cold_boot();

@@ -41,17 +41,64 @@ three persistence failure, four authentication/provisioning failure. Malformed
 frames, wrong versions and lengths above 4 MiB close the connection. No
 pipelining or unsolicited messages are allowed.
 
-| Opcode | Request                                         | Successful reply after service status                     |
-| ------ | ----------------------------------------------- | --------------------------------------------------------- |
-| 1      | Complete EFI MM message, at most 65536 bytes    | u32 UEFI transport status, then complete modified message |
-| 2      | Empty                                           | Complete checkpoint, at most 4 MiB minus 256 bytes        |
-| 3      | Checkpoint, only before the first guest message | Empty                                                     |
-| 4      | Empty; host cold-boot transition only           | Empty                                                     |
+| Opcode | Request                                               | Successful reply after service status                     |
+| ------ | ----------------------------------------------------- | --------------------------------------------------------- |
+| 1      | Complete EFI MM message, at most 65536 bytes          | u32 UEFI transport status, then complete modified message |
+| 2      | Empty                                                 | Complete checkpoint, at most 4 MiB minus 256 bytes        |
+| 3      | Checkpoint, only before the first guest message       | Empty                                                     |
+| 4      | Empty; host cold-boot transition only                 | Empty                                                     |
+| 5      | Four u32: PPI function, revision, operation, argument | Three u32: PPI return code, first result, second result   |
 
 Provisioning is a separate host command before a socket is exposed. It is not a
 guest-facing IPC operation. A cold boot clears volatile variables and boot
 policies while retaining authenticated nonvolatile state. Firmware MMIO RESET
 only resets transport registers; it must not clear security lifecycle state.
+
+## TPM physical presence
+
+Opcode 5 carries little-endian integers in exactly 16 request bytes and 12 reply
+bytes after the service status. It requires cold-boot initialisation or
+checkpoint restore and closes the management restore boundary like opcode 1.
+
+| PPI function    | Accepted revisions | Result fields after the PPI code         |
+| --------------- | ------------------ | ---------------------------------------- |
+| 2: submit       | 1                  | Zero, zero                               |
+| 3: pending      | 1, 2               | Request, parameter (zero for revision 1) |
+| 5: response     | 1                  | Last request, firmware result            |
+| 7: submit       | 1, 2               | Zero, zero                               |
+| 8: confirmation | 1                  | Zero, zero                               |
+
+Functions 3 and 5 require an operation of zero. The argument must be zero,
+except function 7 revision 2 permits the PCR-bank argument for operation 23,
+which this implementation reports as unsupported. Unknown functions, revisions,
+unused arguments or payload lengths receive service status 1. The VMM implements
+the static ACPI functions separately.
+
+The helper accepts only TPM2 mandatory operations 0, 5, 14, 21 and 22. Other
+operations return PPI code 1 on submission and code 0 on confirmation query.
+Only firmware executes requests and obtains user confirmation. The helper never
+clears a TPM or treats request acceptance as execution success.
+
+Requests use the standard EDK2 `Tcg2PhysicalPresence` variable under GUID
+`aeb9c5c1-94f1-4d02-bfd9-4602db2d3c54`, attributes 7. Its 16-byte record has
+request at byte 0, u32 parameter at byte 4, last request at byte 8 and u32
+response at byte 12. Submission preserves the previous response and uses the
+normal SetVariable engine, including registered policies. Firmware must create
+this record and the four-byte `Tcg2PhysicalPresenceFlags`, then protect the
+flags with its variable lock policy before handing control to the OS. Opcode 5
+cannot change those flags. Confirmation queries use the clear mask 0x2 and, for
+combined enable/clear operations, the turn-on mask 0x10.
+
+Missing or invalid records fail rather than creating synthetic firmware state:
+submission returns PPI code 2, pending/response reads return code 1, and a
+confirmation query returns service status 2. The VMM must stop on a helper
+service failure. Failed SetVariable requests return PPI code 2 without bypassing
+a variable lock.
+
+References:
+[TCG PPI 1.30](https://trustedcomputinggroup.org/wp-content/uploads/Physical-Presence-Interface_1-30_0-52.pdf)
+and
+[EDK2 variable layout](https://github.com/tianocore/edk2/blob/master/SecurityPkg/Include/Guid/Tcg2PhysicalPresenceData.h).
 
 ## Persistence and restore
 
