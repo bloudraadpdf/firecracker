@@ -13,7 +13,7 @@ Implementation checklist:
   authentication.
 - [x] Test authentication failures, replay, policy locks and checkpoint
   consistency.
-- [ ] Enable the console firmware client and test signed and unsigned EFI
+- [x] Enable the console firmware client and test signed and unsigned EFI
   images.
 - [ ] Verify standard Windows 11 installation and measured boot.
 

@@ -131,6 +131,22 @@ is the
 Select a Desktop Experience edition in Setup when validating the installed
 graphical desktop; Server Core remains a separate supported guest profile.
 
+If recent Setup versions show an empty driver list, clear **Hide drivers that
+aren't compatible with this computer's hardware**. The pinned package lists two
+entries with the same display name: select the second entry for modern PCI
+device `1af4:1042` (the first is transitional `1af4:1001`). The INF's primary
+modern ID names subsystem `1100`; Firecracker uses `1042`. Its compatible-ID
+entry matches both. The
+[Virtio specification](https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html)
+permits this subsystem value and requires matching the modern vendor/device ID.
+Do not modify the signed INF or catalogue.
+
+As a PE diagnostic alternative, Shift+F10 and
+`pnputil /add-driver D:\Drivers\viostor\viostor.inf /install` installs the
+matching signed driver. Return to disk selection and refresh the list. This
+proves PE device binding; verify driver persistence in the installed image and a
+successful disk boot separately.
+
 `drvload` loads a driver into Windows PE only. It does not replace Setup's
 **Load driver** step: Windows 11 Setup installed an image without viostor after
 a `drvload`-only test, then stopped with `INACCESSIBLE_BOOT_DEVICE`. To recover
@@ -163,13 +179,14 @@ would otherwise select installation media again.
 Console snapshots contain display memory and registers, keyboard/mouse queues,
 held input, pending releases, keyboard LEDs and pending lock updates, USB
 controller/HID state, PCI state, optical transfer state and media identity. The
-snapshot format is 23.0.0. Display state adds about 16 MiB; the bounded snapshot
-reader accepts at most 32 MiB. The guest disk remains a separate artifact, as
-with ordinary Firecracker snapshots.
+current snapshot format is 25.0.0. Display state adds about 16 MiB; the bounded
+snapshot reader accepts at most 32 MiB. The guest disk remains a separate
+artifact, as with ordinary Firecracker snapshots.
 
 The Windows 11 test edition is IoT Enterprise LTSC 2024. It passed Setup's
-hardware check without registry bypasses. This series does not add a TPM or
-Secure Boot; it does not qualify Windows 11 editions that require them.
+hardware check without registry bypasses. The optional
+[secure platform](windows-secure-boot.md) adds TPM and protected firmware
+variables. Standard Windows 11 qualification remains in progress.
 
 The console reserves the VGA aperture at `0xa0000..0xbffff` and platform table
 memory at 32..33 MiB. The IDE interrupt uses PCI GSI16 in native mode and IRQ14
