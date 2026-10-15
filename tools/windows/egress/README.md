@@ -73,6 +73,13 @@ elevated startup script. The script sets its NetKVM address, gateway and DNS.
 Its defaults use MAC `06:00:ac:1e:fe:07`, guest `172.30.254.2/30` and gateway
 `172.30.254.1`; override the parameters if needed.
 
+Run exactly one guest probe. Before each cold run, inspect the common and
+current-user Startup folders and scheduled test tasks. Remove obsolete test
+launchers after preserving their contents. Complete driver installation in a
+separate boot and require clean shutdown before acceptance. Do not leave a
+driver installer or a second probe running beside the snapshot test. If
+launching the probe manually, remove its automatic test launchers first.
+
 Prepare a dedicated Linux network namespace with a TAP at that gateway, routing
 and NAT to the uplink. The guest must reach the host on TCP 40569 (echo) and
 40570 (reports), DNS and HTTPS. The host needs forwarding enabled. Keep this
@@ -169,7 +176,21 @@ iteration then requires Secure Boot, a ready TPM through `Get-Tpm`, and an
 actual TPM2 GetRandom command through Windows TBS before egress. Preserve all
 three `PASS SECURE_STATE` markers in the guest transcript and set
 `WINDOWS_SECURE_CHECKS=1` when running either offline verifier. These checks do
-not clear the TPM or change encryption.
+not clear the TPM or change encryption. The first iteration saves the public TPM
+PCR7 digest and an existing persistent object's handle, public data and Name.
+Restored iterations require exact equality. The offline verifier also compares
+all three transcript blocks against `C:\Users\Public\fc-tpm-state.txt`. The
+guest always writes this fixed baseline path, regardless of the script
+directory. Keep `verify-secure-state.sh` beside both verifiers. A missing
+persistent object fails acceptance; the probe does not create one.
+
+Run the verifier's five no-VM regression fixtures from the repository root:
+
+```sh
+bash tools/windows/egress/test-secure-state.sh "$PWD/build/secure-state-test"
+```
+
+The fixture directory must not exist. The test removes its own directory.
 
 The controller freezes its script, secure helper and disk guard in the run
 directory before execution. It copies helper state into each phase directory,
@@ -258,16 +279,17 @@ Set the normal TAP or CONNECT verification environment plus:
 Run within a private mount namespace and a timeout:
 
 ```sh
-sudo --preserve-env=WINDOWS_CHECK_BASE,WINDOWS_CHECK_RUN,WINDOWS_GUEST_TAG,WINDOWS_BITLOCKER_DISK,WINDOWS_BITLOCKER_OFFSET,WINDOWS_BITLOCKER_SIZE,WINDOWS_BITLOCKER_STATE,WINDOWS_BITLOCKER_BDEMOUNT \
+sudo --preserve-env=WINDOWS_SECURE_CHECKS,WINDOWS_CHECK_BASE,WINDOWS_CHECK_RUN,WINDOWS_GUEST_TAG,WINDOWS_BITLOCKER_DISK,WINDOWS_BITLOCKER_OFFSET,WINDOWS_BITLOCKER_SIZE,WINDOWS_BITLOCKER_STATE,WINDOWS_BITLOCKER_BDEMOUNT \
   timeout --signal=TERM --kill-after=10s 120 \
   unshare --mount --propagation private \
   bash tools/windows/egress/bitlocker-verify.sh tap
 ```
 
 For CONNECT, preserve its documented verification environment instead of the TAP
-variables and select `connect`. The wrapper checks the disk is closed, refuses
-an existing state directory, creates a read-only partition loop and opens libbde
-in unattended read-only mode. The existing verifier then checks its plaintext
-partition at offset zero using another read-only loop and NTFS mount. Exit traps
-remove the owned mounts and loops even when verification fails. Preserve compact
-logs and file hashes; no decrypted disk copy is made.
+variables and select `connect`. Preserve `WINDOWS_SECURE_CHECKS=1` through
+`sudo` for either secure verification path. The wrapper checks the disk is
+closed, refuses an existing state directory, creates a read-only partition loop
+and opens libbde in unattended read-only mode. The existing verifier then checks
+its plaintext partition at offset zero using another read-only loop and NTFS
+mount. Exit traps remove the owned mounts and loops even when verification
+fails. Preserve compact logs and file hashes; no decrypted disk copy is made.

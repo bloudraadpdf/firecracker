@@ -29,9 +29,11 @@ test "$(grep -c '^echo:' "$run/echo.log")" = 3
 if grep -q "FAIL ${tag}_NET" "$run/echo.log"; then exit 1; fi
 grep -q 'Guest requested ACPI S5 shutdown' "$run/diff.log"
 grep -q 'Firecracker exiting successfully. exit_code=0' "$run/diff.log"
-loop=$(losetup --read-only --find --show --offset "$offset" "$disk")
-trap 'if mountpoint -q "$base/mnt"; then umount "$base/mnt"; fi; losetup -d "$loop"' EXIT
-ntfs-3g -o ro "$loop" "$base/mnt"
+# shellcheck source=mount-state.sh
+source "$(dirname "$0")/mount-state.sh"
+windows_mount_directory=$base/mnt
+windows_mount_loop=$(losetup --read-only --find --show --offset "$offset" "$disk")
+ntfs-3g -o ro "$windows_mount_loop" "$windows_mount_directory"
 test ! -e "$base/mnt/hiberfil.sys"
 if [[ "$tag" = XP ]]; then
     cp "$base/mnt/fc-restore-data.bin" "$run/final-data.bin"
@@ -44,6 +46,10 @@ if [[ "$tag" = XP ]]; then
 else
     cp "$base/mnt/Users/Public/fc-restore-data.bin" "$run/final-data.bin"
     cat "$base/mnt/Users/Public/fc-network.log" | iconv -f "$encoding" -t UTF-8 > "$run/final-guest.txt"
+    if [[ ${WINDOWS_SECURE_CHECKS:-0} = 1 ]]; then
+        cp "$base/mnt/Users/Public/fc-tpm-state.txt" "$run/tpm-state.txt"
+        bash "$(dirname "$0")/verify-secure-state.sh" "$run/final-guest.txt" "$run/tpm-state.txt"
+    fi
 
     for iteration in 1 2 3; do
         test "$(grep -c "^PASS ${tag}_NET iteration=$iteration " "$run/final-guest.txt")" = 1

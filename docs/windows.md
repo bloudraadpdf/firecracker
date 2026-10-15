@@ -9,6 +9,12 @@ validation status.
 
 ## Boot configuration
 
+All CloudHv firmware profiles require the
+[PVH memory-map correction](../resources/firmware/pvh-memory-map.md). Earlier
+firmware could expose platform device pages as usable RAM and corrupt Windows
+page tables on restore. Cold boot corrected firmware before creating new
+snapshots; loading an old snapshot does not update its guest memory map.
+
 The intended boot path is EDK II CloudHv PVH firmware, a GPT disk with an EFI
 system partition, and modern virtio PCI storage and networking. Start
 Firecracker with `--enable-pci`. Use the firmware ELF as the boot source; do not
@@ -20,7 +26,11 @@ Example configuration for a prepared disk:
 {
   "boot-source": {
     "kernel_image_path": "CLOUDHV.fd",
-    "boot_args": ""
+    "boot_args": "",
+    "firmware": {
+      "type": "cloud-hv",
+      "system_uuid": "11223344-5566-7788-99aa-bbccddeeff01"
+    }
   },
   "machine-config": {
     "vcpu_count": 2,
@@ -41,6 +51,15 @@ Save the configuration as `windows.json`, then run:
 ```sh
 firecracker --enable-pci --api-sock windows.sock --config-file windows.json
 ```
+
+Replace the example UUID with a unique UUID for the VM and retain it across cold
+boots and restores. The explicit `cloud-hv` profile publishes a bounded SMBIOS
+Type 1 system identity through the CloudHv firmware ABI. It reserves one page at
+`0xF0000` and rejects overlapping ELF load segments. This is a minimal identity
+table, not a complete SMBIOS hardware inventory. The profile requires AMD64 PVH
+firmware and no initrd. Omit it for SeaBIOS and Linux kernels; the VMM does not
+infer the firmware ABI from a filename or PVH note. The UUID is separate from VM
+Generation ID and does not change on snapshot restore.
 
 The terminal is the guest serial console. Once SAC reports that CMD is
 available, enter `cmd`, wait for the new channel, then enter `ch -si 1`. Press
@@ -161,25 +180,27 @@ same 2 MiB bidirectional TCP test through a TAP interface; see
 
 ## Snapshots
 
-This branch uses snapshot format 23.0.0. It extends the optional console state
-with USB controller/HID state, keyboard lock tracking and pending input
-releases. Format 21.0.0 introduced the console devices. Console and headless
-revalidation for the current format is tracked in the
-[console plan](windows.md). The preceding reviewed format 20.0.0 added CET
-control and shadow-stack state for guests that expose those CPU features. A
-native vCPU regression verifies nonzero registers across two fresh restores.
-Server 2025, Windows 10 and Windows 11 pass the format-20 cold/full/differential
-TAP and real Tokoloshe CONNECT regressions. Windows 7 passes storage, DNS,
-validated HTTPS and TAP; XP passes storage, HTTP and TAP. Both pass
-cold/full/differential restore and clean shutdown. ARM64 passes the same
-format-20 TAP and CONNECT checks, including clean shutdown. The format preserves
-modern and transitional PCI transport state, including the legacy network I/O
-BAR size. Earlier snapshot formats are incompatible. It saves the ACPI PM timer,
-PM1 status, enable and sleep-type registers, CMOS registers, RTC divider phase,
-pending interrupt flags and guest wall-clock adjustment. The RTC follows host
-UTC plus the saved guest adjustment, including elapsed time while the VM is
-stopped. It provides periodic, alarm and update interrupts on reserved IRQ 8.
-Register C reads acknowledge pending flags.
+This branch uses snapshot format 27.0.0, which persists the optional CloudHv
+firmware profile and system UUID. Format 26.0.0 added the physical-presence
+mailbox. Format 25.0.0 added optional TPM and authenticated firmware variable
+state; see [the secure platform](windows-secure-boot.md). Format 23.0.0 added
+USB controller/HID state, keyboard lock tracking and pending input releases.
+Format 21.0.0 introduced the console devices. Console and headless revalidation
+for the current format is tracked in the [console plan](windows.md). The
+preceding reviewed format 20.0.0 added CET control and shadow-stack state for
+guests that expose those CPU features. A native vCPU regression verifies nonzero
+registers across two fresh restores. Server 2025, Windows 10 and Windows 11 pass
+the format-20 cold/full/differential TAP and real Tokoloshe CONNECT regressions.
+Windows 7 passes storage, DNS, validated HTTPS and TAP; XP passes storage, HTTP
+and TAP. Both pass cold/full/differential restore and clean shutdown. ARM64
+passes the same format-20 TAP and CONNECT checks, including clean shutdown. The
+format preserves modern and transitional PCI transport state, including the
+legacy network I/O BAR size. Earlier snapshot formats are incompatible. It saves
+the ACPI PM timer, PM1 status, enable and sleep-type registers, CMOS registers,
+RTC divider phase, pending interrupt flags and guest wall-clock adjustment. The
+RTC follows host UTC plus the saved guest adjustment, including elapsed time
+while the VM is stopped. It provides periodic, alarm and update interrupts on
+reserved IRQ 8. Register C reads acknowledge pending flags.
 
 The VMClock device publishes generation and disruption counters. Its
 `clock_status` remains `UNKNOWN` and its `counter_id` remains `INVALID`; this
@@ -231,10 +252,40 @@ Snapshots do not include the disk. Preserve a matching disk when retaining or
 copying a memory snapshot. Do not restore old memory against a disk that has
 since changed. Only one VM may write the disk at a time.
 
-The guest clock progressed after restore, but Windows wall time lagged by the
-pause interval without network time synchronisation. No VMBus time
-synchronisation service is provided. Cross-host migration and firmware-stage
-snapshots remain unvalidated.
+Firecracker's virtual CMOS clock uses UTC. Prepare modern Windows images with a
+matching RTC policy: use the UTC timezone (`tzutil /s "UTC"`), or retain the
+chosen display timezone and set the DWORD `RealTimeIsUniversal` to `1` under
+`HKLM\SYSTEM\CurrentControlSet\Control\TimeZoneInformation`, then reboot.
+Microsoft documents
+[tzutil](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/tzutil);
+AWS documents the
+[UTC RTC policy for Windows guests](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/change-time-zone-of-instance.html).
+These are image configuration choices; Firecracker does not change the guest's
+timezone or registry.
+
+The final Server test had Pacific time selected and no `RealTimeIsUniversal`
+value. Its cold UTC was seven hours ahead of the host. Windows System event 1
+records a correction of -25,194,836 ms, and Time-Service event 35 identifies
+`time.windows.com` as the NTP source. This explains the apparent seven-hour
+change during the TAP run. The subsequent no-NIC cold boot used Local CMOS Clock
+and reproduced the initial offset. Host timestamps, rather than the guest wall
+clock, identify each network-test phase. The diagnostic did not change guest
+time settings.
+
+A controlled Windows 10 AMD64 check with Hyper-V enabled and the format-23
+`firecracker-usb-fifth` binary distinguishes pause from restore. During a
+30.014-second pause, UTC and the performance counter both advanced. Full restore
+with the default `clock_realtime: false` omitted the 33.977-second stopped
+interval. Differential restore with `clock_realtime: true` compensated its
+31.018-second stopped interval in both clocks. The performance-counter frequency
+was 10 MHz. Evidence is retained in `build/windows/acceptance23/clock`.
+
+That guest reported `Pacific Standard Time` and had no `RealTimeIsUniversal`
+registry value; its initial UTC offset of seven hours was separate from restore
+accounting. The test did not change the timezone. These short measurements do
+not establish long-running clock accuracy or functional VMClock-driver use. No
+VMBus time synchronisation service is provided. Cross-host migration and
+firmware-stage snapshots remain unvalidated.
 
 These Toets AMD64 goldens pass with four vCPUs, 8 GiB, SeaBIOS and transitional
 PCI:
@@ -301,13 +352,25 @@ stopped disk with a read-only mount. Evidence is in
 `pci-io-vmm.log`.
 
 Windows 7 also passes DNS resolution, direct TLS 1.2 HTTPS with certificate
-validation and a 2 MiB TCP payload-equality test through NetKVM and TAP. The
-checks pass after cold boot, a full format-20 snapshot restored in a new
-Firecracker process, and a differential snapshot rebased onto the full memory
-file and restored in another process. Each stage opens fresh connections; this
-does not test preserving live TCP sessions. The host independently records each
-complete echo transfer. Evidence is retained under
-`build/windows/win7-reset20/run1`.
+validation and a 2 MiB TCP payload-equality test through NetKVM and TAP. Fresh
+SP1 media needs a current trust root for this HTTPS test. The tested
+`www.microsoft.com` chain terminates at DigiCert Global Root G2. Download the
+[official DER certificate](https://cacerts.digicert.com/DigiCertGlobalRootG2.crt)
+and require SHA-256
+`cb3ccbb76031e5e0138f8dd39a23f9de47ffc35e43c1144cea27d46a5ab1cb5f` before
+copying it into the isolated guest. In an elevated command prompt, run
+`certutil -addstore -f Root C:\DigiCertGlobalRootG2.crt`.
+[DigiCert's root catalogue](https://knowledge.digicert.com/general-information/digicert-trusted-root-authority-certificates)
+identifies this root. Certificate validation remains enabled; this guest
+trust-store prerequisite is separate from Firecracker support. A changed server
+certificate chain can require a different trusted root. The
+[egress regression tools](../tools/windows/egress/README.md) preserve the TAP
+probes, bounded snapshot controller and offline result checks. The checks pass
+after cold boot, a full format-20 snapshot restored in a new Firecracker
+process, and a differential snapshot rebased onto the full memory file and
+restored in another process. Each stage opens fresh connections; this does not
+test preserving live TCP sessions. The host independently records each complete
+echo transfer. Evidence is retained under `build/windows/win7-reset20/run1`.
 
 XP checks a flushed 65,536-byte patterned file, direct HTTP 200 and a 2 MiB TCP
 echo after cold boot and both restore types. Read-only inspection checks the
