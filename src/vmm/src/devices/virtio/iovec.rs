@@ -13,11 +13,13 @@ use vm_memory::{
 
 use super::iov_deque::{IovDeque, IovDequeError};
 use super::queue::FIRECRACKER_MAX_QUEUE_SIZE;
-use crate::devices::virtio::queue::DescriptorChain;
-use crate::vstate::memory::GuestMemoryMmap;
+use crate::devices::virtio::queue::{DescriptorChain, QueueError, VIRTQ_DESC_F_WRITE};
+use crate::vstate::memory::{GuestAddress, GuestMemoryMmap};
 
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum IoVecError {
+    /// Invalid descriptor chain: {0}
+    DescriptorChain(#[from] QueueError),
     /// Tried to create an `IoVec` from a write-only descriptor chain
     WriteOnlyDescriptor,
     /// Tried to create an 'IoVecMut` from a read-only descriptor chain
@@ -62,9 +64,9 @@ impl IoVecBuffer {
     ) -> Result<(), IoVecError> {
         self.clear();
 
-        let mut next_descriptor = Some(head);
-        while let Some(desc) = next_descriptor {
-            if desc.is_write_only() {
+        for desc in head.checked_iter(mem) {
+            let desc = desc?;
+            if desc.flags & VIRTQ_DESC_F_WRITE != 0 {
                 return Err(IoVecError::WriteOnlyDescriptor);
             }
 
@@ -72,7 +74,7 @@ impl IoVecBuffer {
             // range of the descriptor chain checked, i.e. [addr, addr + len) is a valid memory
             // region in the GuestMemoryMmap.
             let iov_base = mem
-                .get_slice(desc.addr, desc.len as usize)?
+                .get_slice(GuestAddress(desc.addr), desc.len as usize)?
                 .ptr_guard_mut()
                 .as_ptr()
                 .cast::<c_void>();
@@ -84,8 +86,6 @@ impl IoVecBuffer {
                 .len
                 .checked_add(desc.len)
                 .ok_or(IoVecError::OverflowedDescriptor)?;
-
-            next_descriptor = desc.next_descriptor();
         }
 
         Ok(())
@@ -258,11 +258,13 @@ impl<const L: u16> IoVecBufferMut<L> {
         head: DescriptorChain,
     ) -> Result<ParsedDescriptorChain, IoVecError> {
         let head_index = head.index;
-        let mut next_descriptor = Some(head);
         let mut length = 0u32;
         let mut nr_iovecs = 0u16;
-        while let Some(desc) = next_descriptor {
-            if !desc.is_write_only() {
+        for desc in head.checked_iter(mem) {
+            let desc = desc.inspect_err(|_| {
+                self.vecs.pop_back(nr_iovecs);
+            })?;
+            if desc.flags & VIRTQ_DESC_F_WRITE == 0 {
                 self.vecs.pop_back(nr_iovecs);
                 return Err(IoVecError::ReadOnlyDescriptor);
             }
@@ -271,7 +273,7 @@ impl<const L: u16> IoVecBufferMut<L> {
             // range of the descriptor chain checked, i.e. [addr, addr + len) is a valid memory
             // region in the GuestMemoryMmap.
             let slice = mem
-                .get_slice(desc.addr, desc.len as usize)
+                .get_slice(GuestAddress(desc.addr), desc.len as usize)
                 .inspect_err(|_| {
                     self.vecs.pop_back(nr_iovecs);
                 })?;
@@ -298,8 +300,6 @@ impl<const L: u16> IoVecBufferMut<L> {
                 .inspect_err(|_| {
                     self.vecs.pop_back(nr_iovecs);
                 })?;
-
-            next_descriptor = desc.next_descriptor();
         }
 
         self.len = self.len.checked_add(length).ok_or_else(|| {
@@ -572,6 +572,106 @@ mod tests {
             (GuestAddress(0x20000), 0x10000),
             (GuestAddress(0x40000), 0x10000),
         ])
+    }
+
+    #[test]
+    fn indirect_receive_buffers_preserve_head_and_payload() {
+        use crate::devices::virtio::queue::Descriptor;
+
+        let mem = default_mem();
+        let (mut queue, guest) = write_only_chain(&mem);
+        guest.dtable[0].set(0x8000, 32, 4, 0);
+        for (index, addr, flags, next) in [
+            (0, 0x20000, VIRTQ_DESC_F_WRITE | VIRTQ_DESC_F_NEXT, 1),
+            (1, 0x40000, VIRTQ_DESC_F_WRITE, 0),
+        ] {
+            mem.write_obj(
+                Descriptor {
+                    addr,
+                    len: 64,
+                    flags,
+                    next,
+                },
+                GuestAddress(0x8000 + index * 16),
+            )
+            .unwrap();
+        }
+        let mut buffer = IoVecBufferMutDefault::new().unwrap();
+        // SAFETY: the test exclusively owns the descriptor buffers.
+        let parsed =
+            unsafe { buffer.append_descriptor_chain(&mem, queue.pop().unwrap().unwrap()) }.unwrap();
+        assert_eq!(parsed.head_index, 0);
+        assert_eq!(parsed.nr_iovecs, 2);
+        buffer.write_all_volatile_at(&[0x5a; 128], 0).unwrap();
+        for addr in [0x20000, 0x40000] {
+            let mut actual = [0; 64];
+            mem.read_slice(&mut actual, GuestAddress(addr)).unwrap();
+            assert_eq!(actual, [0x5a; 64]);
+        }
+    }
+
+    #[test]
+    fn indirect_transmit_buffers_can_follow_direct_buffers() {
+        use crate::devices::virtio::queue::{Descriptor, VIRTQ_DESC_F_INDIRECT};
+
+        let mem = default_mem();
+        let (mut queue, guest) = read_only_chain(&mem);
+        guest.dtable[1].set(0x8001, 16, VIRTQ_DESC_F_INDIRECT | VIRTQ_DESC_F_WRITE, 0);
+        mem.write_obj(
+            Descriptor {
+                addr: 0x40000,
+                len: 64,
+                flags: 0,
+                next: 0,
+            },
+            GuestAddress(0x8001),
+        )
+        .unwrap();
+        mem.write_slice(&[0x11; 64], GuestAddress(0x20000)).unwrap();
+        mem.write_slice(&[0x22; 64], GuestAddress(0x40000)).unwrap();
+        let mut buffer = IoVecBuffer::default();
+        // SAFETY: the test exclusively owns the descriptor buffers.
+        unsafe { buffer.load_descriptor_chain(&mem, queue.pop().unwrap().unwrap()) }.unwrap();
+        let mut actual = [0; 128];
+        buffer.read_exact_volatile_at(&mut actual, 0).unwrap();
+        assert_eq!(&actual[..64], &[0x11; 64]);
+        assert_eq!(&actual[64..], &[0x22; 64]);
+    }
+
+    #[test]
+    fn malformed_indirect_chains_do_not_leave_receive_buffers() {
+        use crate::devices::virtio::queue::{Descriptor, VIRTQ_DESC_F_INDIRECT};
+
+        for (table, len, outer_flags, inner_flags, next) in [
+            (0x8000, 0, 4, 2, 0),
+            (0x8000, 15, 4, 2, 0),
+            (0x8000, 16, 5, 2, 0),
+            (0x8000, 16, 4, VIRTQ_DESC_F_INDIRECT, 0),
+            (0x8000, 16, 4, 3, 1),
+            (0x8000, 16, 4, 3, 0),
+            (0x10000, 16, 4, 2, 0),
+            (u64::MAX - 7, 16, 4, 2, 0),
+        ] {
+            let mem = default_mem();
+            let (mut queue, guest) = write_only_chain(&mem);
+            guest.dtable[1].set(table, len, outer_flags, 0);
+            mem.write_obj(
+                Descriptor {
+                    addr: 0x40000,
+                    len: 64,
+                    flags: inner_flags,
+                    next,
+                },
+                GuestAddress(0x8000),
+            )
+            .unwrap();
+            let mut buffer = IoVecBufferMutDefault::new().unwrap();
+            // SAFETY: the test exclusively owns the descriptor buffers.
+            unsafe { buffer.append_descriptor_chain(&mem, queue.pop().unwrap().unwrap()) }
+                .unwrap_err();
+            assert_eq!(buffer.len, 0);
+            assert!(buffer.vecs.as_slice().is_empty());
+        }
     }
 
     fn chain(m: &GuestMemoryMmap, is_write_only: bool) -> (Queue, VirtQueue<'_>) {

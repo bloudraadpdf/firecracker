@@ -348,6 +348,17 @@ def test_api_machine_config(uvm):
     response = test_microvm.api.machine_config.get()
     assert response.json()["smt"] is False
 
+    if platform.machine() == "x86_64":
+        assert response.json()["hyperv"] is False
+        test_microvm.api.machine_config.patch(hyperv=True)
+        test_microvm.api.machine_config.patch(mem_size_mib=256)
+        assert test_microvm.api.machine_config.get().json()["hyperv"] is True
+        test_microvm.api.machine_config.put(mem_size_mib=128, vcpu_count=1)
+        assert test_microvm.api.machine_config.get().json()["hyperv"] is False
+    else:
+        with pytest.raises(RuntimeError, match="unknown field `hyperv`"):
+            test_microvm.api.machine_config.patch(hyperv=True)
+
     # Test that smt=True errors on ARM.
     if platform.machine() == "x86_64":
         test_microvm.api.machine_config.patch(smt=True)
@@ -1321,6 +1332,8 @@ def test_get_full_config_after_restoring_snapshot(microvm_factory, uvm_configure
 
     if cpu_vendor == utils_cpuid.CpuVendor.ARM:
         setup_cfg["machine-config"]["smt"] = False
+    else:
+        setup_cfg["machine-config"]["hyperv"] = False
 
     if len(SUPPORTED_CPU_TEMPLATES) != 0:
         setup_cfg["machine-config"]["cpu_template"] = SUPPORTED_CPU_TEMPLATES[0]
@@ -1470,6 +1483,8 @@ def test_get_full_config(uvm):
         "track_dirty_pages": False,
         "huge_pages": "None",
     }
+    if platform.machine() == "x86_64":
+        expected_cfg["machine-config"]["hyperv"] = False
     expected_cfg["cpu-config"] = None
     expected_cfg["boot-source"] = {
         "boot_args": "",
