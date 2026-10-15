@@ -79,6 +79,8 @@ pub struct ConsoleServer {
     input: Arc<Mutex<I8042Device>>,
     optical: Option<Arc<Mutex<OpticalDevice>>>,
     held: BTreeSet<(u8, bool)>,
+    release_pending: bool,
+    tablet: Option<Arc<Mutex<super::console_usb::UsbDevice>>>,
 }
 
 impl ConsoleServer {
@@ -104,6 +106,8 @@ impl ConsoleServer {
             input,
             optical,
             held: BTreeSet::new(),
+            release_pending: false,
+            tablet: None,
         })
     }
 
@@ -125,6 +129,24 @@ impl ConsoleServer {
 
     pub fn held_keys(&self) -> Vec<(u8, bool)> {
         self.held.iter().copied().collect()
+    }
+
+    pub fn set_tablet(&mut self, tablet: Arc<Mutex<super::console_usb::UsbDevice>>) {
+        self.tablet = Some(tablet);
+    }
+
+    pub fn release_pending(&self) -> bool {
+        self.release_pending
+    }
+
+    pub fn restore_release_pending(&mut self, pending: bool) {
+        self.release_pending = pending;
+        let period = if pending {
+            Duration::from_millis(10)
+        } else {
+            Duration::from_secs(1)
+        };
+        self.timer.arm(period, Some(period));
     }
 
     pub fn restore_held(&mut self, held: &[(u8, bool)]) -> io::Result<()> {
@@ -166,12 +188,23 @@ impl ConsoleServer {
         for key in released {
             self.held.remove(&key);
         }
-        input.inject_mouse(0, 0, 0).is_ok() && self.held.is_empty()
+        let keys_released = self.held.is_empty();
+        drop(input);
+        let tablet_released = self
+            .tablet
+            .as_ref()
+            .is_none_or(|tablet| tablet.lock().unwrap().release().is_ok());
+        let released = keys_released && tablet_released;
+        self.restore_release_pending(!released);
+        released
     }
 
     fn handle(&mut self, request: &[u8; REQUEST_SIZE]) -> Vec<u8> {
         if &request[..4] != b"FCC1" {
             return Self::acknowledge(1);
+        }
+        if matches!(request[4], 1 | 6) && self.release_pending && !self.release_keys() {
+            return Self::acknowledge(2);
         }
         match request[4] {
             0 if request[5..].iter().all(|byte| *byte == 0) => {
@@ -215,12 +248,6 @@ impl ConsoleServer {
                 }
                 Self::acknowledge(0)
             }
-            2 if request[5] <= 7 && request[10..].iter().all(|byte| *byte == 0) => {
-                let x = i16::from_le_bytes([request[6], request[7]]);
-                let y = i16::from_le_bytes([request[8], request[9]]);
-                let result = self.input.lock().unwrap().inject_mouse(x, y, request[5]);
-                Self::acknowledge(if result.is_ok() { 0 } else { 2 })
-            }
             3 if request[5..].iter().all(|byte| *byte == 0) => {
                 let released = self.release_keys();
                 Self::acknowledge(if released { 0 } else { 2 })
@@ -231,6 +258,30 @@ impl ConsoleServer {
                     .as_ref()
                     .is_some_and(|device| device.lock().unwrap().eject().is_ok());
                 Self::acknowledge(if result { 0 } else { 2 })
+            }
+            5 if request[5..].iter().all(|byte| *byte == 0) => {
+                let mut response = Self::acknowledge(0);
+                response[8] = u8::from(
+                    self.tablet
+                        .as_ref()
+                        .is_some_and(|tablet| tablet.lock().unwrap().tablet_ready()),
+                );
+                let input = self.input.lock().unwrap();
+                response[9] = input.keyboard_leds();
+                response[10] = input.keyboard_pending_leds();
+                response
+            }
+            6 if request[5] <= 7 && request[10] != 128 && request[11] == 0 => {
+                let x = u16::from_le_bytes([request[6], request[7]]);
+                let y = u16::from_le_bytes([request[8], request[9]]);
+                let accepted = self.tablet.as_ref().is_some_and(|tablet| {
+                    tablet
+                        .lock()
+                        .unwrap()
+                        .pointer(x, y, request[5], i8::from_ne_bytes([request[10]]))
+                        .is_ok()
+                });
+                Self::acknowledge(if accepted { 0 } else { 2 })
             }
             _ => Self::acknowledge(1),
         }
@@ -334,6 +385,9 @@ impl MutEventSubscriber for ConsoleServer {
             self.accept(ops);
         } else if event.fd() == self.timer.as_raw_fd() {
             self.timer.read();
+            if self.release_pending {
+                self.release_keys();
+            }
             let now = Instant::now();
             self.clients.retain(|_, client| {
                 if now < client.deadline {
@@ -444,9 +498,12 @@ mod tests {
         for invalid in [
             request(1, &[0x1c, 2, 1]),
             request(1, &[0x1c, 0, 2]),
+            request(2, &[]),
             request(2, &[8]),
             request(3, &[1]),
             request(0, &[1]),
+            request(6, &[0, 0, 0, 0, 0, 128]),
+            request(6, &[0, 0, 0, 0, 0, 0, 1]),
         ] {
             assert_eq!(server.handle(&invalid), ConsoleServer::acknowledge(1));
         }
@@ -485,6 +542,80 @@ mod tests {
         );
         assert!(restored.held_keys().is_empty());
         assert_eq!(drain_input(&restored), [0xf0, 0x14, 0xe0, 0xf0, 0x71]);
+    }
+
+    #[test]
+    fn led_query_uses_guest_commands_and_restored_state() {
+        let mut original = Fixture::new();
+        assert_eq!(original.handle(&request(5, &[]))[9], 0);
+        {
+            let mut input = original.input.lock().unwrap();
+            input.write(0, 0, &[0xed]);
+            input.write(0, 0, &[6]);
+        }
+        assert_eq!(
+            original.handle(&request(5, &[]))[8..],
+            [0, 6, 0, 0, 0, 0, 0, 0]
+        );
+        original.handle(&request(1, &[0x58, 0, 1]));
+        assert_eq!(original.handle(&request(5, &[]))[10], 4);
+        let state = original.input.lock().unwrap().save_state();
+        let mut restored = Fixture::new();
+        restored
+            .input
+            .lock()
+            .unwrap()
+            .restore_state(&state)
+            .unwrap();
+        assert_eq!(restored.handle(&request(5, &[]))[9], 6);
+        assert_eq!(restored.handle(&request(5, &[]))[10], 4);
+    }
+
+    #[test]
+    fn full_queue_defers_release_and_restores_timer_retry() {
+        use event_manager::SubscriberOps;
+
+        let mut original = Fixture::new();
+        for _ in 0..256 {
+            assert_eq!(
+                original.handle(&request(1, &[0x1c, 0, 1])),
+                ConsoleServer::acknowledge(0)
+            );
+        }
+        assert_eq!(
+            original.handle(&request(3, &[])),
+            ConsoleServer::acknowledge(2)
+        );
+        assert!(original.release_pending());
+        assert_eq!(
+            original.handle(&request(1, &[0x32, 0, 1])),
+            ConsoleServer::acknowledge(2)
+        );
+        assert_eq!(original.held_keys(), [(0x1c, false)]);
+        let state = original.input.lock().unwrap().save_state();
+        let mut restored = Fixture::new();
+        restored
+            .input
+            .lock()
+            .unwrap()
+            .restore_state(&state)
+            .unwrap();
+        restored.restore_held(&original.held_keys()).unwrap();
+        restored.restore_release_pending(original.release_pending());
+        assert_eq!(drain_input(&restored), vec![0x1c; 256]);
+        let restored = Arc::new(Mutex::new(restored.server));
+        let mut events = crate::EventManager::new().unwrap();
+        events.add_subscriber(restored.clone());
+        events.run_with_timeout(1000).unwrap();
+        let mut restored = restored.lock().unwrap();
+        assert!(!restored.release_pending());
+        assert!(restored.held_keys().is_empty());
+        assert_eq!(drain_input(&restored), [0xf0, 0x1c]);
+        assert_eq!(
+            restored.handle(&request(1, &[0x32, 0, 1])),
+            ConsoleServer::acknowledge(0)
+        );
+        assert_eq!(drain_input(&restored), [0x32]);
     }
 
     #[test]

@@ -54,8 +54,11 @@ impl BusDevice for Port92 {
         }
         let rising_reset = self.state.output & 1 == 0 && data[0] & 1 != 0;
         self.state.output = data[0];
-        if rising_reset && let Err(error) = self.reset_evt.write(1) {
-            crate::logger::error!("System control reset failed: {error}");
+        if rising_reset {
+            crate::logger::info!("Guest requested system control port reset");
+            if let Err(error) = self.reset_evt.write(1) {
+                crate::logger::error!("System control reset failed: {error}");
+            }
         }
         None
     }
