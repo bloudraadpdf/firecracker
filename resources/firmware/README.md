@@ -2,6 +2,11 @@
 
 For BIOS disks, use the separate [SeaBIOS PVH handoff](seabios/README.md).
 
+The additional [PVH memory-map fix](pvh-memory-map.md) is required for all
+CloudHv profiles, including headless and Secure Boot. Earlier firmware hashes
+below predate that fix; recreate snapshots from a cold boot with corrected
+firmware.
+
 The stock x86-64 CloudHv firmware derives its 64-bit PCI aperture from RAM and
 CPUID, and uses a 32-bit aperture ending at `0xfc000000`. Firecracker allocates
 PCI BARs in `[0x4000000000, 0x8000000000)` and places ECAM at `0xeec00000`. The
@@ -45,6 +50,8 @@ git clone --depth 1 --branch ch-97eeb7b09 \
 git -C build/windows/edk2 submodule update --init --recursive
 git -C build/windows/edk2 apply --ignore-whitespace \
   ../../../resources/firmware/cloudhv-firecracker.patch
+git -C build/windows/edk2 apply --ignore-whitespace \
+  ../../../resources/firmware/cloudhv-pvh-memory-map.patch
 cd build/windows/edk2
 . edksetup.sh
 make -C BaseTools -j2
