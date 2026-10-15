@@ -1,3 +1,6 @@
+# Copyright 2026 Bloudraad.
+# SPDX-License-Identifier: Apache-2.0
+
 param([ValidateSet('win7', 'xp')][string]$Target = 'win7')
 $ErrorActionPreference = 'Stop'
 Start-Transcript -Path C:\LegacyVsock\package-transcript.txt -Force
