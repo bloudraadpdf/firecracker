@@ -166,6 +166,7 @@ RUN apt-get update \
         musl-tools \
         # needed for integration tests
         net-tools iproute2 iperf3 socat fdisk \
+        \
         libjson-glib-1.0-0 libseccomp2 \
         numactl \
         iptables \
