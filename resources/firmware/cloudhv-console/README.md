@@ -70,6 +70,8 @@ git -C build/windows/console/edk2 apply --ignore-whitespace \
   "$PWD/resources/firmware/cloudhv-firecracker.patch"
 git -C build/windows/console/edk2 apply --ignore-whitespace \
   "$PWD/resources/firmware/cloudhv-console/cloudhv-console.patch"
+git -C build/windows/console/edk2 apply --ignore-whitespace \
+  "$PWD/resources/firmware/cloudhv-pvh-memory-map.patch"
 cd build/windows/console/edk2
 . edksetup.sh
 mise exec -- make -C BaseTools -j2
