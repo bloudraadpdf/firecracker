@@ -208,13 +208,18 @@ def test_local_license_requires_copyright(tmp_path, monkeypatch):
     assert _validate_license(path) is False
 
 
-def test_dependency_licenses():
+@pytest.mark.parametrize(
+    "toml_file",
+    [FC_WORKSPACE_DIR / "Cargo.toml"]
+    + [directory / "Cargo.toml" for directory in utils_repo.rust_tool_directories()],
+    ids=lambda path: path.parent.name,
+)
+def test_dependency_licenses(toml_file):
     """Ensure license compatibility for Firecracker.
 
     For a list of currently allowed licenses checkout deny.toml in
     the root directory.
     """
-    toml_file = FC_WORKSPACE_DIR / "Cargo.toml"
     _, _, stderr = cargo(
         "deny",
         f"--format json --manifest-path {toml_file} check "

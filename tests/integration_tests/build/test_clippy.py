@@ -6,6 +6,7 @@ import platform
 
 import pytest
 
+from framework import utils_repo
 from host_tools.cargo_build import cargo
 
 SUCCESS_CODE = 0
@@ -23,4 +24,17 @@ def test_rust_clippy(target):
     """
     cargo(
         "clippy", f"--target {target} --all --all-targets --all-features", "-D warnings"
+    )
+
+
+@pytest.mark.parametrize(
+    "directory", utils_repo.rust_tool_directories(), ids=lambda p: p.name
+)
+def test_tool_clippy(directory):
+    """Check standalone tools with their native C-library dependencies."""
+    cargo(
+        "clippy",
+        f"--locked --target {MACHINE}-unknown-linux-gnu --all-targets --all-features",
+        "-D warnings",
+        cwd=directory,
     )
