@@ -1,0 +1,28 @@
+--- a/var-service-vars.c
++++ b/var-service-vars.c
+@@ -429,6 +429,7 @@
+     uefi_variable *old_var, *new_var;
+     uint64_t length;
+     size_t new_storage;
++    bool platform_key_changed;
+     efi_status status;
+ 
+     length = sizeof(*mvar) + sizeof(*va);
+@@ -555,6 +556,8 @@
+         ? new_var->attributes
+         : old_var->attributes;
+ 
++    platform_key_changed = uefi_vars_is_sb_pk(new_var ? new_var : old_var);
++
+     /* all good, commit */
+     del_variable(uv, old_var);
+     uv->used_storage = new_storage;
+@@ -563,7 +566,7 @@
+         uefi_vars_json_save(uv);
+     }
+ 
+-    if (new_var && uefi_vars_is_sb_pk(new_var)) {
++    if (platform_key_changed) {
+         uefi_vars_auth_init(uv);
+     }
+ 
