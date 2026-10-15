@@ -24,6 +24,7 @@ mod mptable;
 pub mod msr;
 /// Logic for configuring x86_64 registers.
 pub mod regs;
+pub(crate) mod smbios;
 /// Architecture specific vCPU code
 pub mod vcpu;
 /// Architecture specific VM state code
@@ -84,6 +85,8 @@ const MEMMAP_TYPE_RAM: u32 = 1;
 /// Errors thrown while configuring x86_64 system.
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum ConfigurationError {
+    /// Invalid CloudHv firmware handoff: {0}
+    FirmwareIdentity(std::io::Error),
     /// Invalid e820 setup params.
     E820Configuration,
     /// Error writing MP table to memory: {0}
@@ -274,6 +277,7 @@ pub fn configure_system_for_boot(
     entry_point: EntryPoint,
     initrd: &Option<InitrdConfig>,
     boot_cmdline: Cmdline,
+    firmware: Option<&crate::vmm_config::boot_source::FirmwareConfig>,
 ) -> Result<(), ConfigurationError> {
     configure_vcpus_for_boot(
         kvm,
@@ -308,7 +312,12 @@ pub fn configure_system_for_boot(
 
     match entry_point.protocol {
         BootProtocol::PvhBoot => {
-            configure_pvh(vm.guest_memory(), GuestAddress(CMDLINE_START), initrd)?;
+            configure_pvh(
+                vm.guest_memory(),
+                GuestAddress(CMDLINE_START),
+                initrd,
+                firmware.is_some(),
+            )?;
         }
         BootProtocol::LinuxBoot => {
             configure_64bit_boot(
@@ -364,6 +373,7 @@ fn configure_pvh(
     guest_mem: &GuestMemoryMmap,
     cmdline_addr: GuestAddress,
     initrd: &Option<InitrdConfig>,
+    smbios: bool,
 ) -> Result<(), ConfigurationError> {
     const XEN_HVM_START_MAGIC_VALUE: u32 = 0x336e_c578;
 
@@ -402,6 +412,15 @@ fn configure_pvh(
         type_: E820_RESERVED,
         ..Default::default()
     });
+
+    if smbios {
+        memmap.push(hvm_memmap_table_entry {
+            addr: smbios::BASE,
+            size: smbios::SIZE,
+            type_: E820_RESERVED,
+            ..Default::default()
+        });
+    }
 
     if !guest_mem.address_in_range(GuestAddress(0xa0000)) {
         memmap.push(hvm_memmap_table_entry {
@@ -700,6 +719,50 @@ mod tests {
     use crate::utils::mib_to_bytes;
     use crate::vstate::resources::ResourceAllocator;
 
+    fn pvh_memory_map(mem: &GuestMemoryMmap) -> Vec<hvm_memmap_table_entry> {
+        use vm_memory::Bytes;
+        let info: hvm_start_info = mem.read_obj(GuestAddress(layout::PVH_INFO_START)).unwrap();
+        (0..info.memmap_entries)
+            .map(|i| {
+                mem.read_obj(GuestAddress(
+                    info.memmap_paddr
+                        + u64::from(i) * std::mem::size_of::<hvm_memmap_table_entry>() as u64,
+                ))
+                .unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn cloudhv_smbios_page_is_reserved_only_for_selected_profile() {
+        for console in [false, true] {
+            let regions = arch_memory_regions(mib_to_bytes(64));
+            let regions = if console {
+                reserve_vga_memory(regions)
+            } else {
+                regions
+            };
+            let mem = crate::test_utils::multi_region_mem(&regions);
+            for enabled in [false, true] {
+                configure_pvh(&mem, GuestAddress(CMDLINE_START), &None, enabled).unwrap();
+                let entries = pvh_memory_map(&mem);
+                assert_eq!(
+                    entries.iter().any(|entry| entry.addr == smbios::BASE
+                        && entry.size == smbios::SIZE
+                        && entry.type_ == E820_RESERVED),
+                    enabled
+                );
+                assert!(
+                    entries
+                        .iter()
+                        .filter(|entry| entry.type_ == E820_RAM)
+                        .all(|entry| entry.addr + entry.size <= smbios::BASE
+                            || entry.addr >= smbios::BASE + smbios::SIZE)
+                );
+            }
+        }
+    }
+
     #[test]
     fn console_boot_maps_reserve_platform_tables() {
         use vm_memory::Bytes;
@@ -717,17 +780,8 @@ mod tests {
                 (end, size as u64 - end)
             ]
         );
-        configure_pvh(&mem, GuestAddress(CMDLINE_START), &None).unwrap();
-        let info: hvm_start_info = mem.read_obj(GuestAddress(layout::PVH_INFO_START)).unwrap();
-        let entries: Vec<hvm_memmap_table_entry> = (0..info.memmap_entries)
-            .map(|i| {
-                mem.read_obj(GuestAddress(
-                    info.memmap_paddr
-                        + u64::from(i) * std::mem::size_of::<hvm_memmap_table_entry>() as u64,
-                ))
-                .unwrap()
-            })
-            .collect();
+        configure_pvh(&mem, GuestAddress(CMDLINE_START), &None, false).unwrap();
+        let entries = pvh_memory_map(&mem);
         assert!(entries.iter().any(|entry| entry.addr == start
             && entry.size == end - start
             && entry.type_ == E820_RESERVED));
@@ -762,7 +816,7 @@ mod tests {
         use vm_memory::Bytes;
 
         let mem = arch_mem(mib_to_bytes(32));
-        configure_pvh(&mem, GuestAddress(CMDLINE_START), &None).unwrap();
+        configure_pvh(&mem, GuestAddress(CMDLINE_START), &None, false).unwrap();
         let info: hvm_start_info = mem.read_obj(GuestAddress(layout::PVH_INFO_START)).unwrap();
         assert_eq!(info.rsdp_paddr, layout::RSDP_ADDR);
         assert_eq!(info.version, 1);
@@ -812,7 +866,7 @@ mod tests {
         let mut resource_allocator = ResourceAllocator::new();
         mptable::setup_mptable(&gm, &mut resource_allocator, no_vcpus).unwrap();
         configure_64bit_boot(&gm, GuestAddress(0), 0, &None, None).unwrap();
-        configure_pvh(&gm, GuestAddress(0), &None).unwrap();
+        configure_pvh(&gm, GuestAddress(0), &None, false).unwrap();
 
         // Now assigning some memory that is equal to the start of the 32bit memory hole.
         let mem_size = mib_to_bytes(3328);
@@ -820,7 +874,7 @@ mod tests {
         let mut resource_allocator = ResourceAllocator::new();
         mptable::setup_mptable(&gm, &mut resource_allocator, no_vcpus).unwrap();
         configure_64bit_boot(&gm, GuestAddress(0), 0, &None, None).unwrap();
-        configure_pvh(&gm, GuestAddress(0), &None).unwrap();
+        configure_pvh(&gm, GuestAddress(0), &None, false).unwrap();
 
         // Now assigning some memory that falls after the 32bit memory hole.
         let mem_size = mib_to_bytes(3330);
@@ -828,7 +882,7 @@ mod tests {
         let mut resource_allocator = ResourceAllocator::new();
         mptable::setup_mptable(&gm, &mut resource_allocator, no_vcpus).unwrap();
         configure_64bit_boot(&gm, GuestAddress(0), 0, &None, None).unwrap();
-        configure_pvh(&gm, GuestAddress(0), &None).unwrap();
+        configure_pvh(&gm, GuestAddress(0), &None, false).unwrap();
     }
 
     /// Builds a minimal bzImage that satisfies `linux_loader`'s bzImage

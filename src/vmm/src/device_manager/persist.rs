@@ -851,7 +851,8 @@ mod tests {
   "boot-source": {{
     "kernel_image_path": "",
     "initrd_path": null,
-    "boot_args": null
+    "boot_args": null,
+    "firmware": null
   }},
   "cpu-config": null,
   "logger": null,

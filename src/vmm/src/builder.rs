@@ -254,7 +254,19 @@ pub fn build_microvm_for_boot(
     )?;
 
     let guest_memory = kvm_vm.guest_memory();
+    #[cfg(target_arch = "x86_64")]
+    if vm_resources.boot_source.config.firmware.is_some() {
+        crate::arch::x86_64::smbios::validate_image(&boot_config.kernel_file)
+            .map_err(ConfigurationError::FirmwareIdentity)?;
+    }
     let entry_point = load_kernel(&boot_config.kernel_file, guest_memory)?;
+    #[cfg(target_arch = "x86_64")]
+    crate::arch::x86_64::smbios::configure(
+        guest_memory,
+        vm_resources.boot_source.config.firmware.as_ref(),
+        entry_point.protocol,
+    )
+    .map_err(ConfigurationError::FirmwareIdentity)?;
     #[cfg(target_arch = "aarch64")]
     if entry_point.protocol == crate::arch::BootProtocol::FirmwareBoot {
         crate::arch::aarch64::reserve_firmware_memory(&kvm_vm)?;
@@ -383,6 +395,7 @@ pub fn build_microvm_for_boot(
         entry_point,
         &initrd,
         boot_cmdline,
+        vm_resources.boot_source.config.firmware.as_ref(),
     )?;
 
     #[cfg(target_arch = "x86_64")]
@@ -461,6 +474,8 @@ pub fn build_and_boot_microvm(
 /// Error type for [`build_microvm_from_snapshot`].
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum BuildMicrovmFromSnapshotError {
+    /// Invalid persisted boot configuration: {0}
+    BootSource(#[from] crate::vmm_config::boot_source::BootSourceConfigError),
     /// Failed to create microVM and vCPUs: {0}
     CreateMicrovmAndVcpus(#[from] StartMicrovmError),
     /// Could not access KVM: {0}
@@ -508,6 +523,7 @@ pub fn build_microvm_from_snapshot(
     vmgenid_notification: crate::devices::acpi::vmgenid::VmGenIdRestoreNotification,
     vmclock_notification: crate::devices::acpi::vmclock::VmClockRestoreNotification,
 ) -> Result<Arc<Mutex<Vmm>>, BuildMicrovmFromSnapshotError> {
+    microvm_state.vm_info.boot_source.validate()?;
     // Build Vmm.
     debug!("event_start: build microvm from snapshot");
 
