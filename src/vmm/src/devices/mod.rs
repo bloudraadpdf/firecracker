@@ -18,6 +18,8 @@ pub mod pseudo;
 #[cfg(target_arch = "x86_64")]
 pub mod tpm;
 #[cfg(target_arch = "x86_64")]
+pub mod uefi_vars;
+#[cfg(target_arch = "x86_64")]
 pub mod usb;
 pub mod virtio;
 

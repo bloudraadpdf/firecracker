@@ -37,6 +37,12 @@ pub mod pmem;
 /// Wrapper for configuring microVM snapshots and the microVM state.
 pub mod serial;
 pub mod snapshot;
+/// Optional AMD64 TPM 2.0 backend.
+#[cfg(target_arch = "x86_64")]
+pub mod tpm;
+/// Optional protected UEFI variable service.
+#[cfg(target_arch = "x86_64")]
+pub mod uefi_vars;
 /// Wrapper for configuring the vsock devices attached to the microVM.
 pub mod vsock;
 

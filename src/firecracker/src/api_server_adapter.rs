@@ -117,7 +117,7 @@ impl ApiServerAdapter {
 
             // If the latest req is a pause request, temporarily switch to a mode where we
             // do blocking `recv`s on the `from_api` receiver in a loop, until we get
-            // unpaused. The device emulation is implicitly paused since we do not
+            // unpaused or stopped. The device emulation is implicitly paused since we do not
             // relinquish control to the event manager because we're not returning from
             // `process`.
             if request_is_pause {
@@ -127,7 +127,7 @@ impl ApiServerAdapter {
                     let req = self.from_api.recv().expect("Error receiving API request.");
                     let req_is_resume = *req == VmmAction::Resume;
                     self._handle_request(*req, event_manager);
-                    if req_is_resume {
+                    if req_is_resume || self.controller.shutdown_exit_code().is_some() {
                         break;
                     }
                 }
