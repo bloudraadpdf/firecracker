@@ -3,15 +3,22 @@
 """Exercise optional platform devices through the jailed VMM and normal API."""
 
 import json
+import os
 import platform
+import shutil
 import socket
+import stat
 import struct
+import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
 from tenacity import retry, stop_after_delay, wait_fixed
 
+import host_tools.cargo_build as host
 from framework import utils
+from framework.defs import LOCAL_BUILD_PATH
 
 pytestmark = pytest.mark.skipif(platform.machine() != "x86_64", reason="AMD64 platform")
 
@@ -119,3 +126,150 @@ def test_console_boot_and_restore(microvm_factory, platform_boot_image, tmp_path
     _load(restored, snapshot)
     assert _frame(Path(restored.chroot()) / "console.sock") == frame
     restored.kill()
+
+
+@retry(stop=stop_after_delay(5), wait=wait_fixed(0.01), reraise=True)
+def _ready(process, path, vm, *, mode=None):
+    assert process.poll() is None
+    assert path.is_socket()
+    if mode is not None:
+        assert stat.S_IMODE(path.stat().st_mode) == mode
+    os.chown(path, -1, vm.jailer.gid)
+    path.chmod(0o660)
+
+
+@pytest.fixture(scope="module")
+def variable_helper():
+    """Build the separate GPL helper with its native library dependencies."""
+    target = f"{platform.machine()}-unknown-linux-gnu"
+    host.cargo("build", f"--locked --target {target}", cwd="../tools/uefi-vars-helper")
+    return LOCAL_BUILD_PATH / "cargo_target" / target / "debug/firecracker-uefi-vars"
+
+
+@pytest.fixture
+def platform_helpers(microvm_factory, variable_helper):
+    """Own helper processes and stop VMMs before terminating their backends."""
+    processes = []
+    directories = []
+    mounts = []
+
+    def start(vm, source=None):
+        directory = tempfile.TemporaryDirectory(prefix="pf-", dir=LOCAL_BUILD_PATH)
+        directories.append(directory)
+        root = Path(directory.name)
+        state = root / "variables.json"
+        if source is None:
+            state.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "identity": [81] * 16,
+                        "generation": 0,
+                        "state": {"flags": 0, "variables": [], "policies": []},
+                    }
+                ),
+                encoding="utf-8",
+            )
+        else:
+            shutil.copyfile(source, state)
+        tpm_state = root / "tpm"
+        tpm_state.mkdir(mode=0o700)
+        tpm_socket = root / "tpm.sock"
+        variables_socket = root / "vars.sock"
+        commands = [
+            [
+                "swtpm",
+                "socket",
+                "--tpm2",
+                "--tpmstate",
+                f"dir={tpm_state}",
+                "--ctrl",
+                f"type=unixio,path={tpm_socket}",
+                "--flags",
+                "not-need-init,disable-auto-shutdown",
+            ],
+            [str(variable_helper), "serve", str(state), str(variables_socket)],
+        ]
+        os.chown(root, -1, vm.jailer.gid)
+        root.chmod(0o710)
+        for command, path in zip(commands, [tpm_socket, variables_socket]):
+            process = subprocess.Popen(command)  # pylint: disable=consider-using-with
+            processes.append(process)
+            _ready(process, path, vm, mode=0o600 if path == variables_socket else None)
+        mount = Path(vm.chroot()) / "helpers"
+        mount.mkdir(parents=True)
+        utils.check_output(["mount", "--bind", str(root), str(mount)], shell=False)
+        mounts.append(mount)
+        return (
+            {"socket_path": "/helpers/tpm.sock"},
+            {"socket_path": "/helpers/vars.sock"},
+            state,
+            processes[-1],
+        )
+
+    try:
+        yield start
+    finally:
+        for vm in microvm_factory.vms:
+            vm.kill()
+        for process in processes:
+            if process.poll() is None:
+                process.terminate()
+            process.wait(timeout=5)
+        for mount in reversed(mounts):
+            utils.check_output(["umount", str(mount)], shell=False)
+        for directory in directories:
+            directory.cleanup()
+
+
+def test_protected_services_restore_generation(
+    microvm_factory, platform_boot_image, platform_helpers
+):
+    """Restore real swtpm/helper state and reject a stale destination generation."""
+    vm = microvm_factory.build(pci=True)
+    tpm, variables, store, _helper = platform_helpers(vm)
+    _configure(vm, platform_boot_image, {"tpm": tpm, "uefi-vars": variables})
+    snapshot = _snapshot(vm)
+    vm.kill()
+    generation = json.loads(store.read_text(encoding="utf-8"))["generation"]
+    restored = microvm_factory.build(pci=True)
+    tpm, variables, destination, _helper = platform_helpers(restored, store)
+    restored.spawn(serial_out_path=None)
+    state, memory = (restored.create_jailed_resource(path) for path in snapshot)
+    request = {
+        "snapshot_path": state,
+        "mem_backend": {"backend_type": "File", "backend_path": memory},
+        "resume_vm": True,
+        "tpm": tpm,
+        "uefi_vars": {**variables, "expected_generation": generation + 1},
+    }
+    with pytest.raises(RuntimeError, match="[Vv]ariable|[Ff]irmware"):
+        restored.api.snapshot_load.put(**request)
+    assert (
+        json.loads(destination.read_text(encoding="utf-8"))["generation"] == generation
+    )
+
+    restored.kill()
+    restored = microvm_factory.build(pci=True)
+    tpm, variables, destination, helper = platform_helpers(restored, store)
+    _load(
+        restored,
+        snapshot,
+        tpm=tpm,
+        uefi_vars={**variables, "expected_generation": generation},
+    )
+    assert (
+        json.loads(destination.read_text(encoding="utf-8"))["generation"]
+        == generation + 1
+    )
+    assert restored.api.vm_config.get().json()["tpm"] == tpm
+    assert restored.api.vm_config.get().json()["uefi-vars"] == variables
+    helper.terminate()
+    helper.wait(timeout=5)
+    restored.pause()
+    with pytest.raises(RuntimeError, match="[Vv]ariable|[Ff]irmware|[Dd]evice"):
+        restored.api.snapshot_create.put(
+            snapshot_type="Full", snapshot_path="failed", mem_file_path="failed.mem"
+        )
+    restored.check_log_message("UEFI variable service failed")
+    restored.mark_killed()
