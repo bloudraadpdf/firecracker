@@ -1,0 +1,114 @@
+--- /dev/null
++++ b/OvmfPkg/CloudHv/CloudHvConsoleX64.dsc
+@@ -0,0 +1,10 @@
++## @file
++# Firecracker graphical CloudHv build profile.
++# Copyright 2026 Bloudraad.
++# SPDX-License-Identifier: BSD-2-Clause-Patent
++##
++
++[Defines]
++  DEFINE FIRECRACKER_CONSOLE = TRUE
++
++!include OvmfPkg/CloudHv/CloudHvX64.dsc
+--- a/OvmfPkg/CloudHv/CloudHvX64.dsc
++++ b/OvmfPkg/CloudHv/CloudHvX64.dsc
+@@ -19,7 +19,11 @@
+   PLATFORM_GUID                  = 97bb49d2-9814-4bea-8311-f8b9ac231e11
+   PLATFORM_VERSION               = 0.1
+   DSC_SPECIFICATION              = 0x00010005
++!ifdef FIRECRACKER_CONSOLE
++  OUTPUT_DIRECTORY               = Build/CloudHvConsoleX64
++!else
+   OUTPUT_DIRECTORY               = Build/CloudHvX64
++!endif
+   SUPPORTED_ARCHITECTURES        = X64
+   BUILD_TARGETS                  = NOOPT|DEBUG|RELEASE
+   SKUID_IDENTIFIER               = DEFAULT
+@@ -79,6 +83,9 @@
+ [BuildOptions]
++!ifdef FIRECRACKER_CONSOLE
++  GCC:*_*_*_CC_FLAGS = -DFIRECRACKER_CONSOLE
++!endif
+   GCC:RELEASE_*_*_CC_FLAGS             = -DMDEPKG_NDEBUG
+   INTEL:RELEASE_*_*_CC_FLAGS           = /D MDEPKG_NDEBUG
+   MSFT:RELEASE_*_*_CC_FLAGS            = /D MDEPKG_NDEBUG
+ !if $(TOOL_CHAIN_TAG) != "XCODE5" && $(TOOL_CHAIN_TAG) != "CLANGPDB"
+   GCC:*_*_*_CC_FLAGS                   = -mno-mmx -mno-sse
+@@ -614,8 +621,13 @@
+   gEfiMdeModulePkgTokenSpaceGuid.PcdAcpiS3Enable|FALSE
+   gUefiOvmfPkgTokenSpaceGuid.PcdOvmfHostBridgePciDevId|0
++!ifdef FIRECRACKER_CONSOLE
++  gUefiOvmfPkgTokenSpaceGuid.PcdPciIoBase|0x1000
++  gUefiOvmfPkgTokenSpaceGuid.PcdPciIoSize|0xF000
++!else
+   gUefiOvmfPkgTokenSpaceGuid.PcdPciIoBase|0x0
+   gUefiOvmfPkgTokenSpaceGuid.PcdPciIoSize|0x0
++!endif
+   gUefiOvmfPkgTokenSpaceGuid.PcdPciMmio32Base|0x0
+   gUefiOvmfPkgTokenSpaceGuid.PcdPciMmio32Size|0x0
+   gUefiOvmfPkgTokenSpaceGuid.PcdPciMmio64Base|0x0
+   gUefiOvmfPkgTokenSpaceGuid.PcdPciMmio64Size|0x800000000
+@@ -784,6 +793,15 @@
+   MdeModulePkg/Universal/WatchdogTimerDxe/WatchdogTimer.inf
+   MdeModulePkg/Universal/MonotonicCounterRuntimeDxe/MonotonicCounterRuntimeDxe.inf
+   MdeModulePkg/Universal/CapsuleRuntimeDxe/CapsuleRuntimeDxe.inf
++!ifdef FIRECRACKER_CONSOLE
++  OvmfPkg/QemuVideoDxe/QemuVideoDxe.inf
++  OvmfPkg/SioBusDxe/SioBusDxe.inf {
++    <BuildOptions>
++      GCC:*_*_*_CC_FLAGS = -DFIRECRACKER_CONSOLE
++  }
++  MdeModulePkg/Bus/Isa/Ps2KeyboardDxe/Ps2KeyboardDxe.inf
++  MdeModulePkg/Bus/Isa/Ps2MouseDxe/Ps2MouseDxe.inf
++!endif
+   MdeModulePkg/Universal/Console/ConPlatformDxe/ConPlatformDxe.inf
+   MdeModulePkg/Universal/Console/ConSplitterDxe/ConSplitterDxe.inf
+   MdeModulePkg/Universal/Console/GraphicsConsoleDxe/GraphicsConsoleDxe.inf {
+--- a/OvmfPkg/CloudHv/CloudHvX64.fdf
++++ b/OvmfPkg/CloudHv/CloudHvX64.fdf
+@@ -241,6 +241,12 @@
+ INF  MdeModulePkg/Universal/WatchdogTimerDxe/WatchdogTimer.inf
+ INF  MdeModulePkg/Universal/MonotonicCounterRuntimeDxe/MonotonicCounterRuntimeDxe.inf
+ INF  MdeModulePkg/Universal/CapsuleRuntimeDxe/CapsuleRuntimeDxe.inf
++!ifdef FIRECRACKER_CONSOLE
++INF  OvmfPkg/QemuVideoDxe/QemuVideoDxe.inf
++INF  OvmfPkg/SioBusDxe/SioBusDxe.inf
++INF  MdeModulePkg/Bus/Isa/Ps2KeyboardDxe/Ps2KeyboardDxe.inf
++INF  MdeModulePkg/Bus/Isa/Ps2MouseDxe/Ps2MouseDxe.inf
++!endif
+ INF  MdeModulePkg/Universal/Console/ConPlatformDxe/ConPlatformDxe.inf
+ INF  MdeModulePkg/Universal/Console/ConSplitterDxe/ConSplitterDxe.inf
+ INF  MdeModulePkg/Universal/Console/GraphicsConsoleDxe/GraphicsConsoleDxe.inf
+--- a/OvmfPkg/SioBusDxe/SioService.c
++++ b/OvmfPkg/SioBusDxe/SioService.c
+@@ -74,6 +74,13 @@
+     0,
+     { (ACPI_SMALL_RESOURCE_HEADER *)&mPs2KeyboardDeviceResources }
+   }   // PS/2 Keyboard Controller
++#ifdef FIRECRACKER_CONSOLE
++  , {
++    EISA_PNP_ID (0xF13),
++    0,
++    { (ACPI_SMALL_RESOURCE_HEADER *)&mPs2KeyboardDeviceResources }
++  }
++#endif
+ };
+
+ //
+--- a/OvmfPkg/Library/PlatformInitLib/Platform.c
++++ b/OvmfPkg/Library/PlatformInitLib/Platform.c
+@@ -138,8 +138,13 @@
+   UINT32  PciBase;
+   UINT32  PciSize;
+ 
++#ifdef FIRECRACKER_CONSOLE
++  PciIoBase = 0x1000;
++  PciIoSize = 0xF000;
++#else
+   PciIoBase = 0xC000;
+   PciIoSize = 0x4000;
++#endif
+ 
+   //
+   // Video memory + Legacy BIOS region
