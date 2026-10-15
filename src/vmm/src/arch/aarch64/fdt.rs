@@ -67,11 +67,12 @@ pub enum FdtError {
 /// Creates the flattened device tree for this aarch64 microVM.
 pub fn create_fdt(
     guest_mem: &GuestMemoryMmap,
-    vcpu_mpidr: Vec<u64>,
+    topology: &super::CpuTopology,
     cmdline: CString,
     device_manager: &DeviceManager,
     gic_device: &GICDevice,
     initrd: &Option<InitrdConfig>,
+    protocol: super::BootProtocol,
 ) -> Result<Vec<u8>, FdtError> {
     // Allocate stuff necessary for storing the blob.
     let mut fdt_writer = FdtWriter::new()?;
@@ -90,8 +91,17 @@ pub fn create_fdt(
     // This is not mandatory but we use it to point the root node to the node
     // containing description of the interrupt controller for this VM.
     fdt_writer.property_u32("interrupt-parent", GIC_PHANDLE)?;
-    create_cpu_nodes(&mut fdt_writer, &vcpu_mpidr)?;
-    create_memory_node(&mut fdt_writer, guest_mem)?;
+    create_cpu_nodes(&mut fdt_writer, &topology.mpidrs)?;
+    if let Some(irq) = topology.pmu_irq {
+        let pmu = fdt_writer.begin_node("pmu")?;
+        fdt_writer.property_string("compatible", "arm,armv8-pmuv3")?;
+        fdt_writer.property_array_u32(
+            "interrupts",
+            &[GIC_FDT_IRQ_TYPE_PPI, irq - 16, IRQ_TYPE_LEVEL_HI],
+        )?;
+        fdt_writer.end_node(pmu)?;
+    }
+    create_memory_node(&mut fdt_writer, guest_mem, protocol)?;
     create_chosen_node(&mut fdt_writer, cmdline, initrd)?;
     create_gic_node(&mut fdt_writer, gic_device)?;
     create_timer_node(&mut fdt_writer)?;
@@ -220,7 +230,11 @@ fn create_cpu_nodes(fdt: &mut FdtWriter, vcpu_mpidr: &[u64]) -> Result<(), FdtEr
     Ok(())
 }
 
-fn create_memory_node(fdt: &mut FdtWriter, guest_mem: &GuestMemoryMmap) -> Result<(), FdtError> {
+fn create_memory_node(
+    fdt: &mut FdtWriter,
+    guest_mem: &GuestMemoryMmap,
+    protocol: super::BootProtocol,
+) -> Result<(), FdtError> {
     // See https://github.com/torvalds/linux/blob/master/Documentation/devicetree/booting-without-of.txt#L960
     // for an explanation of this.
 
@@ -238,12 +252,15 @@ fn create_memory_node(fdt: &mut FdtWriter, guest_mem: &GuestMemoryMmap) -> Resul
         .iter()
         .find(|region| region.region_type == GuestRegionType::Dram)
         .unwrap();
+    // Firmware reserves platform memory through the UEFI memory map.
+    let reserved = match protocol {
+        super::BootProtocol::FirmwareBoot => 0,
+        super::BootProtocol::LinuxBoot => super::layout::SYSTEM_MEM_SIZE,
+    };
     // Find the start of memory after the system memory region
-    let start_addr = dram_region
-        .start_addr()
-        .unchecked_add(super::layout::SYSTEM_MEM_SIZE);
+    let start_addr = dram_region.start_addr().unchecked_add(reserved);
     // Size of the memory is the region size minus the system memory size
-    let mem_size = dram_region.len() - super::layout::SYSTEM_MEM_SIZE;
+    let mem_size = dram_region.len() - reserved;
 
     let mem_reg_prop = &[start_addr.raw_value(), mem_size];
     let mem = fdt.begin_node("memory@ram")?;
@@ -568,6 +585,38 @@ mod tests {
     use crate::{EventManager, Kvm};
 
     #[test]
+    fn test_firmware_and_linux_memory_handoff() {
+        use crate::arch::BootProtocol;
+        use crate::arch::aarch64::layout::{DRAM_MEM_START, SYSTEM_MEM_SIZE};
+
+        let mem = arch_mem(0x80_0000);
+        let region = mem
+            .iter()
+            .find(|r| r.region_type == GuestRegionType::Dram)
+            .unwrap();
+        for (protocol, reserved) in [
+            (BootProtocol::LinuxBoot, SYSTEM_MEM_SIZE),
+            (BootProtocol::FirmwareBoot, 0),
+        ] {
+            let mut writer = FdtWriter::new().unwrap();
+            let root = writer.begin_node("").unwrap();
+            create_memory_node(&mut writer, &mem, protocol).unwrap();
+            writer.end_node(root).unwrap();
+            let tree = device_tree::DeviceTree::load(&writer.finish().unwrap()).unwrap();
+            let node = tree.find("/memory@ram").unwrap();
+            let reg = node.prop_raw("reg").unwrap();
+            assert_eq!(
+                u64::from_be_bytes(reg[..8].try_into().unwrap()),
+                DRAM_MEM_START + reserved
+            );
+            assert_eq!(
+                u64::from_be_bytes(reg[8..].try_into().unwrap()),
+                region.len() - reserved
+            );
+        }
+    }
+
+    #[test]
     fn test_create_fdt() {
         let mem = arch_mem(FDT_MAX_SIZE + 0x1000);
         let mut event_manager = EventManager::new().unwrap();
@@ -600,11 +649,15 @@ mod tests {
 
         let dtb_bytes = create_fdt(
             &mem,
-            vec![0],
+            &super::super::CpuTopology {
+                mpidrs: vec![0],
+                pmu_irq: None,
+            },
             CString::new("console=tty0").unwrap(),
             &device_manager,
             &gic,
             &Some(initrd),
+            super::super::BootProtocol::LinuxBoot,
         )
         .unwrap();
         let generated_fdt = device_tree::DeviceTree::load(&dtb_bytes).unwrap();

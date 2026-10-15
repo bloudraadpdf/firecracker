@@ -144,6 +144,11 @@ impl Fadt {
         self.iapc_boot_arch = U16::new(flags);
     }
 
+    /// Use PSCI with the HVC conduit on Arm.
+    pub fn set_arm_psci_hvc(&mut self) {
+        self.arm_boot_arch = U16::new(3);
+    }
+
     /// Set the hypervisor vendor ID
     pub fn set_hypervisor_vendor_id(&mut self, hypervisor_vendor_id: [u8; 8]) {
         self.hypervisor_vendor_id = hypervisor_vendor_id;

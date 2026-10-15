@@ -18,6 +18,9 @@ use event_loop::event_loop;
 use target::GdbTargetError;
 use vm_memory::GuestAddress;
 
+/// A stopped vCPU thread and its KVM debug exception.
+pub type GdbEvent = (usize, kvm_bindings::kvm_debug_exit_arch);
+
 use crate::Vmm;
 use crate::logger::trace;
 
@@ -34,7 +37,7 @@ use crate::logger::trace;
 /// communcation to the GDB server
 pub fn gdb_thread(
     vmm: Arc<Mutex<Vmm>>,
-    gdb_event_receiver: Receiver<usize>,
+    gdb_event_receiver: Receiver<crate::gdb::GdbEvent>,
     entry_addr: GuestAddress,
     socket_addr: &str,
 ) -> Result<(), GdbTargetError> {
