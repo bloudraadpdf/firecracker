@@ -419,6 +419,8 @@ impl Vcpu {
 
         match self.kvm_vcpu.fd.run() {
             #[cfg(target_arch = "x86_64")]
+            Ok(VcpuExit::IoIn(..) | VcpuExit::IoOut(..)) => self.kvm_vcpu.emulate_pio(),
+            #[cfg(target_arch = "x86_64")]
             Ok(VcpuExit::Hyperv) => {
                 // JUSTIFICATION: kvm-ioctls exposes no typed Hyper-V exit payload.
                 // SAFETY: KVM_EXIT_HYPERV selects this union member; KVM_RUN has
