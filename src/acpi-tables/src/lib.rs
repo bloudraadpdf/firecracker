@@ -7,6 +7,7 @@
 use vm_memory::{GuestAddress, GuestMemory, GuestMemoryError};
 
 pub mod aml;
+pub mod arm;
 pub mod dsdt;
 pub mod fadt;
 pub mod madt;

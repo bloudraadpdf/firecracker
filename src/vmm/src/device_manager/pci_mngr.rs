@@ -155,7 +155,6 @@ impl PciDevices {
         &self.pci_segment
     }
 
-    #[cfg(target_arch = "x86_64")]
     pub(crate) fn append_aml_bytes(
         &self,
         dsdt_data: &mut Vec<u8>,

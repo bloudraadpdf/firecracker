@@ -5,16 +5,26 @@ use acpi_tables::fadt::{FADT_F_HW_REDUCED_ACPI, FADT_F_PWR_BUTTON, FADT_F_SLP_BU
 use acpi_tables::{Dsdt, Fadt, Madt, Mcfg, Rsdp, Sdt, Xsdt, aml};
 use vm_allocator::AllocPolicy;
 
+#[cfg(target_arch = "aarch64")]
+pub(crate) use self::aarch64::create_acpi_tables;
+#[cfg(target_arch = "aarch64")]
+use self::aarch64::{rsdp_addr, setup_arch_dsdt, setup_arch_fadt};
+#[cfg(target_arch = "x86_64")]
 use crate::Vcpu;
+#[cfg(target_arch = "x86_64")]
 use crate::acpi::x86_64::{
     apic_addr, rsdp_addr, setup_arch_dsdt, setup_arch_fadt, setup_interrupt_controllers,
 };
+#[cfg(target_arch = "x86_64")]
 use crate::arch::x86_64::layout;
 use crate::device_manager::DeviceManager;
 use crate::logger::{debug, error};
 use crate::vstate::memory::{GuestAddress, GuestMemoryMmap};
 use crate::vstate::resources::ResourceAllocator;
 
+#[cfg(target_arch = "aarch64")]
+mod aarch64;
+#[cfg(target_arch = "x86_64")]
 mod x86_64;
 
 // Our (Original Equipment Manufacturer" (OEM) name. OEM is how ACPI names the manufacturer of the
@@ -33,6 +43,8 @@ const HYPERVISOR_VENDOR_ID: [u8; 8] = *b"FIRECKVM";
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 /// Error type for ACPI related operations
 pub enum AcpiError {
+    /// Arm firmware requires PCI, a serial port and GICv3 with ITS
+    UnsupportedArmPlatform,
     /// Could not allocate resources: {0}
     VmAllocator(#[from] vm_allocator::Error),
     /// ACPI tables error: {0}
@@ -87,10 +99,11 @@ impl AcpiTableWriter<'_> {
         let mut dsdt_data = Vec::new();
 
         // Device DSDT data.
+        #[cfg(target_arch = "x86_64")]
         device_manager.append_aml_bytes(&mut dsdt_data)?;
 
         // Architecture specific DSDT data
-        setup_arch_dsdt(&mut dsdt_data)?;
+        setup_arch_dsdt(&mut dsdt_data, device_manager)?;
 
         let mut dsdt = Dsdt::new(OEM_ID, *b"FCVMDSDT", OEM_REVISION, dsdt_data);
         self.write_acpi_table(resource_allocator, &mut dsdt)
@@ -120,14 +133,15 @@ impl AcpiTableWriter<'_> {
     fn build_madt(
         &mut self,
         resource_allocator: &mut ResourceAllocator,
-        nr_vcpus: u8,
+        interrupt_controllers: Vec<u8>,
+        apic_address: u32,
     ) -> Result<u64, AcpiError> {
         let mut madt = Madt::new(
             OEM_ID,
             *b"FCVMMADT",
             OEM_REVISION,
-            apic_addr(),
-            setup_interrupt_controllers(nr_vcpus),
+            apic_address,
+            interrupt_controllers,
         );
         self.write_acpi_table(resource_allocator, &mut madt)
     }
@@ -138,16 +152,9 @@ impl AcpiTableWriter<'_> {
     fn build_xsdt(
         &mut self,
         resource_allocator: &mut ResourceAllocator,
-        fadt_addr: u64,
-        madt_addr: u64,
-        mcfg_addr: u64,
+        tables: Vec<u64>,
     ) -> Result<u64, AcpiError> {
-        let mut xsdt = Xsdt::new(
-            OEM_ID,
-            *b"FCMVXSDT",
-            OEM_REVISION,
-            vec![fadt_addr, madt_addr, mcfg_addr],
-        );
+        let mut xsdt = Xsdt::new(OEM_ID, *b"FCMVXSDT", OEM_REVISION, tables);
         self.write_acpi_table(resource_allocator, &mut xsdt)
     }
 
@@ -184,6 +191,7 @@ impl AcpiTableWriter<'_> {
 ///
 /// This will create the ACPI tables needed to describe to the guest OS the available hardware,
 /// such as interrupt controllers, vCPUs and VirtIO devices.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn create_acpi_tables(
     mem: &GuestMemoryMmap,
     device_manager: &mut DeviceManager,
@@ -194,13 +202,18 @@ pub(crate) fn create_acpi_tables(
     let dsdt_addr = writer.build_dsdt(device_manager, resource_allocator)?;
 
     let fadt_addr = writer.build_fadt(resource_allocator, dsdt_addr)?;
-    let madt_addr = writer.build_madt(resource_allocator, vcpus.len().try_into().unwrap())?;
+    let madt_addr = writer.build_madt(
+        resource_allocator,
+        setup_interrupt_controllers(vcpus.len().try_into().unwrap()),
+        apic_addr(),
+    )?;
     let mcfg_addr = writer.build_mcfg(resource_allocator, layout::PCI_MMCONFIG_START)?;
-    let xsdt_addr = writer.build_xsdt(resource_allocator, fadt_addr, madt_addr, mcfg_addr)?;
+    let xsdt_addr = writer.build_xsdt(resource_allocator, vec![fadt_addr, madt_addr, mcfg_addr])?;
     writer.build_rsdp(xsdt_addr)
 }
 
 #[cfg(test)]
+#[cfg(target_arch = "x86_64")]
 mod tests {
     use acpi_tables::Sdt;
     use vm_memory::Bytes;

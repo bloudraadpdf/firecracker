@@ -1,18 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend">
   <settings pass="windowsPE">
-    <component name="Microsoft-Windows-International-Core-WinPE" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+    <component name="Microsoft-Windows-International-Core-WinPE" processorArchitecture="@ARCH@" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
       <SetupUILanguage><UILanguage>en-US</UILanguage></SetupUILanguage>
       <InputLocale>en-US</InputLocale><SystemLocale>en-US</SystemLocale>
       <UILanguage>en-US</UILanguage><UserLocale>en-US</UserLocale>
     </component>
-    <component name="Microsoft-Windows-PnpCustomizationsWinPE" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+    <component name="Microsoft-Windows-PnpCustomizationsWinPE" processorArchitecture="@ARCH@" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
       <DriverPaths>
-        <PathAndCredentials xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" wcm:action="add" wcm:keyValue="1"><Path>E:\viostor\2k25\amd64</Path></PathAndCredentials>
-        <PathAndCredentials xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" wcm:action="add" wcm:keyValue="2"><Path>E:\NetKVM\2k25\amd64</Path></PathAndCredentials>
+        <PathAndCredentials xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" wcm:action="add" wcm:keyValue="1"><Path>E:\viostor\@DRIVER_OS@\@ARCH@</Path></PathAndCredentials>
+        <PathAndCredentials xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" wcm:action="add" wcm:keyValue="2"><Path>E:\NetKVM\@DRIVER_OS@\@ARCH@</Path></PathAndCredentials>
       </DriverPaths>
     </component>
-    <component name="Microsoft-Windows-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+    <component name="Microsoft-Windows-Setup" processorArchitecture="@ARCH@" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
       <DiskConfiguration>
         <Disk xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" wcm:action="add">
           <DiskID>0</DiskID><WillWipeDisk>true</WillWipeDisk>
@@ -37,20 +37,24 @@
     </component>
   </settings>
   <settings pass="specialize">
-    <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS"><ComputerName>FCWINDOWS</ComputerName><TimeZone>UTC</TimeZone></component>
-    <component name="Microsoft-Windows-Deployment" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+    <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="@ARCH@" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS"><ComputerName>FCWINDOWS</ComputerName><TimeZone>UTC</TimeZone></component>
+    <component name="Microsoft-Windows-Deployment" processorArchitecture="@ARCH@" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
       <RunSynchronous>
         <RunSynchronousCommand xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" wcm:action="add"><Order>1</Order><Path>cmd /c mountvol S: /s &amp;&amp; bcdboot C:\Windows /s S: /f UEFI &amp;&amp; mountvol S: /d</Path></RunSynchronousCommand>
-        <RunSynchronousCommand xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" wcm:action="add"><Order>2</Order><Path>cmd /c bcdedit /emssettings emsport:1 emsbaudrate:115200</Path></RunSynchronousCommand>
+        <RunSynchronousCommand xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" wcm:action="add"><Order>2</Order><Path>cmd /c bcdedit /emssettings @EMS_SETTINGS@</Path></RunSynchronousCommand>
         <RunSynchronousCommand xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" wcm:action="add"><Order>3</Order><Path>cmd /c bcdedit /ems {default} on</Path></RunSynchronousCommand>
         <RunSynchronousCommand xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" wcm:action="add"><Order>4</Order><Path>cmd /c bcdedit /bootems {bootmgr} on</Path></RunSynchronousCommand>
       </RunSynchronous>
     </component>
   </settings>
   <settings pass="oobeSystem">
-    <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+    <component name="Microsoft-Windows-International-Core" processorArchitecture="@ARCH@" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <InputLocale>en-US</InputLocale><SystemLocale>en-US</SystemLocale>
+      <UILanguage>en-US</UILanguage><UserLocale>en-US</UserLocale>
+    </component>
+    <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="@ARCH@" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
       <OOBE><HideEULAPage>true</HideEULAPage><HideOnlineAccountScreens>true</HideOnlineAccountScreens><HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE><ProtectYourPC>3</ProtectYourPC></OOBE>
-      <UserAccounts><AdministratorPassword><Value>@ADMIN_PASSWORD@</Value><PlainText>true</PlainText></AdministratorPassword></UserAccounts>
+      <UserAccounts><AdministratorPassword><Value>@ADMIN_PASSWORD@</Value><PlainText>true</PlainText></AdministratorPassword>@LOCAL_ACCOUNTS@</UserAccounts>
     </component>
   </settings>
 </unattend>
