@@ -98,7 +98,7 @@ The ARM TAP test encountered this shutdown after full restore; its Application
 log recorded WLMS events 100 and 101. A clean Firecracker exit is therefore
 insufficient evidence of workload success. Check all guest pass markers and the
 activation state. The activation-gated retry passed both TAP and CONNECT checks;
-see the [validation record](../../docs/windows.md).
+see the [validation record](../../docs/windows-validation.md).
 
 ## ARM64 installation
 

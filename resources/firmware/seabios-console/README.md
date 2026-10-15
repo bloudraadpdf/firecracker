@@ -71,8 +71,8 @@ backing bytes as VGA planes.
 The implementation does not yet qualify every historical VGA mode. In particular
 CGA interleaved modes, programmable character blink, underline, and
 pixel-panning behaviour require further coverage. Passing device tests is not
-evidence that Windows installation or a firmware boot has passed. Those require
-separate guest tests recorded in the console support plan.
+evidence that Windows installation or a firmware boot has passed. See the
+[validation record](../../../docs/windows-validation.md) for the guest tests.
 
 ## References and build evidence
 
@@ -81,8 +81,9 @@ The register layout follows the
 and the
 [Bochs DISPI specification](https://github.com/bochs-emu/VGABIOS/blob/master/vgabios/vbe_display_api.txt).
 The compatible UEFI driver is
-[EDK II QemuVideoDxe](https://github.com/tianocore/edk2/tree/master/OvmfPkg/QemuVideoDxe);
-adding that driver to the CloudHv firmware is a separate integration step.
+[EDK II QemuVideoDxe](https://github.com/tianocore/edk2/tree/master/OvmfPkg/QemuVideoDxe).
+The [graphical CloudHv profile](../cloudhv-console/README.md) includes that
+driver.
 
 The initial native AMD64 build produced a 39,936-byte option ROM, requiring a 64
 KiB ROM BAR. Its ROM signature is `55aa`, its checksum is zero, and its PCIR

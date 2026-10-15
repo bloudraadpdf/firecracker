@@ -14,7 +14,8 @@ Native VNC viewer -> SSH tunnel -> loopback RFB bridge --+
 
 ## Build and check
 
-From the repository root:
+Follow the [Rust build prerequisites](../README.md#build-prerequisites). From
+the repository root:
 
 ```sh
 cargo build --locked --manifest-path tools/windows/console/Cargo.toml
@@ -28,33 +29,57 @@ cargo clippy --locked --manifest-path tools/windows/console/Cargo.toml --all-tar
 
 ## Native VNC viewer
 
-On the VM host:
+The password and token examples use OpenSSL. On the VM host:
 
 ```sh
 build/cargo_target/debug/firecracker-console /run/vm/console.sock rfb 127.0.0.1:5900
 ```
 
-Forward that port through SSH and connect a VNC viewer to the forwarded port.
-Without a password file, RFB uses security type None. macOS Screen Sharing
-requires VNC password authentication. Supply an optional private password file:
+In a separate terminal on the local computer, keep this tunnel running:
 
 ```sh
-build/cargo_target/debug/firecracker-console /run/vm/console.sock rfb 127.0.0.1:5900 /run/vm/vnc.password
+ssh -N -T -o ExitOnForwardFailure=yes \
+  -L 127.0.0.1:5900:127.0.0.1:5900 user@vm-host
+```
+
+Connect the viewer to `127.0.0.1:5900` on the local computer. Without a password
+file, RFB uses security type None. macOS Screen Sharing requires VNC password
+authentication. Before starting its bridge, create the private password file on
+the VM host. The socket's private parent directory must already exist. This
+command refuses an existing password file:
+
+```sh
+(umask 077; set -C; openssl rand -hex 4 > /run/vm/vnc.password)
+```
+
+Read that file on the host to obtain the eight-character password. Start the
+macOS bridge instead of the unauthenticated bridge:
+
+```sh
+build/cargo_target/debug/firecracker-console /run/vm/console.sock rfb-macos 127.0.0.1:5900 /run/vm/vnc.password
 ```
 
 The file must contain 1 to 8 printable ASCII characters, optionally followed by
-a newline. Enter that password in Screen Sharing. Use mode `rfb-macos` instead
-of `rfb` for its keyboard convention: Command becomes the Windows key and Option
-remains Alt. Other clients and the browser retain standard RFB key mappings. VNC
-authentication is a legacy DES challenge-response protocol, not transport
-encryption; retain the SSH tunnel. The bridge rejects non-loopback bind
-addresses. Authenticated sessions remain connected while idle; the 30-second
-read deadline applies to the handshake only.
+a newline. On the local Mac, run `open vnc://127.0.0.1:5900` and enter that
+password in Screen Sharing. Mode `rfb-macos` maps Command to the Windows key and
+retains Option as Alt. Other clients use mode `rfb` for standard RFB key
+mappings; that mode also accepts the optional password file. The browser retains
+standard RFB key mappings. VNC authentication is a legacy DES challenge-response
+protocol, not transport encryption; retain the SSH tunnel. The bridge rejects
+non-loopback bind addresses. Authenticated sessions remain connected while idle;
+the 30-second read deadline applies to the handshake only.
 
 ## Browser console
 
+Stop any existing RFB bridge for this VM before starting its WebSocket bridge.
 Create a private token file containing 32 to 128 random ASCII letters, digits,
-`-` or `_`. Do not put the token in the bridge command line. Start the bridge:
+`-` or `_`. For example, on the VM host:
+
+```sh
+(umask 077; set -C; openssl rand -hex 32 > /run/vm/console.token)
+```
+
+Do not put the token in the bridge command line. Start the bridge:
 
 ```sh
 build/cargo_target/debug/firecracker-console /run/vm/console.sock websocket 127.0.0.1:5901 /run/vm/console.token https://console.example
@@ -72,21 +97,28 @@ WebSocket mode does not serve HTTP assets. The separate `assets` mode serves the
 vendored browser files. Hosted identity, TLS and per-VM user authorisation are
 gateway responsibilities.
 
-The unmodified noVNC 1.6.0 browser application is vendored in `web/` at commit
+The noVNC 1.6.0 browser application is vendored in `web/` at commit
 `a8dfd6a3ea3c74244f5ebdaa5a7f1023007a7820`. Its source, authors and licence
-texts are included. Browser code is loaded locally, without a CDN.
+texts are included. Runtime files remain unmodified; icon generation inputs are
+omitted. Browser code is loaded locally, without a CDN.
 
-For an SSH-only session, run the asset and WebSocket processes on the VM host:
+For an SSH-only session, run the asset server in one terminal on the VM host:
 
 ```sh
 build/cargo_target/debug/firecracker-console tools/windows/console/web assets 127.0.0.1:6080
+```
+
+Run the WebSocket bridge in another terminal on the same host:
+
+```sh
 build/cargo_target/debug/firecracker-console /run/vm/console.sock websocket 127.0.0.1:5901 /run/vm/console.token http://127.0.0.1:6080
 ```
 
 Forward both ports from the local computer:
 
 ```sh
-ssh -L 6080:127.0.0.1:6080 -L 5901:127.0.0.1:5901 user@vm-host
+ssh -N -T -o ExitOnForwardFailure=yes \
+  -L 127.0.0.1:6080:127.0.0.1:6080 -L 127.0.0.1:5901:127.0.0.1:5901 user@vm-host
 ```
 
 Open this local URL, replacing `TOKEN` with the token file's value:
@@ -170,6 +202,7 @@ Unix-socket backend. These tests do not replace guest or noVNC browser tests.
 Capture the current display as binary RGB PPM. Existing files are not replaced:
 
 ```sh
+mkdir -p build/windows/console
 build/cargo_target/debug/firecracker-console /run/vm/console.sock screenshot build/windows/console/boot.ppm
 ```
 

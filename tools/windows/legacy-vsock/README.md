@@ -4,6 +4,9 @@ These sources reproduce the Windows XP SP3 x86 and Windows 7 SP1 x64 guest
 Viosock work. They do not change Firecracker. Use disposable guest disks. The
 drivers use a local test certificate; they are not production-signed.
 
+Follow the [Rust build prerequisites](../README.md#build-prerequisites) for the
+Linux host tools and cross-compiled probes.
+
 ## Pinned inputs
 
 - [virtio-win/kvm-guest-drivers-windows](https://github.com/virtio-win/kvm-guest-drivers-windows),
@@ -12,7 +15,7 @@ drivers use a local test certificate; they are not production-signed.
   SHA-256 `1bd011404cc16c912463fa103cedc1793f9b55f9977ab355ce98ae89c075d841`.
 - [WDK 7.1](https://download.microsoft.com/download/4/a/2/4a25c7d5-efbe-4182-b6a9-ae6850409a78/GRMWDK_EN_7600_1.ISO),
   SHA-256 `5edc723b50ea28a070cad361dd0927df402b7a861a036bbcf11d27ebba77657d`.
-- Rust 1.99.0 with the `i686-pc-windows-msvc` and `x86_64-pc-windows-msvc`
+- Rust 1.98.1 with the `i686-pc-windows-msvc` and `x86_64-pc-windows-msvc`
   targets for the standalone test programs.
 
 Apply the files in `patches/series`, in order, to the pinned source. The first
@@ -76,7 +79,7 @@ In an isolated checkout of that revision, copy `windows_probe.rs` to
 `crates/tokoloshe-egress/examples/windows_probe.rs` and build:
 
 ```sh
-cargo build --locked -p tokoloshe-egress --example windows_probe --bin tokoloshe-egress
+rustup run 1.98.1 cargo build --locked -p tokoloshe-egress --example windows_probe --bin tokoloshe-egress
 ```
 
 The helper takes `RUN SIDECAR SOCKET IPV4_ENDPOINT`. Keep the run path short
@@ -91,15 +94,21 @@ It does not replace the proxy implementation.
 The Rust programs have no standard-library dependency. Keep the sibling
 `egress/win32.rs` source when copying `connect.rs`; it shares the small Win32
 import declarations with the HTTP probes. Build an x86 import library from
-`msvcrt.def` with the selected Rust toolchain's `rust-lld`:
+`msvcrt.def` with the selected Rust toolchain's `rust-lld`. Run these commands
+from the repository root:
 
 ```sh
-rust-lld -flavor link /lib /machine:x86 /def:msvcrt.def /out:msvcrt.lib
+mkdir -p build/windows/legacy-vsock
+rust_linker="$(rustc --print sysroot)/lib/rustlib/$(rustc --print host-tuple)/bin/rust-lld"
+test -x "$rust_linker"
+"$rust_linker" -flavor link /lib /machine:x86 \
+  /def:tools/windows/legacy-vsock/msvcrt.def /out:build/windows/legacy-vsock/msvcrt.lib
 rustc --edition 2024 --target i686-pc-windows-msvc \
   --check-cfg 'cfg(xp_matrix)' -C panic=abort -C opt-level=2 -C lto=fat \
-  -C linker=rust-lld -C link-arg=/entry:mainCRTStartup \
+  -C linker="$rust_linker" -C link-arg=/entry:mainCRTStartup \
   -C link-arg=/subsystem:console,5.01 -C link-arg=/nodefaultlib \
-  -C link-arg=msvcrt.lib -D warnings connect.rs -o legacy-connect.exe
+  -C link-arg=build/windows/legacy-vsock/msvcrt.lib -D warnings \
+  tools/windows/legacy-vsock/connect.rs -o build/windows/legacy-vsock/legacy-connect.exe
 ```
 
 Add `--cfg xp_matrix` and name the output `xp-connect.exe` for the XP
@@ -134,12 +143,12 @@ fresh test directory containing `config.json`, with absolute firmware and disk
 paths, `track_dirty_pages: true`, CID 3, and `uds_path: "vsock.sock"`. Set
 `WINDOWS_CONNECT_FC`, `WINDOWS_CONNECT_PROXY` (Tokoloshe `windows_probe`),
 `WINDOWS_CONNECT_SIDECAR` (`tokoloshe-egress`), `WINDOWS_CONNECT_PROXY_ROOT`,
-and `WINDOWS_CONNECT_REBASE` to their absolute paths. Set `WINDOWS_CONNECT_UID`
-and `WINDOWS_CONNECT_GID` to the test user. The controller creates `run/`;
-preserve or remove an earlier run before starting another. It executes a
-read-only per-run copy of its shell source. For a graphical guest, use the
-relative console path `console.sock`; cleanup removes its stale socket only
-after the owned VMM has stopped. User and group IDs default to the invoking
+and `WINDOWS_CONNECT_SNAPSHOT_EDITOR` to their absolute paths. Set
+`WINDOWS_CONNECT_UID` and `WINDOWS_CONNECT_GID` to the test user. The controller
+creates `run/`; preserve or remove an earlier run before starting another. It
+executes a read-only per-run copy of its shell source. For a graphical guest,
+use the relative console path `console.sock`; cleanup removes its stale socket
+only after the owned VMM has stopped. User and group IDs default to the invoking
 user. When changing identity, it initialises that user's supplementary groups.
 API requests have time limits. On exit it allows each child ten seconds to stop,
 then kills a child that does not exit. The proxy uses a separate process group
@@ -157,5 +166,5 @@ records its final SHA-256 in the transcript.
 signed Viosock drivers. The [egress harness](../egress/README.md) provides the
 shared offline verifier and the separate TAP regression procedure.
 
-The full test history and evidence paths are in the
-[Windows support plan](../../../docs/windows.md).
+The tested profiles and evidence are in the
+[Windows validation record](../../../docs/windows-validation.md).

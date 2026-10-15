@@ -38,27 +38,32 @@ policy or boot inputs change, so it needs its own measured-boot context.
 This supplements Get-Tpm, physical-presence and Secure Boot checks. Public reads
 do not prove possession of a private key or replace TPM attestation.
 
-Build for AMD64 using the selected Rust toolchain and its matching rust-lld:
+Follow the [Rust build prerequisites](../README.md#build-prerequisites). Run
+from the repository root. Build for AMD64 using the selected Rust toolchain and
+its matching rust-lld. Keep generated files in the ignored build directory:
 
 ```sh
-rust-lld -flavor link /lib /machine:x64 \
-  /def:../legacy-vsock/msvcrt.def /out:msvcrt.lib
+mkdir -p build/windows/tpm
+rust_linker="$(rustc --print sysroot)/lib/rustlib/$(rustc --print host-tuple)/bin/rust-lld"
+test -x "$rust_linker"
+"$rust_linker" -flavor link /lib /machine:x64 \
+  /def:tools/windows/legacy-vsock/msvcrt.def /out:build/windows/tpm/msvcrt.lib
 rustc --edition 2024 --target x86_64-pc-windows-msvc \
-  -C panic=abort -C opt-level=2 -C lto=fat -C linker=rust-lld \
+  -C panic=abort -C opt-level=2 -C lto=fat -C linker="$rust_linker" \
   -C link-arg=/entry:mainCRTStartup -C link-arg=/subsystem:console,6.01 \
-  -C link-arg=/nodefaultlib -C link-arg=msvcrt.lib -D warnings \
-  probe.rs -o tpm-runtime.exe
+  -C link-arg=/nodefaultlib -C link-arg=build/windows/tpm/msvcrt.lib -D warnings \
+  tools/windows/tpm/probe.rs -o build/windows/tpm/tpm-runtime.exe
 ```
 
-Use the actual rust-lld path from that toolchain if it is not on PATH. Copy the
-executable through read-only driver media or the guest's normal network path. Do
-not mount a live guest disk to stage it.
+Copy the executable through read-only driver media or the guest's normal network
+path. Do not mount a live guest disk to stage it.
 
 Run the parser fixtures on the build host with strict warnings:
 
 ```sh
-rustc --edition 2024 --test -D warnings probe.rs -o tpm-parser-tests
-./tpm-parser-tests
+rustc --edition 2024 --test -D warnings tools/windows/tpm/probe.rs \
+  -o build/windows/tpm/tpm-parser-tests
+build/windows/tpm/tpm-parser-tests
 ```
 
 The fixtures reject truncated, oversized, wrong-tag, failed-command and trailing

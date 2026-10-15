@@ -5,8 +5,8 @@ variables. It is not linked into Firecracker. The firmware uses EDK2's
 BSD-licensed `VirtMmCommunicationDxe` transport and `VariableSmmRuntimeDxe`
 client.
 
-See the [validation record](../../docs/windows.md) for the tested Windows
-builds, Secure Boot checks and checkpoint results.
+See the [validation record](../../docs/windows-validation.md) for the tested
+Windows builds, Secure Boot checks and checkpoint results.
 
 ## Boundary
 

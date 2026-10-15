@@ -789,3 +789,27 @@ sudo env PYTHONPATH=tests HOME=$HOME ~/.local/bin/ipython3 -i tools/sandbox.py -
 > [!WARNING]
 >
 > **Notice this runs as root!**
+
+## Standalone tools and platform devices
+
+The normal build tests discover tracked standalone Rust tool workspaces.
+`test_tool_unittests` runs their unit tests and compiles their examples;
+`test_tool_clippy` checks their native GNU targets. The Apache-licensed variable
+helper is a separate Rust workspace and uses RustCrypto for authentication.
+
+The development container builds pinned swtpm/libtpms 0.10.2 and installs
+`acpica-tools`. The variable helper builds from Rust dependencies only. Native
+test hosts need these libraries and tools, including swtpm 0.10.2 with libtpms
+0.10.x. Ubuntu 24.04's packaged swtpm lacks the required checkpoint storage
+locking; use the development container on such hosts. The real swtpm checkpoint
+and ACPICA physical-presence tests run with the normal VMM unit suite; missing
+executables are test failures.
+
+`functional/test_platform_devices.py` compiles the Apache-licensed PVH fixture
+in `data/platform/` and creates its own ROM and media bytes. It checks jailed
+boot, guest-written display pixels, console restore, protected-service
+checkpoint restore, generation rejection and backend failure. Helpers use
+private state and group-restricted sockets inside bind mounts. Teardown stops
+VMMs and helpers before removing those mounts. No Windows media is needed. These
+fixtures do not qualify production firmware, Secure Boot or Windows; retain the
+separate [Windows validation matrix](../docs/windows-validation.md).
