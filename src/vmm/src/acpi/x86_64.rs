@@ -46,14 +46,14 @@ pub(crate) fn setup_arch_fadt(fadt: &mut Fadt) {
 #[inline(always)]
 pub(crate) fn setup_arch_dsdt(
     dsdt_data: &mut Vec<u8>,
-    _: &crate::device_manager::DeviceManager,
+    devices: &crate::device_manager::DeviceManager,
 ) -> Result<(), aml::AmlError> {
     aml::Name::new(
         "_S5_".try_into()?,
         &aml::Package::new(vec![&5u8, &0u8, &0u8, &0u8]),
     )?
     .append_aml_bytes(dsdt_data)?;
-    PortIODeviceManager::append_aml_bytes(dsdt_data)
+    PortIODeviceManager::append_aml_bytes(dsdt_data, devices.acpi_device_scope())
 }
 
 pub(crate) const fn apic_addr() -> u32 {

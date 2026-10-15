@@ -997,6 +997,47 @@ impl Net {
     }
 }
 
+impl Net {
+    fn activate_configured(
+        &mut self,
+        mem: GuestMemoryMmap,
+        interrupt: Arc<dyn VirtioInterrupt>,
+        legacy: bool,
+    ) -> Result<(), ActivateError> {
+        assert!(!self.is_activated());
+
+        for q in self.queues.iter_mut().filter(|q| !legacy || q.ready) {
+            q.initialize(&mem)
+                .map_err(ActivateError::QueueMemoryError)?;
+        }
+
+        let event_idx = self.has_feature(u64::from(VIRTIO_RING_F_EVENT_IDX));
+        if event_idx {
+            for queue in &mut self.queues {
+                queue.enable_notif_suppression();
+            }
+        }
+
+        let header = VnetHeader::from_features(self.acked_features);
+        self.tap
+            .set_vnet_hdr_size(i32::try_from(header.len()).unwrap())
+            .map_err(ActivateError::TapSetVnetHdrSize)?;
+        let supported_flags: u32 = Net::build_tap_offload_features(self.acked_features);
+        self.tap
+            .set_offload(supported_flags)
+            .map_err(super::super::ActivateError::TapSetOffload)?;
+
+        self.rx_buffer.min_buffer_size = self.minimum_rx_buffer_size();
+
+        if self.activate_evt.write(1).is_err() {
+            self.metrics.activate_fails.inc();
+            return Err(ActivateError::EventFd);
+        }
+        self.device_state = DeviceState::Activated(ActiveState { mem, interrupt });
+        Ok(())
+    }
+}
+
 impl VirtioDevice for Net {
     impl_device_type!(VirtioDeviceType::Net);
 
@@ -1040,6 +1081,14 @@ impl VirtioDevice for Net {
         self.config_space.as_slice()
     }
 
+    fn legacy_config_len(&self) -> usize {
+        if self.avail_features & (1 << VIRTIO_NET_F_MTU) != 0 {
+            self.config_as_bytes().len()
+        } else {
+            std::mem::offset_of!(ConfigSpace, _max_virtqueue_pairs)
+        }
+    }
+
     fn write_config(&mut self, offset: u64, data: &[u8]) {
         self.metrics.cfg_fails.inc();
         warn!(
@@ -1054,37 +1103,15 @@ impl VirtioDevice for Net {
         mem: GuestMemoryMmap,
         interrupt: Arc<dyn VirtioInterrupt>,
     ) -> Result<(), ActivateError> {
-        assert!(!self.is_activated());
+        self.activate_configured(mem, interrupt, false)
+    }
 
-        for q in self.queues.iter_mut() {
-            q.initialize(&mem)
-                .map_err(ActivateError::QueueMemoryError)?;
-        }
-
-        let event_idx = self.has_feature(u64::from(VIRTIO_RING_F_EVENT_IDX));
-        if event_idx {
-            for queue in &mut self.queues {
-                queue.enable_notif_suppression();
-            }
-        }
-
-        let header = VnetHeader::from_features(self.acked_features);
-        self.tap
-            .set_vnet_hdr_size(i32::try_from(header.len()).unwrap())
-            .map_err(ActivateError::TapSetVnetHdrSize)?;
-        let supported_flags: u32 = Net::build_tap_offload_features(self.acked_features);
-        self.tap
-            .set_offload(supported_flags)
-            .map_err(super::super::ActivateError::TapSetOffload)?;
-
-        self.rx_buffer.min_buffer_size = self.minimum_rx_buffer_size();
-
-        if self.activate_evt.write(1).is_err() {
-            self.metrics.activate_fails.inc();
-            return Err(ActivateError::EventFd);
-        }
-        self.device_state = DeviceState::Activated(ActiveState { mem, interrupt });
-        Ok(())
+    fn activate_legacy(
+        &mut self,
+        mem: GuestMemoryMmap,
+        interrupt: Arc<dyn VirtioInterrupt>,
+    ) -> Result<(), ActivateError> {
+        self.activate_configured(mem, interrupt, true)
     }
 
     fn is_activated(&self) -> bool {
@@ -1360,6 +1387,8 @@ pub mod tests {
             Cold,
             Restore,
             Reset,
+            LegacyPartial,
+            LegacyRestore,
         }
 
         for (features, header_len) in [
@@ -1367,7 +1396,17 @@ pub mod tests {
             (1 << VIRTIO_F_VERSION_1, 12),
             (1 << VIRTIO_NET_F_MRG_RXBUF, 12),
         ] {
-            for start in [Start::Cold, Start::Restore, Start::Reset] {
+            for start in [
+                Start::Cold,
+                Start::Restore,
+                Start::Reset,
+                Start::LegacyPartial,
+                Start::LegacyRestore,
+            ] {
+                let partial = matches!(start, Start::LegacyPartial | Start::LegacyRestore);
+                if partial && features & (1 << VIRTIO_F_VERSION_1) != 0 {
+                    continue;
+                }
                 let mem = single_region_mem(2 * MAX_BUFFER_SIZE);
                 let mut net = default_net_no_mmds();
                 net.acked_features = if matches!(start, Start::Reset) {
@@ -1390,14 +1429,20 @@ pub mod tests {
                 txq.dtable[0].set(tx_addr.0, frame.len() as u32, 0, 0);
                 txq.avail.ring[0].set(0);
                 txq.avail.idx.set(1);
-                net.activate(mem.clone(), default_interrupt()).unwrap();
+                if partial {
+                    net.queues[RX_INDEX] = Queue::new(NET_QUEUE_MAX_SIZE);
+                    net.activate_legacy(mem.clone(), default_interrupt())
+                        .unwrap();
+                } else {
+                    net.activate(mem.clone(), default_interrupt()).unwrap();
+                }
                 if matches!(start, Start::Reset) {
                     assert!(net.reset());
                     net.queues = vec![rxq.create_queue(), txq.create_queue()];
                     net.acked_features = features;
                     net.activate(mem.clone(), default_interrupt()).unwrap();
                 }
-                if matches!(start, Start::Restore) {
+                if matches!(start, Start::Restore | Start::LegacyRestore) {
                     let state = net.save();
                     drop(net);
                     net = Net::restore(
@@ -1409,10 +1454,22 @@ pub mod tests {
                     )
                     .unwrap();
                     enable(&net.tap);
-                    net.activate(mem.clone(), default_interrupt()).unwrap();
+                    if partial {
+                        net.activate_legacy(mem.clone(), default_interrupt())
+                            .unwrap();
+                    } else {
+                        net.activate(mem.clone(), default_interrupt()).unwrap();
+                    }
                 }
                 let simulator = TapTrafficSimulator::new(if_index(&net.tap));
                 simulator.push_tx_packet(&payload);
+                if partial {
+                    net.process_virtio_queues().unwrap();
+                    assert_eq!(rxq.used.idx.get(), 0);
+                    txq.check_used_elem(0, 0, 0);
+                    net.queues[RX_INDEX] = rxq.create_queue();
+                    net.queues[RX_INDEX].initialize(&mem).unwrap();
+                }
                 net.process_rx().unwrap();
                 rxq.check_used_elem(0, 0, frame.len() as u32);
                 if header_len == 12 {
