@@ -136,7 +136,7 @@ state and restore that copy with the memory snapshot. Only one VM may write a
 disk at a time.
 
 The complete evidence and remaining work are in the
-[implementation plan](windows.md).
+[validation record](windows-validation.md).
 
 The current source uses snapshot format 20. Earlier snapshots are incompatible.
 ARM64 accepts only modern PCI. The format-19 binary
@@ -148,7 +148,7 @@ and checks a denied destination. Sealed accounting records exactly three allowed
 After the final probe, Windows requests shutdown and Firecracker exits zero.
 Read-only disk inspection verifies the final file against its recorded hash and
 confirms that hibernation is disabled. Evidence is in
-`build/windows/arm19/run/`; see the [format-19 result](windows.md).
+`build/windows/arm19/run/`; see the [format-19 result](windows-validation.md).
 
 The earlier TAP and subsequent-full results above used format 12. The later
 format-19 TAP run passes cold, full and differential storage, DNS, validated
@@ -171,5 +171,4 @@ Both final runs use binary SHA-256
 do not establish native ARM performance. The same format-20 binary passes Linux
 direct boot and full/differential restore with a counter probe. Each restore
 continues the counter without repeating its boot marker; evidence is in
-`build/windows/arm-linux20/`. See the implementation plan for the evidence and
-those failures.
+`build/windows/arm-linux20/`. See the validation record for the tested scope.

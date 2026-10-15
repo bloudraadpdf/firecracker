@@ -14,7 +14,8 @@ Windows image index must select Server Core. Check it against the ISO's
 From the worktree on the AMD64 Linux host:
 
 ```sh
-mise exec -- rustc --edition 2024 -D warnings tools/windows/prepare.rs \
+mkdir -p build/windows
+mise exec -- rustup run 1.98.1 rustc --edition 2024 -D warnings tools/windows/prepare.rs \
   -o build/windows/prepare
 build/windows/prepare amd64 build/windows/server-core 1 \
   build/windows/media/windows-server-2025.iso \
@@ -88,7 +89,7 @@ The ARM TAP test encountered this shutdown after full restore; its Application
 log recorded WLMS events 100 and 101. A clean Firecracker exit is therefore
 insufficient evidence of workload success. Check all guest pass markers and the
 activation state. The activation-gated retry passed both TAP and CONNECT checks;
-see the [final validation record](../../docs/windows.md).
+see the [validation record](../../docs/windows-validation.md).
 
 ## ARM64 installation
 

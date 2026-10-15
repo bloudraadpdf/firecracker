@@ -13,20 +13,27 @@ but starts no process unless `WINDOWS_SECURE_SOURCE` is set.
 
 ## Build
 
-Build the Linux echo/report server with the selected Rust toolchain:
+Run these commands from the repository root. Keep build products in the ignored
+build directory. Build the Linux echo/report server with the selected Rust
+toolchain:
 
 ```sh
-mise exec -- rustc --edition 2024 -D warnings server.rs -o tap-server
+mkdir -p build/windows/egress
+mise exec -- rustup run 1.98.1 rustc --edition 2024 -D warnings tools/windows/egress/server.rs \
+  -o build/windows/egress/tap-server
 ```
 
-Build `https.rs` for `x86_64-pc-windows-msvc`, using `rust-lld` from the same
-toolchain as `rustc`:
+Build `https.rs` for `x86_64-pc-windows-msvc`. Resolve the selected compiler's
+linker; Rust does not put `rust-lld` on `PATH`:
 
 ```sh
-mise exec -- rustc --edition 2024 --target x86_64-pc-windows-msvc \
-  -C panic=abort -C opt-level=2 -C lto=fat -C linker=rust-lld \
+rust_linker="$(mise exec -- rustup run 1.98.1 rustc --print sysroot)/lib/rustlib/$(mise exec -- rustup run 1.98.1 rustc --print host-tuple)/bin/rust-lld"
+test -x "$rust_linker"
+mise exec -- rustup run 1.98.1 rustc --edition 2024 --target x86_64-pc-windows-msvc \
+  -C panic=abort -C opt-level=2 -C lto=fat -C linker="$rust_linker" \
   -C link-arg=/entry:mainCRTStartup -C link-arg=/subsystem:console,6.01 \
-  -C link-arg=/nodefaultlib -D warnings https.rs -o https.exe
+  -C link-arg=/nodefaultlib -D warnings tools/windows/egress/https.rs \
+  -o build/windows/egress/https.exe
 ```
 
 The probe uses raw Windows import libraries, requires HTTP 200 and explicitly
@@ -38,14 +45,16 @@ the XP import library and executable as follows, with the lab host IPv4 address
 in `WINDOWS_EGRESS_HOST`:
 
 ```sh
-mise exec -- rust-lld -flavor link /lib /machine:x86 \
-  /def:../legacy-vsock/msvcrt.def /out:msvcrt.lib
-WINDOWS_EGRESS_HOST="$HOST_IPV4" mise exec -- rustc --edition 2024 \
+mise exec -- "$rust_linker" -flavor link /lib /machine:x86 \
+  /def:tools/windows/legacy-vsock/msvcrt.def /out:build/windows/egress/msvcrt.lib
+WINDOWS_EGRESS_HOST="$HOST_IPV4" mise exec -- rustup run 1.98.1 rustc --edition 2024 \
   --target i686-pc-windows-msvc -C panic=abort -C opt-level=2 -C lto=fat \
-  -C linker=rust-lld -C link-arg=/entry:mainCRTStartup \
+  -C linker="$rust_linker" -C link-arg=/entry:mainCRTStartup \
   -C link-arg=/subsystem:console,5.01 -C link-arg=/nodefaultlib \
-  -C link-arg=msvcrt.lib -D warnings xp.rs -o restore-probe.exe
-mise exec -- rustc --edition 2024 -D warnings verify-xp.rs -o verify-tap-xp
+  -C link-arg=build/windows/egress/msvcrt.lib -D warnings \
+  tools/windows/egress/xp.rs -o build/windows/egress/restore-probe.exe
+mise exec -- rustup run 1.98.1 rustc --edition 2024 -D warnings tools/windows/egress/verify-xp.rs \
+  -o build/windows/egress/verify-tap-xp
 ```
 
 Copy `restore-probe.exe` to `C:\` and `xp-matrix.cmd` to the common Startup
@@ -93,17 +102,20 @@ logger paths, `track_dirty_pages: true`, the TAP interface, no vsock, and an
 optional console at `<test-directory>/console.sock`. Set these environment
 variables to absolute paths before running `bash tap-check.sh`:
 
-| Variable                  | Value                                           |
-| ------------------------- | ----------------------------------------------- |
-| `WINDOWS_CHECK_BASE`      | Test directory                                  |
-| `WINDOWS_CHECK_FC`        | Immutable Firecracker binary                    |
-| `WINDOWS_CHECK_REBASE`    | Matching `rebase-snap` binary                   |
-| `WINDOWS_CHECK_SERVER`    | Compiled `tap-server`                           |
-| `WINDOWS_CHECK_NAMESPACE` | Existing network namespace                      |
-| `WINDOWS_CHECK_ADDRESS`   | Host IPv4 address used by the guest probe       |
-| `WINDOWS_GUEST_TAG`       | Guest label                                     |
-| `WINDOWS_CHECK_RUN`       | New result directory name; default `run1`       |
-| `WINDOWS_CHECK_INPUT`     | Optional serial input FIFO; default `/dev/null` |
+| Variable                        | Value                                           |
+| ------------------------------- | ----------------------------------------------- |
+| `WINDOWS_CHECK_BASE`            | Test directory                                  |
+| `WINDOWS_CHECK_FC`              | Immutable Firecracker binary                    |
+| `WINDOWS_CHECK_SNAPSHOT_EDITOR` | Matching `snapshot-editor` binary               |
+| `WINDOWS_CHECK_SERVER`          | Compiled `tap-server`                           |
+| `WINDOWS_CHECK_NAMESPACE`       | Existing network namespace                      |
+| `WINDOWS_CHECK_ADDRESS`         | Host IPv4 address used by the guest probe       |
+| `WINDOWS_GUEST_TAG`             | Guest label                                     |
+| `WINDOWS_CHECK_RUN`             | New result directory name; default `run1`       |
+| `WINDOWS_CHECK_INPUT`           | Optional serial input FIFO; default `/dev/null` |
+
+The controller applies differential memory through the
+[snapshot editor](../../../docs/snapshotting/snapshot-editor.md).
 
 Keep the full API and console socket paths below Linux's 108-byte Unix socket
 limit, including the result directory and `/cold.sock` suffix.
@@ -119,9 +131,19 @@ bidirectional TCP exchange. The host independently counts echo bytes.
 After S5 and Firecracker exit zero, run `tap-verify.sh` as root with the same
 base, run and tag, plus `WINDOWS_CHECK_DISK` and `WINDOWS_PARTITION_OFFSET`
 (partition offset in bytes). `WINDOWS_TRANSCRIPT_ENCODING` defaults to UTF-8;
-Windows 7 needs UTF-16LE. The verifier rejects an open disk, mounts it
-read-only, checks all three guest/host results and the final file hash. Delete
-full/differential RAM files after retaining compact evidence.
+Windows 7 needs UTF-16LE. Keep `mount-state.sh` beside both offline verifiers.
+Its exit and signal traps attempt unmount and loop detach, report cleanup
+failures, and preserve an existing verification failure. Check all 16 ordinary
+and BitLocker cleanup fixtures from the repository root:
+
+```sh
+bash tools/windows/egress/test-mount-state.sh "$PWD/build/mount-state-test"
+```
+
+The fixture directory must not exist; the test removes it. The verifier rejects
+an open disk, mounts it read-only, checks all three guest/host results and the
+final file hash. Delete full/differential RAM files after retaining compact
+evidence.
 
 ## Tokoloshe CONNECT
 
@@ -197,7 +219,7 @@ directory before execution. It copies helper state into each phase directory,
 stops the VMM before its helpers, and creates the next copy only after both
 helpers stop. It reads the copied store generation for the explicit restore
 request; it never sends a host TPM startup command. Snapshot creation still uses
-the normal API: format 25 embeds both checkpoints. On failure, the destination
+the normal API: format 27 embeds both checkpoints. On failure, the destination
 phase state is discarded. A failed phase must not be resumed. Use a short
 absolute test path: each generated helper directory must be at most 95 bytes so
 its Unix socket paths fit. Run helpers and the CONNECT VMM as the same user.
@@ -248,6 +270,8 @@ standard Windows 11 acceptance disk. Build the unmodified archive under an
 ignored tools directory with a C compiler, make and FUSE3 development headers:
 
 ```sh
+mkdir -p build/windows/tools
+cd build/windows/tools
 curl --fail --location --output libbde-alpha-20260916.tar.gz \
   https://github.com/libyal/libbde/releases/download/20260916/libbde-alpha-20260916.tar.gz
 printf '%s\n' '22a27c81f7e8a513235c18d642889b690fefd34aa5ee687929103be62246da68  libbde-alpha-20260916.tar.gz' | sha256sum -c -
@@ -265,6 +289,14 @@ instead of installing system packages. With that arrangement, set
 `PKG_CONFIG_SYSROOT_DIR` to the absolute `root`, and pass
 `CPPFLAGS=-I/absolute/root/usr/include` to make. Retain the archive and its
 licence notices when distributing the built tool.
+
+Check the pinned-version reader, including large output and producer failure:
+
+```sh
+bash tools/windows/egress/test-bitlocker-version.sh "$PWD/build/bitlocker-version-test"
+```
+
+The fixture directory must not exist; the test removes it.
 
 Set the normal TAP or CONNECT verification environment plus:
 

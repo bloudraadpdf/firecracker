@@ -17,9 +17,9 @@ Native VNC viewer -> SSH tunnel -> loopback RFB bridge --+
 From the repository root:
 
 ```sh
-mise exec -- cargo build --locked --manifest-path tools/windows/console/Cargo.toml
-mise exec -- cargo test --locked --manifest-path tools/windows/console/Cargo.toml
-mise exec -- cargo clippy --locked --manifest-path tools/windows/console/Cargo.toml --all-targets -- -D warnings
+mise exec -- cargo +1.98.1 build --locked --manifest-path tools/windows/console/Cargo.toml
+mise exec -- cargo +1.98.1 test --locked --manifest-path tools/windows/console/Cargo.toml
+mise exec -- cargo +1.98.1 clippy --locked --manifest-path tools/windows/console/Cargo.toml --all-targets -- -D warnings
 ```
 
 `Cargo.lock` pins the bridge dependencies. The WebSocket implementation uses
@@ -72,9 +72,10 @@ WebSocket mode does not serve HTTP assets. The separate `assets` mode serves the
 vendored browser files. Hosted identity, TLS and per-VM user authorisation are
 gateway responsibilities.
 
-The unmodified noVNC 1.6.0 browser application is vendored in `web/` at commit
+The noVNC 1.6.0 browser application is vendored in `web/` at commit
 `a8dfd6a3ea3c74244f5ebdaa5a7f1023007a7820`. Its source, authors and licence
-texts are included. Browser code is loaded locally, without a CDN.
+texts are included. Runtime files remain unmodified; icon generation inputs are
+omitted. Browser code is loaded locally, without a CDN.
 
 For an SSH-only session, run the asset and WebSocket processes on the VM host:
 
@@ -193,7 +194,7 @@ RFB, reads two frames, and sends/releases the `W` key. Use a disposable guest
 that is waiting for keyboard input:
 
 ```sh
-mise exec -- cargo run --locked --manifest-path tools/windows/console/Cargo.toml --example probe -- 127.0.0.1:5901 /run/vm/console.token http://127.0.0.1:6080
+mise exec -- cargo +1.98.1 run --locked --manifest-path tools/windows/console/Cargo.toml --example probe -- 127.0.0.1:5901 /run/vm/console.token http://127.0.0.1:6080
 ```
 
 The diagnostic ISO test passed through the real Firecracker Unix socket and

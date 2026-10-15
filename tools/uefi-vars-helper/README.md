@@ -15,7 +15,9 @@ Implementation checklist:
   consistency.
 - [x] Enable the console firmware client and test signed and unsigned EFI
   images.
-- [ ] Verify standard Windows 11 installation and measured boot.
+- [x] Verify standard Windows 11 installation, Secure Boot and retained PCR 7
+  across full and differential restore. See the
+  [validation record](../../docs/windows-validation.md).
 
 ## Boundary
 
@@ -36,10 +38,10 @@ The TPM CRB page at `0xfed40000` is separate.
 One connected Unix stream carries serial requests. Each header is 16 bytes:
 `FCUV`, little-endian u16 version `1`, u16 opcode, u32 request ID and u32
 payload length. Replies repeat the ID and set opcode bit 15. The reply starts
-with a u32 service status: zero success, one invalid request, two invalid state,
-three persistence failure, four authentication/provisioning failure. Malformed
-frames, wrong versions and lengths above 4 MiB close the connection. No
-pipelining or unsolicited messages are allowed.
+with a u32 service status: zero success, one invalid request, two invalid state.
+Persistence or engine failures close the connection; provisioning is a separate
+host command. Malformed frames, wrong versions and lengths above 4 MiB close the
+connection. No pipelining or unsolicited messages are allowed.
 
 | Opcode | Request                                               | Successful reply after service status                     |
 | ------ | ----------------------------------------------------- | --------------------------------------------------------- |
@@ -175,9 +177,9 @@ development headers. On Debian these packages are
 test the separate workspace:
 
 ```sh
-mise exec -- cargo +1.98.1 test --locked --manifest-path tools/uefi-vars-helper/Cargo.toml
-mise exec -- cargo +1.98.1 clippy --locked --manifest-path tools/uefi-vars-helper/Cargo.toml --all-targets -- -D warnings
-mise exec -- cargo +1.98.1 build --release --locked --manifest-path tools/uefi-vars-helper/Cargo.toml
+mise exec -- cargo +1.98.1 +1.98.1 test --locked --manifest-path tools/uefi-vars-helper/Cargo.toml
+mise exec -- cargo +1.98.1 +1.98.1 clippy --locked --manifest-path tools/uefi-vars-helper/Cargo.toml --all-targets -- -D warnings
+mise exec -- cargo +1.98.1 +1.98.1 build --release --locked --manifest-path tools/uefi-vars-helper/Cargo.toml
 ```
 
 Provision with `firecracker-uefi-vars provision STORE SEED_JSON`, then serve

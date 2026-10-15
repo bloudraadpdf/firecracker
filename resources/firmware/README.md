@@ -30,16 +30,11 @@ firmware-control pointer if the structure is not installed, which prevents
 Windows from loading conventional ACPI tables.
 
 The patch applies to Cloud Hypervisor EDK II tag `ch-97eeb7b09`. The GCC release
-build boots Windows with virtio PCI disk and network devices. The tested
-firmware SHA-256 is
-`8220806a388141650ca1c5280863a9085f2d969de9af839519d231cbd4c7286b`. This build
-passes Windows Server 2025 boot, SAC authentication, disk write/read and full
-snapshot restore with conventional ACPI. The preceding page-zero build
-`44e90992add578d5fe3ddf395c797289dde025c8e66e2f2f51f4f833412561cf` passes the
-Windows 7 loader's memory initialisation and Windows Server boot, console
-authentication, file write/read and S5 shutdown. It does not establish a
-complete Windows 7 boot. Earlier network and snapshot tests used firmware digest
-`fc8cbaf16d77721623691670c9b152d40d446a01ae8217fa99519d2798fee91d`.
+build boots Windows with virtio PCI disk and network devices. The corrected
+headless image passes the real UEFI memory-map probe, SHA-256
+`dc565fbd5facf9016863f3b91c732ee1196fa11f475a361c52654869f7d81d84`. Current
+Windows installation and egress checks use the graphical profiles; see
+[the validation record](../../docs/windows-validation.md).
 
 On a Linux build host with EDK II's build dependencies installed, run from the
 Firecracker worktree:
