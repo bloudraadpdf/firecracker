@@ -165,7 +165,7 @@ pub enum CreateSnapshotError {
 }
 
 /// Snapshot version
-pub const SNAPSHOT_VERSION: Version = Version::new(26, 0, 0);
+pub const SNAPSHOT_VERSION: Version = Version::new(28, 0, 0);
 
 /// Creates a Microvm snapshot.
 pub fn create_snapshot(
@@ -835,6 +835,13 @@ mod tests {
         state.device_states.tpm = Some(crate::devices::tpm::TpmState::maximum_test_state());
         state.device_states.uefi_vars =
             Some(crate::devices::uefi_vars::UefiVarsState::maximum_test_state());
+        state.vm_info.boot_source.firmware = Some(crate::vmm_config::boot_source::FirmwareConfig {
+            profile: crate::vmm_config::boot_source::FirmwareType::CloudHv,
+            system_uuid: "11223344-5566-7788-99aa-bbccddeeff01"
+                .to_string()
+                .try_into()
+                .unwrap(),
+        });
         let mut encoded = Vec::new();
         Snapshot::new(&state).save(&mut encoded).unwrap();
         // Ensure the high-entropy large buffers actually reached the encoder.

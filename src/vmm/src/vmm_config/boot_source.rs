@@ -31,11 +31,84 @@ pub struct BootSourceConfig {
     /// The boot arguments to pass to the kernel. If this field is uninitialized,
     /// DEFAULT_KERNEL_CMDLINE is used.
     pub boot_args: Option<String>,
+    /// Optional firmware ABI and stable system identity.
+    pub firmware: Option<FirmwareConfig>,
+}
+
+/// Supported firmware handoff profiles.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum FirmwareType {
+    /// AMD64 CloudHv PVH firmware with SMBIOS identity.
+    #[serde(rename = "cloud-hv")]
+    CloudHv,
+}
+
+/// Explicit firmware ABI declaration; never inferred from the image filename.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FirmwareConfig {
+    /// Firmware ABI selected by the caller.
+    #[serde(rename = "type")]
+    pub profile: FirmwareType,
+    /// Caller-owned identity, stable across cold boots and snapshot restores.
+    pub system_uuid: SystemUuid,
+}
+
+/// A system UUID that excludes SMBIOS's absent and unset identity sentinels.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct SystemUuid([u8; 16]);
+
+impl TryFrom<String> for SystemUuid {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        let uuid = uuid::Uuid::parse_str(&value).map_err(|error| error.to_string())?;
+        let bytes = uuid.into_bytes();
+        if bytes == [0; 16] || bytes == [255; 16] {
+            return Err("system UUID must not be nil or all ones".into());
+        }
+        Ok(Self(bytes))
+    }
+}
+
+impl From<SystemUuid> for String {
+    fn from(value: SystemUuid) -> Self {
+        uuid::Uuid::from_bytes(value.0).to_string()
+    }
+}
+
+impl SystemUuid {
+    /// SMBIOS 2.6 and later encode the first three UUID fields little-endian.
+    pub fn smbios_bytes(self) -> [u8; 16] {
+        uuid::Uuid::from_bytes(self.0).to_bytes_le()
+    }
+}
+
+impl BootSourceConfig {
+    /// Check profile constraints without opening boot files during snapshot restore.
+    pub fn validate(&self) -> Result<(), BootSourceConfigError> {
+        if self.firmware.is_some() {
+            if !cfg!(target_arch = "x86_64") {
+                return Err(BootSourceConfigError::InvalidFirmware(
+                    "CloudHv identity requires AMD64",
+                ));
+            }
+            if self.initrd_path.is_some() {
+                return Err(BootSourceConfigError::InvalidFirmware(
+                    "CloudHv identity does not accept an initrd",
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Errors associated with actions on `BootSourceConfig`.
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum BootSourceConfigError {
+    /// Invalid firmware configuration: {0}
+    InvalidFirmware(&'static str),
     /// The kernel file cannot be opened: {0}
     InvalidKernelPath(io::Error),
     /// The initrd file cannot be opened due to invalid path or invalid permissions. {0}
@@ -94,6 +167,8 @@ impl BootConfig {
             InvalidInitrdPath, InvalidKernelCommandLine, InvalidKernelPath,
         };
 
+        cfg.validate()?;
+
         // Validate boot source config.
         let kernel_file = File::open(&cfg.kernel_image_path).map_err(InvalidKernelPath)?;
         let initrd_file: Option<File> = match &cfg.initrd_path {
@@ -129,6 +204,7 @@ pub(crate) mod tests {
         let kernel_path = kernel_file.as_path().to_str().unwrap().to_string();
 
         let boot_src_cfg = BootSourceConfig {
+            firmware: None,
             boot_args: None,
             initrd_path: None,
             kernel_image_path: kernel_path,
@@ -142,6 +218,7 @@ pub(crate) mod tests {
     #[test]
     fn test_serde() {
         let boot_src_cfg = BootSourceConfig {
+            firmware: None,
             boot_args: Some(DEFAULT_KERNEL_CMDLINE.to_string()),
             initrd_path: Some("/tmp/initrd".to_string()),
             kernel_image_path: "./vmlinux.bin".to_string(),
@@ -156,5 +233,64 @@ pub(crate) mod tests {
         let snapshot_data = bitcode::serialize(&Snapshot::new(boot_src_cfg.clone())).unwrap();
         let restored_snapshot = Snapshot::load_without_crc_check(&snapshot_data).unwrap();
         assert_eq!(boot_src_cfg, restored_snapshot.data);
+    }
+    fn cloudhv_json() -> serde_json::Value {
+        serde_json::json!({
+            "kernel_image_path": "firmware.fd",
+            "firmware": {"type": "cloud-hv", "system_uuid": "11223344-5566-7788-99aa-bbccddeeff01"}
+        })
+    }
+
+    #[test]
+    fn cloudhv_profile_round_trips_json_and_snapshot_identity() {
+        let config: BootSourceConfig = serde_json::from_value(cloudhv_json()).unwrap();
+        let encoded = bitcode::serialize(&config).unwrap();
+        let restored: BootSourceConfig = bitcode::deserialize(&encoded).unwrap();
+        assert_eq!(config, restored);
+        let value = serde_json::to_value(&restored).unwrap();
+        assert_eq!(value["firmware"], cloudhv_json()["firmware"]);
+        let legacy: BootSourceConfig =
+            serde_json::from_str(r#"{"kernel_image_path":"seabios.elf"}"#).unwrap();
+        assert_eq!(legacy.firmware, None);
+        legacy.validate().unwrap();
+    }
+
+    #[test]
+    fn cloudhv_profile_requires_supported_type_and_real_uuid() {
+        for value in [
+            "",
+            "invalid",
+            "00000000-0000-0000-0000-000000000000",
+            "ffffffff-ffff-ffff-ffff-ffffffffffff",
+        ] {
+            let mut json = cloudhv_json();
+            json["firmware"]["system_uuid"] = value.into();
+            serde_json::from_value::<BootSourceConfig>(json).unwrap_err();
+        }
+        for field in ["type", "system_uuid"] {
+            let mut json = cloudhv_json();
+            json["firmware"].as_object_mut().unwrap().remove(field);
+            serde_json::from_value::<BootSourceConfig>(json).unwrap_err();
+        }
+        let mut json = cloudhv_json();
+        json["firmware"]["type"] = "seabios".into();
+        serde_json::from_value::<BootSourceConfig>(json).unwrap_err();
+        let mut json = cloudhv_json();
+        json["firmware"]["extra"] = true.into();
+        serde_json::from_value::<BootSourceConfig>(json).unwrap_err();
+    }
+
+    #[test]
+    fn cloudhv_profile_rejects_initrd_and_other_architectures_before_open() {
+        let mut config: BootSourceConfig = serde_json::from_value(cloudhv_json()).unwrap();
+        #[cfg(target_arch = "x86_64")]
+        config.validate().unwrap();
+        #[cfg(target_arch = "aarch64")]
+        config.validate().unwrap_err();
+        config.initrd_path = Some("unused".into());
+        assert!(matches!(
+            BootConfig::new(&config),
+            Err(BootSourceConfigError::InvalidFirmware(_))
+        ));
     }
 }
