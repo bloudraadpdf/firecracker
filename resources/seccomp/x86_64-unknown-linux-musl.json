@@ -1430,6 +1430,18 @@
                         "index": 1,
                         "type": "dword",
                         "op": "eq",
+                        "val": 1074835115,
+                        "comment": "KVM_GET_ONE_REG: save the CET guest shadow-stack pointer"
+                    }
+                ]
+            },
+            {
+                "syscall": "ioctl",
+                "args": [
+                    {
+                        "index": 1,
+                        "type": "dword",
+                        "op": "eq",
                         "val": 3221794449,
                         "comment": "KVM_GET_CPUID2"
                     }
