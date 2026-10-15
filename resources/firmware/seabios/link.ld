@@ -1,3 +1,6 @@
+/* Copyright 2026 Bloudraad. */
+/* SPDX-License-Identifier: Apache-2.0 */
+
 ENTRY(_start)
 PHDRS { text PT_LOAD FLAGS(5); data PT_LOAD FLAGS(6); note PT_NOTE FLAGS(4); }
 SECTIONS {

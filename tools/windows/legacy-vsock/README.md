@@ -88,8 +88,10 @@ It does not replace the proxy implementation.
 
 ## Guest probes
 
-The Rust programs have no standard-library dependency. Build an x86 import
-library from `msvcrt.def` with the selected Rust toolchain's `rust-lld`:
+The Rust programs have no standard-library dependency. Keep the sibling
+`egress/win32.rs` source when copying `connect.rs`; it shares the small Win32
+import declarations with the HTTP probes. Build an x86 import library from
+`msvcrt.def` with the selected Rust toolchain's `rust-lld`:
 
 ```sh
 rust-lld -flavor link /lib /machine:x86 /def:msvcrt.def /out:msvcrt.lib
@@ -104,8 +106,10 @@ Add `--cfg xp_matrix` and name the output `xp-connect.exe` for the XP
 three-iteration storage and CONNECT probe. Compile `install-driver.rs` with the
 same target, entry point, subsystem, linker and panic options, without the CRT
 library. For `install-driver-x64.exe`, use the x64 target and subsystem version
-6.01. The installer targets Firecracker's Viosock PCI ID
-`PCI\VEN_1AF4&DEV_1053&SUBSYS_10531AF4&REV_01`.
+6.01. Build the x64 CONNECT client with the same x64 target and subsystem, and
+generate its CRT import library with `/machine:x64` instead of `/machine:x86`.
+Pass that library with `-C link-arg=...`. The installer targets Firecracker's
+Viosock PCI ID `PCI\VEN_1AF4&DEV_1053&SUBSYS_10531AF4&REV_01`.
 
 Copy the complete package to `C:\Drivers\VIOSock`, the installer to `C:\`, and
 use `install-xp.cmd` or `install-win7.ps1` at guest startup. XP also needs the
@@ -132,12 +136,14 @@ paths, `track_dirty_pages: true`, CID 3, and `uds_path: "vsock.sock"`. Set
 `WINDOWS_CONNECT_SIDECAR` (`tokoloshe-egress`), `WINDOWS_CONNECT_PROXY_ROOT`,
 and `WINDOWS_CONNECT_REBASE` to their absolute paths. Set `WINDOWS_CONNECT_UID`
 and `WINDOWS_CONNECT_GID` to the test user. The controller creates `run/`;
-preserve or remove an earlier run before starting another. User and group IDs
-default to the invoking user. When changing identity, it initialises that user's
-supplementary groups. API requests have time limits. On exit it allows each
-child ten seconds to stop, then kills a child that does not exit. The proxy uses
-a separate process group so cleanup also stops a stalled sidecar. A forced stop
-fails the run.
+preserve or remove an earlier run before starting another. It executes a
+read-only per-run copy of its shell source. For a graphical guest, use the
+relative console path `console.sock`; cleanup removes its stale socket only
+after the owned VMM has stopped. User and group IDs default to the invoking
+user. When changing identity, it initialises that user's supplementary groups.
+API requests have time limits. On exit it allows each child ten seconds to stop,
+then kills a child that does not exit. The proxy uses a separate process group
+so cleanup also stops a stalled sidecar. A forced stop fails the run.
 
 Require three guest pass markers, six sealed proxy accounting entries (three
 allowed 2 MiB transfers, three denied requests with zero payload),
@@ -146,6 +152,10 @@ exited, mount the disk read-only and verify the final data. On XP, compile
 `verify-xp.rs` for the host and pass it the extracted `xp-legacy-data.bin`; it
 checks every byte of the final iteration's deterministic 2 MiB file. Windows 7
 records its final SHA-256 in the transcript.
+
+`win7-connect.ps1` also accepts `-Prefix` and `-Tag` for newer Windows with
+signed Viosock drivers. The [egress harness](../egress/README.md) provides the
+shared offline verifier and the separate TAP regression procedure.
 
 The full test history and evidence paths are in the
 [Windows support plan](../../../docs/windows.md).
