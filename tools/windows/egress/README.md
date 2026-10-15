@@ -280,14 +280,15 @@ Set the normal TAP or CONNECT verification environment plus:
 Run within a private mount namespace and a timeout:
 
 ```sh
-sudo --preserve-env=WINDOWS_CHECK_BASE,WINDOWS_CHECK_RUN,WINDOWS_GUEST_TAG,WINDOWS_BITLOCKER_DISK,WINDOWS_BITLOCKER_OFFSET,WINDOWS_BITLOCKER_SIZE,WINDOWS_BITLOCKER_STATE,WINDOWS_BITLOCKER_BDEMOUNT \
+sudo --preserve-env=WINDOWS_SECURE_CHECKS,WINDOWS_CHECK_BASE,WINDOWS_CHECK_RUN,WINDOWS_GUEST_TAG,WINDOWS_BITLOCKER_DISK,WINDOWS_BITLOCKER_OFFSET,WINDOWS_BITLOCKER_SIZE,WINDOWS_BITLOCKER_STATE,WINDOWS_BITLOCKER_BDEMOUNT \
   timeout --signal=TERM --kill-after=10s 120 \
   unshare --mount --propagation private \
   bash tools/windows/egress/bitlocker-verify.sh tap
 ```
 
 For CONNECT, preserve its documented verification environment instead of the
-TAP variables and select `connect`. The wrapper checks the disk is closed,
+TAP variables and select `connect`. Preserve `WINDOWS_SECURE_CHECKS=1` through
+`sudo` for either secure verification path. The wrapper checks the disk is closed,
 refuses an existing state directory, creates a read-only partition loop and
 opens libbde in unattended read-only mode. The existing verifier then checks
 its plaintext partition at offset zero using another read-only loop and NTFS

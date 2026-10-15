@@ -177,13 +177,14 @@ disk when firmware would otherwise select installation media again.
 Console snapshots contain display memory and registers, keyboard/mouse
 queues, held input, pending releases, keyboard LEDs and pending lock updates,
 USB controller/HID state, PCI state, optical transfer state and media identity.
-The current snapshot format is 25.0.0. Display state adds about 16 MiB; the bounded
+The current snapshot format is 27.0.0. Display state adds about 16 MiB; the bounded
 snapshot reader accepts at most 32 MiB. The guest disk remains a separate
 artifact, as with ordinary Firecracker snapshots.
 
 The Windows 11 test edition is IoT Enterprise LTSC 2024. It passed Setup's
 hardware check without registry bypasses. The optional
-[secure platform](windows-secure-boot.md) adds TPM and protected firmware variables. Standard Windows 11 qualification remains in progress.
+[secure platform](windows-secure-boot.md) adds TPM and protected firmware variables. Standard Windows 11 Enterprise Evaluation passes the recorded secure matrix;
+other editions are not inferred from that result.
 
 The console reserves the VGA aperture at `0xa0000..0xbffff` and platform
 table memory at 32..33 MiB. The IDE interrupt uses PCI GSI16 in native mode
@@ -228,6 +229,19 @@ supports the same absolute tablet; the SeaBIOS text interface uses the keyboard.
 USB state, keyboard lock state and pending releases are included in snapshots.
 This requires no guest networking, vsock channel or separate pointer driver.
 
+There is one keyboard and one pointer. The auxiliary PS/2 port is absent, IRQ12
+is not attached, and there is no USB keyboard. The second UHCI root port is
+disconnected. Removing `optical_image_path` removes the IDE controller; it does
+not leave an empty CD-ROM attached. Disk, network and vsock devices remain
+separate explicit configuration choices. TPM and protected firmware variables
+are also opt-in.
+
+The existing platform still exposes serial, RTC, i8042, VM Generation ID, GED
+and VMClock. XP and Windows 7 do not bind drivers to all these ACPI features.
+XP also retains a VGA device warning while its basic display works. These
+limitations are separate from the keyboard and pointer drivers; do not report
+a completely clean device inventory for those guests.
+
 The bridge uses the guest keyboard LEDs to preserve printable ASCII case and
 punctuation with Caps Lock and Num Lock. It waits at most 100 ms for a pending
 lock acknowledgement before sending another non-lock key press. Disconnect
@@ -243,7 +257,11 @@ Clipboard sharing and audio are not implemented.
 Port `0x92` and the i8042 output port record A20 requests, but KVM does not
 provide the CPU address wrapping used by an A20-disabled software emulator.
 
-## Evidence
+## Initial installation evidence (format 21)
+
+The [final acceptance plan](windows-acceptance-plan.md) tracks current installation
+and egress checks, including standard Windows 11. The following results belong
+to the initial console implementation.
 
 These installations ran in native AMD64 Firecracker with the default seccomp
 filter, no guest NIC and no vsock device. BIOS guests use transitional virtio
@@ -278,7 +296,7 @@ information required for UDF recognition; no registry change or split WIM
 was needed. The prepared media tools verified each extracted file against
 the source and injected driver files.
 
-The native VMM suite passes 964 tests. It includes a real KVM MMX framebuffer
+That revision passed 964 native VMM tests. It includes a real KVM MMX framebuffer
 load, slot relocation and decode changes, snapshot validation, failed
 attachment cleanup and backing retention after failed slot removal. The
 console bridge passes 11 tests and strict Clippy. AMD64 and ARM64 VMM Clippy
@@ -331,7 +349,7 @@ The UEFI absolute-pointer protocol probe also passes without an OS; its
 [source and procedure](../resources/firmware/cloudhv-console/tests/README.md)
 are retained.
 
-The final VMM suite passes 989 tests; the bridge passes 29 tests. AMD64 and
+The format-23 VMM suite passed 989 tests; the bridge passed 29 tests. AMD64 and
 ARM64 strict VMM Clippy, bridge Clippy and formatting pass. Headless Linux
 passes format-23 cold/full/differential checks with modern and transitional
 PCI transports. These results supplement

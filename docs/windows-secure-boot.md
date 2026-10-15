@@ -1,8 +1,10 @@
 # Standard Windows 11 platform
 
-Standard Windows 11 Pro and Enterprise are in the acceptance scope. Installation
-and guest status checks are still in progress. The prior IoT Enterprise LTSC
-result does not qualify these editions. Do not bypass Setup's hardware checks.
+Standard Windows 11 Pro and Enterprise are in the acceptance scope. Enterprise
+Evaluation passes installation, Secure Boot, TPM, cold/full/differential restore
+and both egress paths on the tested build. Support remains experimental. The prior IoT Enterprise LTSC result does not qualify these editions.
+Do not bypass Setup's hardware checks. Windows 11 Pro has not been separately
+installed or qualified; Enterprise Evaluation results do not qualify every edition.
 
 The opt-in platform adds two separate services:
 
@@ -53,7 +55,10 @@ stops the VM with an error instead of acknowledging an uncommitted update.
 
 ## Checkpoints
 
-Snapshot format 25.0.0 adds the complete TPM and variable-service state. Display
+Snapshot format 25.0.0 added the complete TPM and variable-service state. Format
+26.0.0 added the physical-presence mailbox registers. Format 27.0.0 persists
+the optional CloudHv firmware profile and stable system UUID. Earlier snapshots require
+the matching earlier VMM; there is no implicit conversion. Display
 memory, TPM state and variables remain within the bounded 32 MiB snapshot reader.
 Guest disks remain separate artifacts. Snapshots contain secrets and require the
 same access control as the VM's TPM store and guest disk.
@@ -114,5 +119,38 @@ the installed-guest checks must establish that separately.
 A deliberately failed restore advanced only its staging store; the original
 store stayed unchanged. The failed staging copy was discarded. A rebased
 differential restore also passed with separate stores, continued variable reads
-and clean guest shutdown. Normal Windows 11 installation remains required before
-declaring support complete.
+and clean guest shutdown.
+
+Standard Windows 11 Enterprise Evaluation 26H2 (26300.9457) subsequently reached
+its desktop. Its signed viostor driver was installed through offline DISM without
+forcing unsigned drivers. The installation media uses Microsoft's CA2023 boot
+files with the current revocation database; hardware checks were not bypassed.
+On format 25, the installed guest passed Confirm-SecureBootUEFI and a public
+TBS TPM2_GetRandom command after cold boot, full restore and differential restore.
+These Windows checks exercise firmware runtime services after ExitBootServices.
+The staged device inventory reported no PnP configuration errors.
+
+On format 26 with the qualified physical-presence firmware, the installed guest
+also passes Get-Tpm: present, ready, enabled, activated and owned are true,
+restart pending is false, and PPI version is 1.3. The WMI physical-presence
+transition query returns success and transition 2 (reboot). Secure Boot and
+the tracked public TBS probe pass in the same boot. This closes the previous
+missing-interface error `0x80284001`. Final format-27 restore and egress checks
+also pass, as recorded below.
+Windows automatically enabled BitLocker; validation preserves the encrypted
+disk and matched TPM state. At handoff the volume was unlocked, protection was
+off and no key protectors were configured. Read-only verification uses the
+volume's existing clear key; this does not qualify TPM-sealed BitLocker recovery
+or attestation.
+
+On corrected secure firmware and format 27, TAP and real Tokoloshe CONNECT
+egress pass after cold boot, full restore and differential restore. All three
+phases retain Secure Boot,
+TPM readiness, SHA-256 PCR 7 and the existing persistent TPM object's public
+identity. Read-only checks of the encrypted disk verify the final stored data.
+The tested guest is Enterprise Evaluation 26H2, build 26300.9457. Its desktop
+reports an expired evaluation licence; the legacy registry ProductName reads
+Windows 10 Enterprise Evaluation. No activation or licence changes were made.
+
+The complete public TPM baseline also matches across the cold boot between
+the two runs. Both paths pass offline data verification and clean S5 shutdown.

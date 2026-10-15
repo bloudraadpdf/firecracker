@@ -1,5 +1,9 @@
 # Remote Windows installation and console
 
+This is the completed initial console plan and input follow-up. The
+[final acceptance plan](windows-acceptance-plan.md) tracks current device review,
+fresh installations and standard Windows 11 qualification.
+
 This series starts at `f92e897f4b7d1157b26824a4773ceaaeee434b53` on
 `feat/windows-console`. It adds optional AMD64 installation hardware and a
 host-side remote console. The accepted guest matrix is XP x86, Windows 7,
@@ -56,7 +60,7 @@ The pre-integration device-model checkpoint also passes strict Clippy and
 formatting after the KVM mapping accessors and their test move into the
 integration patch. History refinement preserves the final tested source tree.
 
-All five installed guests passed the matrix in [the console guide](windows-console.md#evidence).
+All five installed guests passed the matrix in [the console guide](windows-console.md#initial-installation-evidence-format-21).
 Owned VMs, bridges and temporary mounts are stopped. Disposable RAM snapshots,
 generated ISOs, obsolete binaries and compiler caches were removed. Installed
 test disks, final firmware, logs, digests and screenshots remain for reuse.

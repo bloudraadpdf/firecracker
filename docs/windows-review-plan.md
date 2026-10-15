@@ -2,7 +2,7 @@
 
 This records the review before graphical installation and the secure platform
 were added. The [final acceptance plan](windows-acceptance-plan.md) tracks the
-current format-25 checks and remaining work.
+current format-27 checks and remaining work.
 
 Base: `658ff27eb0c8c60f1565f5bc197120cdd00a27f6`.
 Validated implementation before review: `3c0b832c2`.
