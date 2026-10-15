@@ -196,16 +196,16 @@ pub fn build_microvm_for_boot(
     let mut vm = KvmVm::new(kvm)?;
     vm.resource_allocator().pci_transport = vm_resources.machine_config.pci_transport;
     #[cfg(target_arch = "x86_64")]
-    if vm_resources.console.is_some() {
+    if let Some(console) = &vm_resources.console {
         vm.resource_allocator().system_memory = vm_allocator::AddressAllocator::new(
             crate::arch::x86_64::layout::CONSOLE_SYSTEM_MEM_START,
             crate::arch::x86_64::layout::CONSOLE_SYSTEM_MEM_SIZE,
         )
         .map_err(|error| StartMicrovmError::Console(std::io::Error::other(error.to_string())))?;
-        for irq in [12, 14] {
+        if console.optical_image_path.is_some() {
             vm.resource_allocator()
                 .gsi_legacy_allocator
-                .allocate_id_at(irq)
+                .allocate_id_at(crate::devices::legacy::atapi::IRQ)
                 .map_err(|error| {
                     StartMicrovmError::Console(std::io::Error::other(error.to_string()))
                 })?;

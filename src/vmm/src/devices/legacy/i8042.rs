@@ -25,7 +25,7 @@ pub enum I8042Error {
     Interrupt(io::Error),
     /// Invalid i8042 snapshot state.
     InvalidState,
-    /// Unsupported PS/2 key code or mouse buttons.
+    /// Unsupported PS/2 key code.
     InvalidInput,
 }
 
@@ -63,8 +63,7 @@ enum Destination {
     Control,
     Output,
     KeyboardOutput,
-    MouseOutput,
-    Mouse,
+    DiscardAuxiliary,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -74,23 +73,14 @@ enum KeyboardParameter {
     Typematic,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
-enum MouseParameter {
-    Resolution,
-    SampleRate,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
-struct OutputByte {
-    value: u8,
-    mouse: bool,
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct Keyboard {
     enabled: bool,
     scan_set: u8,
     leds: u8,
+    expected_leds: u8,
+    pending_leds: u8,
+    locks_pressed: u8,
     typematic: u8,
     parameter: Option<KeyboardParameter>,
     last_byte: u8,
@@ -102,6 +92,9 @@ impl Default for Keyboard {
             enabled: true,
             scan_set: 2,
             leds: 0,
+            expected_leds: 0,
+            pending_leds: 0,
+            locks_pressed: 0,
             typematic: 0x2b,
             parameter: None,
             last_byte: ACK,
@@ -109,75 +102,38 @@ impl Default for Keyboard {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct Mouse {
-    enabled: bool,
-    remote: bool,
-    wrap: bool,
-    scaling: bool,
-    resolution: u8,
-    sample_rate: u8,
-    parameter: Option<MouseParameter>,
-    buttons: u8,
-    x: i16,
-    y: i16,
-    last_byte: u8,
-}
-
-impl Default for Mouse {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            remote: false,
-            wrap: false,
-            scaling: false,
-            resolution: 2,
-            sample_rate: 100,
-            parameter: None,
-            buttons: 0,
-            x: 0,
-            y: 0,
-            last_byte: ACK,
-        }
-    }
-}
-
-/// Saved controller, keyboard, mouse and pending output state.
+/// Saved controller, keyboard and pending output state.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct I8042State {
     control: u8,
     output: u8,
     command_write: bool,
     destination: Option<Destination>,
-    queue: VecDeque<OutputByte>,
-    pending_input: VecDeque<OutputByte>,
+    queue: VecDeque<u8>,
+    pending_input: VecDeque<u8>,
     keyboard: Keyboard,
-    mouse: Mouse,
 }
 
 impl Default for I8042State {
     fn default() -> Self {
         Self {
-            control: 0x05,
+            control: 0x25,
             output: 3,
             command_write: false,
             destination: None,
             queue: VecDeque::new(),
             pending_input: VecDeque::new(),
             keyboard: Keyboard::default(),
-            mouse: Mouse::default(),
         }
     }
 }
 
-/// Dual-channel PS/2 controller at I/O ports 0x60 and 0x64.
+/// Keyboard-only PS/2 controller at I/O ports 0x60 and 0x64.
 #[derive(Debug)]
 pub struct I8042Device {
     reset_evt: EventFd,
     /// Keyboard interrupt (IRQ 1).
     pub kbd_interrupt_evt: EventFd,
-    /// Auxiliary interrupt (IRQ 12).
-    pub mouse_interrupt_evt: EventFd,
     state: I8042State,
 }
 
@@ -187,7 +143,6 @@ impl I8042Device {
         Ok(Self {
             reset_evt,
             kbd_interrupt_evt: EventFd::new(libc::EFD_NONBLOCK)?,
-            mouse_interrupt_evt: EventFd::new(libc::EFD_NONBLOCK)?,
             state: I8042State::default(),
         })
     }
@@ -197,16 +152,27 @@ impl I8042Device {
         self.state.clone()
     }
 
+    /// Guest-selected PS/2 LEDs: Scroll Lock, Num Lock and Caps Lock in bits 0..2.
+    pub fn keyboard_leds(&self) -> u8 {
+        self.state.keyboard.leds
+    }
+
+    /// Caps/Num Lock transitions awaiting the guest's LED acknowledgement.
+    pub fn keyboard_pending_leds(&self) -> u8 {
+        self.state.keyboard.pending_leds
+    }
+
     /// Restore validated state. IRQ routes must be registered before this call.
     pub fn restore_state(&mut self, state: &I8042State) -> Result<(), I8042Error> {
         if state.queue.len() > QUEUE_CAPACITY
             || state.pending_input.len() > QUEUE_CAPACITY
             || !(1..=2).contains(&state.keyboard.scan_set)
             || state.keyboard.leds > 7
+            || state.keyboard.expected_leds > 7
+            || state.keyboard.pending_leds & !6 != 0
+            || state.keyboard.locks_pressed & !6 != 0
             || state.keyboard.typematic > 0x7f
-            || state.mouse.resolution > 3
-            || state.mouse.buttons > 7
-            || ![10, 20, 40, 60, 80, 100, 200].contains(&state.mouse.sample_rate)
+            || state.control & (AUX_DISABLED | AUX_IRQ) != AUX_DISABLED
         {
             return Err(I8042Error::InvalidState);
         }
@@ -216,15 +182,10 @@ impl I8042Device {
     }
 
     fn signal_front(&self) -> Result<(), I8042Error> {
-        if let Some(front) = self.state.queue.front() {
-            let (mask, event) = if front.mouse {
-                (AUX_IRQ, &self.mouse_interrupt_evt)
-            } else {
-                (KBD_IRQ, &self.kbd_interrupt_evt)
-            };
-            if self.state.control & mask != 0 {
-                event.write(1).map_err(I8042Error::Interrupt)?;
-            }
+        if !self.state.queue.is_empty() && self.state.control & KBD_IRQ != 0 {
+            self.kbd_interrupt_evt
+                .write(1)
+                .map_err(I8042Error::Interrupt)?;
         }
         Ok(())
     }
@@ -234,32 +195,21 @@ impl I8042Device {
     }
 
     fn flush_input(&mut self) {
-        while self.state.queue.len() < QUEUE_CAPACITY {
-            let Some(index) = self.state.pending_input.iter().position(|byte| {
-                self.state.control
-                    & if byte.mouse {
-                        AUX_DISABLED
-                    } else {
-                        KBD_DISABLED
-                    }
-                    == 0
-            }) else {
-                break;
-            };
-            if let Some(byte) = self.state.pending_input.remove(index) {
-                self.state.queue.push_back(byte);
-            }
+        if self.state.control & KBD_DISABLED == 0 {
+            let count =
+                (QUEUE_CAPACITY - self.state.queue.len()).min(self.state.pending_input.len());
+            self.state
+                .queue
+                .extend(self.state.pending_input.drain(..count));
         }
     }
 
-    fn enqueue_input(&mut self, mouse: bool, bytes: &[u8]) -> Result<(), I8042Error> {
+    fn enqueue_input(&mut self, bytes: &[u8]) -> Result<(), I8042Error> {
         if bytes.len() > self.input_capacity() {
             return Err(I8042Error::InternalBufferFull);
         }
         let empty = self.state.queue.is_empty();
-        self.state
-            .pending_input
-            .extend(bytes.iter().map(|&value| OutputByte { value, mouse }));
+        self.state.pending_input.extend(bytes.iter().copied());
         self.flush_input();
         if empty {
             self.signal_front()?;
@@ -267,28 +217,22 @@ impl I8042Device {
         Ok(())
     }
 
-    fn enqueue(&mut self, mouse: bool, bytes: &[u8]) -> Result<(), I8042Error> {
+    fn enqueue(&mut self, bytes: &[u8]) -> Result<(), I8042Error> {
         if bytes.len() > QUEUE_CAPACITY - self.state.queue.len() {
             return Err(I8042Error::InternalBufferFull);
         }
         let empty = self.state.queue.is_empty();
-        self.state
-            .queue
-            .extend(bytes.iter().map(|&value| OutputByte { value, mouse }));
+        self.state.queue.extend(bytes.iter().copied());
         if empty {
             self.signal_front()?;
         }
         Ok(())
     }
 
-    fn reply(&mut self, mouse: bool, bytes: &[u8]) -> Result<(), I8042Error> {
-        self.enqueue(mouse, bytes)?;
+    fn reply(&mut self, bytes: &[u8]) -> Result<(), I8042Error> {
+        self.enqueue(bytes)?;
         if let Some(&last) = bytes.last() {
-            if mouse {
-                self.state.mouse.last_byte = last;
-            } else {
-                self.state.keyboard.last_byte = last;
-            }
+            self.state.keyboard.last_byte = last;
         }
         Ok(())
     }
@@ -348,7 +292,25 @@ impl I8042Device {
             }
             bytes.push(code);
         }
-        self.enqueue_input(false, &bytes)
+        self.enqueue_input(&bytes)?;
+        let lock = match (code, extended) {
+            (0x58, false) => 4,
+            (0x77, false) => 2,
+            _ => 0,
+        };
+        let keyboard = &mut self.state.keyboard;
+        if pressed && lock != 0 {
+            if keyboard.locks_pressed & lock == 0 {
+                keyboard.expected_leds = (keyboard.expected_leds & keyboard.pending_leds)
+                    | (keyboard.leds & !keyboard.pending_leds);
+                keyboard.expected_leds ^= lock;
+                keyboard.pending_leds |= lock;
+                keyboard.locks_pressed |= lock;
+            }
+        } else {
+            keyboard.locks_pressed &= !lock;
+        }
+        Ok(())
     }
 
     /// Inject the Pause make sequence (this key has no break sequence).
@@ -362,7 +324,7 @@ impl I8042Device {
             } else {
                 &[0xe1, 0x14, 0x77, 0xe1, 0xf0, 0x14, 0xf0, 0x77]
             };
-        self.enqueue_input(false, bytes)
+        self.enqueue_input(bytes)
     }
 
     /// Inject Print Screen with its synthetic shift bytes.
@@ -371,15 +333,12 @@ impl I8042Device {
             return Ok(());
         }
         let set1 = self.state.keyboard.scan_set == 1 || self.state.control & TRANSLATE != 0;
-        self.enqueue_input(
-            false,
-            match (set1, pressed) {
-                (true, true) => &[0xe0, 0x2a, 0xe0, 0x37],
-                (true, false) => &[0xe0, 0xb7, 0xe0, 0xaa],
-                (false, true) => &[0xe0, 0x12, 0xe0, 0x7c],
-                (false, false) => &[0xe0, 0xf0, 0x7c, 0xe0, 0xf0, 0x12],
-            },
-        )
+        self.enqueue_input(match (set1, pressed) {
+            (true, true) => &[0xe0, 0x2a, 0xe0, 0x37],
+            (true, false) => &[0xe0, 0xb7, 0xe0, 0xaa],
+            (false, true) => &[0xe0, 0x12, 0xe0, 0x7c],
+            (false, false) => &[0xe0, 0xf0, 0x7c, 0xe0, 0xf0, 0x12],
+        })
     }
 
     /// Inject and release Ctrl-Alt-Delete without leaving modifiers pressed.
@@ -400,64 +359,8 @@ impl I8042Device {
         Ok(())
     }
 
-    /// Inject relative movement in PS/2 counts (positive Y is upwards).
-    /// Buttons are left, right and middle in bits 0, 1 and 2.
-    pub fn inject_mouse(&mut self, x: i16, y: i16, buttons: u8) -> Result<(), I8042Error> {
-        if buttons > 7 {
-            return Err(I8042Error::InvalidInput);
-        }
-        if self.state.mouse.wrap {
-            return Ok(());
-        }
-        if self.state.mouse.enabled && !self.state.mouse.remote && self.input_capacity() < 3 {
-            return Err(I8042Error::InternalBufferFull);
-        }
-        let mouse = &mut self.state.mouse;
-        mouse.buttons = buttons;
-        mouse.x = mouse.x.saturating_add(x);
-        mouse.y = mouse.y.saturating_add(y);
-        if mouse.enabled && !mouse.remote {
-            let packet = self.mouse_packet();
-            self.enqueue_input(true, &packet)?;
-        }
-        Ok(())
-    }
-
-    fn mouse_packet(&mut self) -> [u8; 3] {
-        let mouse = &mut self.state.mouse;
-        let scale = |value: i16| -> i32 {
-            let value = i32::from(value);
-            if !mouse.scaling {
-                return value;
-            }
-            let magnitude = match value.abs() {
-                0..=1 => value.abs(),
-                2 => 1,
-                3 => 3,
-                4 => 6,
-                5 => 9,
-                n => n * 2,
-            };
-            magnitude * value.signum()
-        };
-        let x = scale(mouse.x);
-        let y = scale(mouse.y);
-        let flags = 8
-            | mouse.buttons
-            | if x < 0 { 0x10 } else { 0 }
-            | if y < 0 { 0x20 } else { 0 }
-            | if !(-255..=255).contains(&x) { 0x40 } else { 0 }
-            | if !(-255..=255).contains(&y) { 0x80 } else { 0 };
-        mouse.x = 0;
-        mouse.y = 0;
-        [
-            flags,
-            x.clamp(-255, 255).to_le_bytes()[0],
-            y.clamp(-255, 255).to_le_bytes()[0],
-        ]
-    }
-
     fn reset(&self) -> Result<(), I8042Error> {
+        crate::logger::info!("Guest requested i8042 reset");
         self.reset_evt.write(1).map_err(I8042Error::Interrupt)?;
         METRICS.reset_count.inc();
         Ok(())
@@ -466,23 +369,22 @@ impl I8042Device {
     fn command(&mut self, command: u8) -> Result<(), I8042Error> {
         self.state.destination = None;
         match command {
-            0x20 => self.enqueue(false, &[self.state.control])?,
+            0x20 => self.enqueue(&[self.state.control])?,
             0x60 => self.state.destination = Some(Destination::Control),
-            0xa7 => self.state.control |= AUX_DISABLED,
-            0xa8 => self.state.control &= !AUX_DISABLED,
-            0xa9 | 0xab => self.enqueue(false, &[0])?,
+            0xa7 | 0xa8 => (),
+            0xa9 => self.enqueue(&[1])?,
+            0xab => self.enqueue(&[0])?,
             0xaa => {
                 self.state.control |= 4;
-                self.enqueue(false, &[0x55])?;
+                self.enqueue(&[0x55])?;
             }
             0xad => self.state.control |= KBD_DISABLED,
             0xae => self.state.control &= !KBD_DISABLED,
-            0xc0 => self.enqueue(false, &[0x80])?,
-            0xd0 => self.enqueue(false, &[self.state.output])?,
+            0xc0 => self.enqueue(&[0x80])?,
+            0xd0 => self.enqueue(&[self.state.output])?,
             0xd1 => self.state.destination = Some(Destination::Output),
             0xd2 => self.state.destination = Some(Destination::KeyboardOutput),
-            0xd3 => self.state.destination = Some(Destination::MouseOutput),
-            0xd4 => self.state.destination = Some(Destination::Mouse),
+            0xd3 | 0xd4 => self.state.destination = Some(Destination::DiscardAuxiliary),
             0xdd => self.state.output &= !2,
             0xdf => self.state.output |= 2,
             0xf0..=0xff if command & 1 == 0 => self.reset()?,
@@ -494,7 +396,7 @@ impl I8042Device {
     fn data(&mut self, value: u8) -> Result<(), I8042Error> {
         match self.state.destination.take() {
             Some(Destination::Control) => {
-                self.state.control = value;
+                self.state.control = (value | AUX_DISABLED) & !AUX_IRQ;
                 self.signal_front()
             }
             Some(Destination::Output) => {
@@ -504,12 +406,8 @@ impl I8042Device {
                 }
                 Ok(())
             }
-            Some(Destination::KeyboardOutput) => self.enqueue(false, &[value]),
-            Some(Destination::MouseOutput) => self.enqueue(true, &[value]),
-            Some(Destination::Mouse) => {
-                self.state.control &= !AUX_DISABLED;
-                self.mouse_command(value)
-            }
+            Some(Destination::KeyboardOutput) => self.enqueue(&[value]),
+            Some(Destination::DiscardAuxiliary) => Ok(()),
             None => {
                 self.state.control &= !KBD_DISABLED;
                 self.keyboard_command(value)
@@ -520,7 +418,11 @@ impl I8042Device {
     fn keyboard_command(&mut self, value: u8) -> Result<(), I8042Error> {
         if let Some(parameter) = self.state.keyboard.parameter.take() {
             match parameter {
-                KeyboardParameter::Leds if value <= 7 => self.state.keyboard.leds = value,
+                KeyboardParameter::Leds if value <= 7 => {
+                    let keyboard = &mut self.state.keyboard;
+                    keyboard.leds = value;
+                    keyboard.pending_leds &= value ^ keyboard.expected_leds;
+                }
                 KeyboardParameter::Typematic if value <= 0x7f => {
                     self.state.keyboard.typematic = value
                 }
@@ -531,110 +433,49 @@ impl I8042Device {
                     } else {
                         set
                     };
-                    return self.reply(false, &[ACK, result]);
+                    return self.reply(&[ACK, result]);
                 }
                 KeyboardParameter::ScanSet if (1..=2).contains(&value) => {
                     self.state.keyboard.scan_set = value
                 }
                 _ => {
                     self.state.keyboard.parameter = Some(parameter);
-                    return self.reply(false, &[RESEND]);
+                    return self.reply(&[RESEND]);
                 }
             }
-            return self.reply(false, &[ACK]);
+            return self.reply(&[ACK]);
         }
         match value {
             0xed => self.state.keyboard.parameter = Some(KeyboardParameter::Leds),
-            0xee => return self.reply(false, &[0xee]),
+            0xee => return self.reply(&[0xee]),
             0xf0 => self.state.keyboard.parameter = Some(KeyboardParameter::ScanSet),
             0xf2 => {
-                return self.reply(
-                    false,
-                    &[
-                        ACK,
-                        0xab,
-                        if self.state.control & TRANSLATE != 0 {
-                            0x41
-                        } else {
-                            0x83
-                        },
-                    ],
-                );
+                return self.reply(&[
+                    ACK,
+                    0xab,
+                    if self.state.control & TRANSLATE != 0 {
+                        0x41
+                    } else {
+                        0x83
+                    },
+                ]);
             }
             0xf3 => self.state.keyboard.parameter = Some(KeyboardParameter::Typematic),
             0xf4 => self.state.keyboard.enabled = true,
             0xf5 | 0xf6 => {
-                self.state.pending_input.retain(|byte| byte.mouse);
+                self.state.pending_input.clear();
                 self.state.keyboard = Keyboard::default();
                 self.state.keyboard.enabled = value == 0xf6;
             }
-            0xfe => return self.enqueue(false, &[self.state.keyboard.last_byte]),
+            0xfe => return self.enqueue(&[self.state.keyboard.last_byte]),
             0xff => {
-                self.state.pending_input.retain(|byte| byte.mouse);
+                self.state.pending_input.clear();
                 self.state.keyboard = Keyboard::default();
-                return self.reply(false, &[ACK, 0xaa]);
+                return self.reply(&[ACK, 0xaa]);
             }
-            _ => return self.reply(false, &[RESEND]),
+            _ => return self.reply(&[RESEND]),
         }
-        self.reply(false, &[ACK])
-    }
-
-    fn mouse_command(&mut self, value: u8) -> Result<(), I8042Error> {
-        if self.state.mouse.wrap && value != 0xec && value != 0xff {
-            return self.reply(true, &[value]);
-        }
-        if let Some(parameter) = self.state.mouse.parameter.take() {
-            match parameter {
-                MouseParameter::Resolution if value <= 3 => self.state.mouse.resolution = value,
-                MouseParameter::SampleRate if [10, 20, 40, 60, 80, 100, 200].contains(&value) => {
-                    self.state.mouse.sample_rate = value
-                }
-                _ => {
-                    self.state.mouse.parameter = Some(parameter);
-                    return self.reply(true, &[RESEND]);
-                }
-            }
-            return self.reply(true, &[ACK]);
-        }
-        match value {
-            0xe6 => self.state.mouse.scaling = false,
-            0xe7 => self.state.mouse.scaling = true,
-            0xe8 => self.state.mouse.parameter = Some(MouseParameter::Resolution),
-            0xe9 => {
-                let mouse = &self.state.mouse;
-                let status = (mouse.buttons & 1) << 2
-                    | (mouse.buttons & 2) >> 1
-                    | (mouse.buttons & 4) >> 1
-                    | if mouse.scaling { 0x10 } else { 0 }
-                    | if mouse.enabled { 0x20 } else { 0 }
-                    | if mouse.remote { 0x40 } else { 0 };
-                return self.reply(true, &[ACK, status, mouse.resolution, mouse.sample_rate]);
-            }
-            0xea => self.state.mouse.remote = false,
-            0xeb => {
-                let packet = self.mouse_packet();
-                return self.reply(true, &[ACK, packet[0], packet[1], packet[2]]);
-            }
-            0xec => self.state.mouse.wrap = false,
-            0xee => self.state.mouse.wrap = true,
-            0xf0 => self.state.mouse.remote = true,
-            0xf2 => return self.reply(true, &[ACK, 0]),
-            0xf3 => self.state.mouse.parameter = Some(MouseParameter::SampleRate),
-            0xf4 => self.state.mouse.enabled = true,
-            0xf5 => self.state.mouse.enabled = false,
-            0xf6 => {
-                self.state.pending_input.retain(|byte| !byte.mouse);
-                self.state.mouse = Mouse::default();
-            }
-            0xfe => return self.enqueue(true, &[self.state.mouse.last_byte]),
-            0xff => {
-                self.state.pending_input.retain(|byte| !byte.mouse);
-                self.state.mouse = Mouse::default();
-                return self.reply(true, &[ACK, 0xaa, 0]);
-            }
-            _ => return self.reply(true, &[RESEND]),
-        }
-        self.reply(true, &[ACK])
+        self.reply(&[ACK])
     }
 }
 
@@ -742,11 +583,11 @@ impl BusDevice for I8042Device {
         }
         if offset == 4 {
             data[0] = 0x10 | self.state.control & 4 | if self.state.command_write { 8 } else { 0 };
-            if let Some(front) = self.state.queue.front() {
-                data[0] |= 1 | if front.mouse { 0x20 } else { 0 };
+            if !self.state.queue.is_empty() {
+                data[0] |= 1;
             }
         } else {
-            data[0] = self.state.queue.pop_front().map_or(0, |byte| byte.value);
+            data[0] = self.state.queue.pop_front().unwrap_or(0);
             self.flush_input();
             if let Err(err) = self.signal_front() {
                 error!("i8042 interrupt: {err}");
@@ -801,16 +642,35 @@ mod tests {
     fn data(device: &mut I8042Device, byte: u8) {
         device.write(0, 0, &[byte]);
     }
-    fn mouse(device: &mut I8042Device, byte: u8) {
-        command(device, 0xd4);
-        data(device, byte);
-    }
     fn drain(device: &mut I8042Device) -> Vec<u8> {
         let mut bytes = Vec::new();
         while read(device, 4) & 1 != 0 {
             bytes.push(read(device, 0));
         }
         bytes
+    }
+
+    #[test]
+    fn absent_auxiliary_port_cannot_be_enabled_or_inject_keyboard_replies() {
+        let mut device = controller();
+        command(&mut device, 0xa8);
+        command(&mut device, 0x20);
+        assert_eq!(read(&mut device, 0) & 0x22, 0x20);
+        command(&mut device, 0x60);
+        data(&mut device, 0xff);
+        command(&mut device, 0x20);
+        assert_eq!(read(&mut device, 0) & 0x22, 0x20);
+        command(&mut device, 0xa9);
+        assert_eq!(drain(&mut device), [1]);
+        command(&mut device, 0xab);
+        assert_eq!(drain(&mut device), [0]);
+        for prefix in [0xd3, 0xd4] {
+            command(&mut device, prefix);
+            data(&mut device, 0xff);
+            assert_eq!(read(&mut device, 4) & 0x21, 0);
+        }
+        data(&mut device, 0xf2);
+        assert_eq!(drain(&mut device), [ACK, 0xab, 0x41]);
     }
 
     #[test]
@@ -829,15 +689,47 @@ mod tests {
         command(&mut dev, 0xa8);
         data(&mut dev, 0xff);
         assert_eq!(drain(&mut dev), [ACK, 0xaa]);
-        mouse(&mut dev, 0xff);
-        assert_eq!(drain(&mut dev), [ACK, 0xaa, 0]);
-        mouse(&mut dev, 0xf2);
-        assert_eq!(drain(&mut dev), [ACK, 0]);
-        mouse(&mut dev, 0xe8);
-        mouse(&mut dev, 0);
-        mouse(&mut dev, 0xe6);
-        mouse(&mut dev, 0xe9);
-        assert_eq!(drain(&mut dev), [ACK, ACK, ACK, ACK, 0, 0, 100]);
+    }
+
+    #[test]
+    fn lock_led_acknowledgement_survives_snapshot_and_repeated_make() {
+        let mut device = controller();
+        device.inject_key(0x58, false, true).unwrap();
+        device.inject_key(0x58, false, true).unwrap();
+        device.inject_key(0x58, false, false).unwrap();
+        assert_eq!(device.keyboard_leds(), 0);
+        assert_eq!(device.keyboard_pending_leds(), 4);
+        let mut restored = controller();
+        restored.restore_state(&device.save_state()).unwrap();
+        assert_eq!(restored.keyboard_pending_leds(), 4);
+        drain(&mut restored);
+        data(&mut restored, 0xed);
+        data(&mut restored, 0);
+        assert_eq!(restored.keyboard_pending_leds(), 4);
+        data(&mut restored, 0xed);
+        data(&mut restored, 4);
+        assert_eq!(restored.keyboard_leds(), 4);
+        assert_eq!(restored.keyboard_pending_leds(), 0);
+        restored.inject_key(0x77, false, true).unwrap();
+        assert_eq!(restored.keyboard_pending_leds(), 2);
+        data(&mut restored, 0xed);
+        data(&mut restored, 6);
+        assert_eq!(restored.keyboard_pending_leds(), 0);
+    }
+
+    #[test]
+    fn ignored_or_rejected_lock_make_does_not_require_led_acknowledgement() {
+        let mut device = controller();
+        data(&mut device, 0xf5);
+        device.inject_key(0x58, false, true).unwrap();
+        assert_eq!(device.keyboard_pending_leds(), 0);
+        data(&mut device, 0xf4);
+        drain(&mut device);
+        for _ in 0..QUEUE_CAPACITY {
+            device.inject_key(0x1c, false, true).unwrap();
+        }
+        device.inject_key(0x58, false, true).unwrap_err();
+        assert_eq!(device.keyboard_pending_leds(), 0);
     }
 
     #[test]
@@ -869,30 +761,18 @@ mod tests {
         let mut dev = controller();
         command(&mut dev, 0x60);
         data(&mut dev, KBD_IRQ | AUX_IRQ);
-        mouse(&mut dev, 0xf4);
-        drain(&mut dev);
-        dev.mouse_interrupt_evt.read().unwrap();
         command(&mut dev, 0xad);
         command(&mut dev, 0xa7);
         dev.inject_key(0x1c, false, true).unwrap();
         dev.inject_key(0x1c, false, false).unwrap();
-        dev.inject_mouse(2, -3, 1).unwrap();
         assert_eq!(read(&mut dev, 4) & 1, 0);
         dev.kbd_interrupt_evt.read().unwrap_err();
-        dev.mouse_interrupt_evt.read().unwrap_err();
         command(&mut dev, 0x20);
         assert_eq!(dev.kbd_interrupt_evt.read().unwrap(), 1);
-        assert_eq!(read(&mut dev, 0), 0x33);
+        assert_eq!(read(&mut dev, 0), 0x31);
         let mut restored = controller();
         restored.restore_state(&dev.save_state()).unwrap();
         assert_eq!(read(&mut restored, 4) & 1, 0);
-        command(&mut restored, 0xa8);
-        for byte in [0x29, 2, 0xfd] {
-            assert_eq!(restored.mouse_interrupt_evt.read().unwrap(), 1);
-            assert_eq!(read(&mut restored, 4) & 0x21, 0x21);
-            assert_eq!(read(&mut restored, 0), byte);
-        }
-        restored.kbd_interrupt_evt.read().unwrap_err();
         command(&mut restored, 0xae);
         for byte in [0x1c, 0xf0, 0x1c] {
             assert_eq!(restored.kbd_interrupt_evt.read().unwrap(), 1);
@@ -912,12 +792,9 @@ mod tests {
         dev.inject_key(0x1c, false, true).unwrap_err();
         assert_eq!(dev.state.pending_input.len(), QUEUE_CAPACITY);
         command(&mut dev, 0x20);
-        assert_eq!(drain(&mut dev), [0x15]);
+        assert_eq!(drain(&mut dev), [0x35]);
         let mut state = dev.save_state();
-        state.pending_input.push_back(OutputByte {
-            value: 0,
-            mouse: false,
-        });
+        state.pending_input.push_back(0);
         dev.restore_state(&state).unwrap_err();
         data(&mut dev, 0xff);
         assert_eq!(drain(&mut dev), [ACK, 0xaa]);
@@ -925,20 +802,19 @@ mod tests {
     }
 
     #[test]
-    fn device_commands_reenable_inhibited_interfaces() {
+    fn device_commands_reenable_inhibited_keyboard() {
         let mut dev = controller();
         command(&mut dev, 0x60);
         data(&mut dev, KBD_IRQ | AUX_IRQ | TRANSLATE);
         command(&mut dev, 0xad);
         command(&mut dev, 0xa7);
-        assert_eq!(dev.save_state().control, 0x73);
+        assert_eq!(dev.save_state().control, 0x71);
         dev.inject_key(0x5a, false, true).unwrap();
-        dev.inject_mouse(1, 2, 0).unwrap();
         assert!(drain(&mut dev).is_empty());
 
         data(&mut dev, 0xf4);
         assert_eq!(drain(&mut dev), [ACK, 0x1c]);
-        assert_eq!(dev.save_state().control, 0x63);
+        assert_eq!(dev.save_state().control, 0x61);
         dev.kbd_interrupt_evt.read().unwrap();
         dev.inject_key(0x5a, false, true).unwrap();
         dev.inject_key(0x5a, false, false).unwrap();
@@ -946,32 +822,18 @@ mod tests {
         assert_eq!(read(&mut dev, 0), 0x1c);
         assert_eq!(dev.kbd_interrupt_evt.read().unwrap(), 1);
         assert_eq!(read(&mut dev, 0), 0x9c);
-
-        mouse(&mut dev, 0xf4);
-        assert_eq!(drain(&mut dev), [ACK]);
-        assert_eq!(dev.save_state().control, 0x43);
-        dev.mouse_interrupt_evt.read().unwrap();
-        dev.inject_mouse(1, 2, 0).unwrap();
-        assert_eq!(dev.mouse_interrupt_evt.read().unwrap(), 1);
-        assert_eq!(drain(&mut dev), [8, 2, 4]);
     }
 
     #[test]
-    fn source_status_and_irq_follow_front_byte() {
+    fn keyboard_irq_follows_each_queued_byte() {
         let mut dev = controller();
-        command(&mut dev, 0x60);
-        data(&mut dev, 7);
         dev.inject_key(0x1c, false, true).unwrap();
-        mouse(&mut dev, 0xf2);
-        assert_eq!(dev.kbd_interrupt_evt.read().unwrap(), 1);
-        dev.mouse_interrupt_evt.read().unwrap_err();
-        assert_eq!(read(&mut dev, 4) & 0x21, 1);
-        assert_eq!(read(&mut dev, 0), 0x1c);
-        assert_eq!(dev.mouse_interrupt_evt.read().unwrap(), 1);
-        assert_eq!(read(&mut dev, 4) & 0x21, 0x21);
-        assert_eq!(read(&mut dev, 0), ACK);
-        assert_eq!(dev.mouse_interrupt_evt.read().unwrap(), 1);
-        assert_eq!(read(&mut dev, 0), 0);
+        data(&mut dev, 0xf2);
+        for value in [0x1c, ACK, 0xab, 0x83] {
+            assert_eq!(dev.kbd_interrupt_evt.read().unwrap(), 1);
+            assert_eq!(read(&mut dev, 4) & 0x21, 1);
+            assert_eq!(read(&mut dev, 0), value);
+        }
         assert_eq!(read(&mut dev, 4) & 0x21, 0);
     }
 
@@ -981,7 +843,7 @@ mod tests {
         dev.inject_key(0x1c, false, true).unwrap();
         command(&mut dev, 0x20);
         data(&mut dev, 0xf2);
-        assert_eq!(drain(&mut dev), [0x1c, 5, ACK, 0xab, 0x83]);
+        assert_eq!(drain(&mut dev), [0x1c, 0x25, ACK, 0xab, 0x83]);
         data(&mut dev, 0xf5);
         dev.inject_key(0x1c, false, true).unwrap();
         assert_eq!(drain(&mut dev), [ACK]);
@@ -991,31 +853,8 @@ mod tests {
     }
 
     #[test]
-    fn mouse_stream_remote_scaling_and_status() {
-        let mut dev = controller();
-        mouse(&mut dev, 0xf4);
-        drain(&mut dev);
-        dev.inject_mouse(-4, 5, 1).unwrap();
-        assert_eq!(drain(&mut dev), [0x19, 0xfc, 5]);
-        mouse(&mut dev, 0xf0);
-        mouse(&mut dev, 0xe7);
-        drain(&mut dev);
-        dev.inject_mouse(4, -5, 5).unwrap();
-        assert!(drain(&mut dev).is_empty());
-        mouse(&mut dev, 0xeb);
-        assert_eq!(drain(&mut dev), [ACK, 0x2d, 6, 0xf7]);
-        mouse(&mut dev, 0xe9);
-        assert_eq!(drain(&mut dev), [ACK, 0x76, 2, 100]);
-        mouse(&mut dev, 0xea);
-        drain(&mut dev);
-        dev.inject_mouse(i16::MIN, i16::MAX, 0).unwrap();
-        assert_eq!(drain(&mut dev), [0xd8, 1, 255]);
-    }
-
-    #[test]
-    fn snapshot_mid_command_and_mixed_output() {
+    fn snapshot_mid_command_and_discarded_auxiliary_write() {
         let mut original = controller();
-        mouse(&mut original, 0xf3);
         data(&mut original, 0xf0);
         command(&mut original, 0xd4);
         let state = original.save_state();
@@ -1023,10 +862,9 @@ mod tests {
         restored.restore_state(&state).unwrap();
         data(&mut restored, 200);
         data(&mut restored, 1);
-        assert_eq!(drain(&mut restored), [ACK, ACK, ACK, ACK]);
+        assert_eq!(drain(&mut restored), [ACK, ACK]);
         restored.inject_key(0x1c, false, true).unwrap();
         assert_eq!(drain(&mut restored), [0x1e]);
-        assert_eq!(restored.state.mouse.sample_rate, 200);
         let mut invalid = state;
         invalid.keyboard.scan_set = 3;
         assert!(matches!(
@@ -1036,21 +874,14 @@ mod tests {
     }
 
     #[test]
-    fn bounded_queue_rejects_whole_key_and_mouse_packet() {
+    fn bounded_queue_rejects_whole_key_sequence() {
         let mut dev = controller();
-        dev.enqueue(false, &[0; QUEUE_CAPACITY - 1]).unwrap();
+        dev.enqueue(&[0; QUEUE_CAPACITY - 1]).unwrap();
         assert!(matches!(
             dev.inject_key(0x75, true, false),
             Err(I8042Error::InternalBufferFull)
         ));
         assert_eq!(dev.state.queue.len(), QUEUE_CAPACITY - 1);
-        dev.state.mouse.enabled = true;
-        assert!(matches!(
-            dev.inject_mouse(10, 20, 1),
-            Err(I8042Error::InternalBufferFull)
-        ));
-        assert_eq!(dev.state.mouse.x, 0);
-        assert_eq!(dev.state.mouse.buttons, 0);
     }
 
     #[test]
