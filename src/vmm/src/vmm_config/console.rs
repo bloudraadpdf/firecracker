@@ -22,16 +22,7 @@ pub struct ConsoleConfig {
 impl ConsoleConfig {
     /// Validate host paths before constructing devices.
     pub fn validate(&self) -> Result<(), std::io::Error> {
-        use std::os::unix::ffi::OsStrExt;
-
-        let path = self.socket_path.as_os_str().as_bytes();
-        if path.is_empty() || path.len() >= 108 || path.contains(&0) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "console socket path must contain 1..107 non-NUL bytes",
-            ));
-        }
-        Ok(())
+        utils::unix_socket::validate(&self.socket_path)
     }
 }
 
