@@ -64,6 +64,15 @@ pub const SYSTEM_MEM_START: u64 = DRAM_MEM_START;
 /// image, which needs to be 2MB aligned.
 pub const SYSTEM_MEM_SIZE: u64 = 0x20_0000;
 
+/// Fixed handoff addresses used by the Firecracker EDK II build.
+pub const FIRMWARE_FDT_ADDR: u64 = DRAM_MEM_START;
+/// Firmware ACPI root pointer, outside the dynamically allocated tables.
+pub const FIRMWARE_RSDP_ADDR: u64 = DRAM_MEM_START + 0x1f_0000;
+/// Firmware entry point after the platform handoff region.
+pub const FIRMWARE_START: u64 = DRAM_MEM_START + SYSTEM_MEM_SIZE;
+/// Maximum supported firmware image size.
+pub const FIRMWARE_MAX_SIZE: u64 = 0x40_0000;
+
 /// Kernel command line maximum size.
 /// As per `arch/arm64/include/uapi/asm/setup.h`.
 pub const CMDLINE_MAX_SIZE: usize = 2048;
@@ -141,3 +150,6 @@ pub const MEM_64BIT_DEVICES_SIZE: u64 = MMIO64_MEM_SIZE;
 pub const FIRST_ADDR_PAST_64BITS_MMIO: u64 = MMIO64_MEM_START + MMIO64_MEM_SIZE;
 /// Size of the memory past 64-bit MMIO gap
 pub const PAST_64BITS_MMIO_SIZE: u64 = 512 << 30;
+
+/// Architectural PMUv3 overflow interrupt (PPI 7).
+pub const PMU_IRQ: u32 = 23;
