@@ -91,6 +91,8 @@ mod platform;
 #[cfg(all(target_arch = "x86_64", feature = "windows"))]
 mod tpm;
 #[cfg(all(target_arch = "x86_64", feature = "windows"))]
+mod tpm_ppi;
+#[cfg(all(target_arch = "x86_64", feature = "windows"))]
 mod uefi_vars;
 
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
