@@ -1545,6 +1545,18 @@
                         "index": 1,
                         "type": "dword",
                         "op": "eq",
+                        "val": 1074025688,
+                        "comment": "TUNSETVNETHDRSZ during virtio-net activation"
+                    }
+                ]
+            },
+            {
+                "syscall": "ioctl",
+                "args": [
+                    {
+                        "index": 1,
+                        "type": "dword",
+                        "op": "eq",
                         "val": 1074310762,
                         "comment": "KVM_SET_GSI_ROUTING"
                     }
