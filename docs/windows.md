@@ -87,8 +87,9 @@ without these devices, their event descriptors or the IRQ 8 reservation. PCI and
 Hyper-V settings do not select PC timers.
 
 Use a prepared GPT disk with an EFI system partition and matching signed virtio
-storage drivers. This headless profile does not provide an installer display or
-installation media.
+storage drivers. For an installer display and read-only installation media,
+select the optional [AMD64 console](windows-console.md). The headless profile
+does not provide them.
 
 ### Transitional PCI platform
 

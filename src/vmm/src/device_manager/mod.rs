@@ -64,6 +64,20 @@ use crate::vstate::vm::{KvmVm, Vm};
 
 /// ACPI device manager.
 pub mod acpi;
+#[cfg(target_arch = "x86_64")]
+pub mod console;
+#[cfg(target_arch = "x86_64")]
+mod console_a20;
+#[cfg(target_arch = "x86_64")]
+mod console_bridge;
+#[cfg(target_arch = "x86_64")]
+mod console_display;
+#[cfg(target_arch = "x86_64")]
+mod console_optical;
+#[cfg(all(target_arch = "x86_64", feature = "windows"))]
+mod console_server;
+#[cfg(target_arch = "x86_64")]
+mod console_usb;
 /// Legacy Device Manager.
 pub mod legacy;
 /// Memory Mapped I/O Manager.
@@ -120,6 +134,10 @@ pub enum FindDeviceError {
 #[derive(Debug, Default)]
 /// A manager of all peripheral devices of Firecracker
 pub struct DeviceManager {
+    /// Optional graphical console hardware.
+    #[cfg(target_arch = "x86_64")]
+    #[cfg(feature = "windows")]
+    pub console: Option<console::ConsoleHardware>,
     /// MMIO Platform devices (non-virtio)
     pub mmio_platform_devices: MMIOPlatformDevices,
     #[cfg(target_arch = "x86_64")]
@@ -259,6 +277,9 @@ impl DeviceManager {
         )?;
 
         Ok(DeviceManager {
+            #[cfg(target_arch = "x86_64")]
+            #[cfg(feature = "windows")]
+            console: None,
             mmio_platform_devices: MMIOPlatformDevices::new(),
             #[cfg(target_arch = "x86_64")]
             legacy_devices: Some(legacy_devices),
@@ -337,6 +358,8 @@ impl DeviceManager {
             VirtioDevices::Pci(devices) => devices.append_aml_bytes(dsdt_data)?,
         }
 
+        #[cfg(feature = "windows")]
+        self.append_console_aml(dsdt_data)?;
         self.acpi_devices
             .append_aml_bytes_in_scope(self.acpi_device_scope(), dsdt_data)
     }
@@ -344,7 +367,7 @@ impl DeviceManager {
     #[cfg(target_arch = "x86_64")]
     pub(crate) fn acpi_device_scope(&self) -> crate::acpi::DeviceScope {
         match &self.virtio_devices {
-            VirtioDevices::Pci(devices) if !devices.pci_segment.pci_transport.is_modern() => {
+            VirtioDevices::Pci(devices) if devices.pci_segment.legacy_io_enabled => {
                 crate::acpi::DeviceScope::PciRoot
             }
             _ => crate::acpi::DeviceScope::SystemBus,
@@ -635,6 +658,9 @@ impl Default for VirtioDevicesState {
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 /// State of devices in the system
 pub struct DevicesState {
+    /// Optional graphical console and installation hardware.
+    #[cfg(target_arch = "x86_64")]
+    pub console: Option<console::ConsoleState>,
     /// Virtio devices state
     pub virtio_state: VirtioDevicesState,
     /// MMIO platform (non-virtio) devices state
@@ -656,7 +682,7 @@ impl DevicesState {
         &self,
     ) -> Result<(), crate::vmm_config::WindowsFeatureDisabled> {
         #[cfg(target_arch = "x86_64")]
-        if self.cmos_state.is_some() || self.power_state.is_some() {
+        if self.console.is_some() || self.cmos_state.is_some() || self.power_state.is_some() {
             crate::vmm_config::require_windows_support()?;
         }
         Ok(())
@@ -706,6 +732,9 @@ pub enum DevicePersistError {
 pub enum DeviceManagerPersistError {
     /// Unsupported build configuration: {0}
     WindowsFeature(#[from] crate::vmm_config::WindowsFeatureDisabled),
+    /// Console restore failed: {0}
+    #[cfg(target_arch = "x86_64")]
+    Console(#[from] std::io::Error),
     /// PC timer snapshot must contain both RTC and ACPI power state.
     #[cfg(target_arch = "x86_64")]
     IncompletePcState,
@@ -776,6 +805,8 @@ impl<'a> Persist<'a> for DeviceManager {
 
         #[cfg(feature = "windows")]
         let state = DevicesState {
+            #[cfg(target_arch = "x86_64")]
+            console: self.save_console(),
             #[cfg(target_arch = "x86_64")]
             cmos_state: self
                 .pc_devices()
@@ -871,6 +902,20 @@ impl<'a> Persist<'a> for DeviceManager {
             &state.acpi_state,
         )?;
 
+        #[cfg(target_arch = "x86_64")]
+        #[cfg(feature = "windows")]
+        if state
+            .console
+            .as_ref()
+            .is_some_and(|console| console.has_optical())
+        {
+            constructor_args
+                .vm
+                .resource_allocator()
+                .gsi_legacy_allocator
+                .allocate_id_at(crate::devices::legacy::atapi::IRQ)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+        }
         let virtio_devices = match &state.virtio_state {
             VirtioDevicesState::Pci(pci_state) => {
                 let pci_ctor_args = PciDevicesConstructorArgs {
@@ -898,13 +943,26 @@ impl<'a> Persist<'a> for DeviceManager {
             }
         };
 
-        Ok(DeviceManager {
+        let manager = DeviceManager {
+            #[cfg(target_arch = "x86_64")]
+            #[cfg(feature = "windows")]
+            console: None,
             mmio_platform_devices,
             #[cfg(target_arch = "x86_64")]
             legacy_devices: Some(legacy_devices),
             acpi_devices,
             virtio_devices,
-        })
+        };
+        #[cfg(all(target_arch = "x86_64", feature = "windows"))]
+        let manager = {
+            let mut manager = manager;
+            if let Some(console) = &state.console {
+                manager.restore_console(constructor_args.vm, console)?;
+                constructor_args.vm_resources.console = manager.console_config();
+            }
+            manager
+        };
+        Ok(manager)
     }
 }
 
@@ -940,6 +998,9 @@ pub(crate) mod tests {
         let legacy_devices = PortIODeviceManager::for_tests(false);
 
         DeviceManager {
+            #[cfg(target_arch = "x86_64")]
+            #[cfg(feature = "windows")]
+            console: None,
             mmio_platform_devices,
             #[cfg(target_arch = "x86_64")]
             legacy_devices: Some(legacy_devices),
