@@ -36,7 +36,6 @@ use crate::devices::legacy::RTCDevice;
 use crate::devices::legacy::SerialDevice;
 use crate::devices::legacy::serial::{SerialOut, SerialOutInner};
 use crate::devices::pseudo::BootTimer;
-use crate::devices::virtio::ActivateError;
 use crate::devices::virtio::balloon::BalloonError;
 use crate::devices::virtio::block::BlockError;
 use crate::devices::virtio::block::device::Block;
@@ -48,6 +47,7 @@ use crate::devices::virtio::pmem::device::Pmem;
 use crate::devices::virtio::pmem::persist::PmemPersistError;
 use crate::devices::virtio::rng::persist::EntropyPersistError;
 use crate::devices::virtio::vsock::{VsockError, VsockUnixBackendError};
+use crate::devices::virtio::{ActivateError, PrepareSaveError};
 use crate::logger::{error, info};
 use crate::rate_limiter::TokenBucket;
 use crate::resources::VmResources;
@@ -377,6 +377,17 @@ impl DeviceManager {
         self.mmio_platform_devices
             .register_mmio_rtc(vm, rtc, None)?;
         Ok(())
+    }
+
+    /// Prepares each device before any transport or KVM state is captured.
+    pub fn prepare_save(&self) -> Result<(), PrepareSaveError> {
+        let mut result = Ok(());
+        self.for_each_virtio_device_mut(|_, device| {
+            if result.is_ok() {
+                result = device.prepare_save();
+            }
+        });
+        result
     }
 
     /// Artificially kick VirtIO devices as if they had external events.

@@ -10,10 +10,10 @@ use super::BlockError;
 use super::persist::{BlockConstructorArgs, BlockState};
 use super::vhost_user::device::{VhostUserBlock, VhostUserBlockConfig};
 use super::virtio::device::{VirtioBlock, VirtioBlockConfig};
-use crate::devices::virtio::ActivateError;
 use crate::devices::virtio::device::{VirtioDevice, VirtioDeviceType};
 use crate::devices::virtio::queue::{InvalidAvailIdx, Queue};
 use crate::devices::virtio::transport::VirtioInterrupt;
+use crate::devices::virtio::{ActivateError, PrepareSaveError};
 use crate::impl_device_type;
 use crate::rate_limiter::BucketUpdate;
 use crate::snapshot::Persist;
@@ -221,9 +221,9 @@ impl VirtioDevice for Block {
         }
     }
 
-    fn prepare_save(&mut self) {
+    fn prepare_save(&mut self) -> Result<(), PrepareSaveError> {
         match self {
-            Self::Virtio(b) => b.prepare_save(),
+            Self::Virtio(b) => b.prepare_save().map_err(PrepareSaveError::Block),
             Self::VhostUser(b) => b.prepare_save(),
         }
     }

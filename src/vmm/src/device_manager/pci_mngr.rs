@@ -356,11 +356,7 @@ impl<'a> Persist<'a> for PciDevices {
         for pci_dev in self.virtio_devices.values() {
             let locked_pci_dev = pci_dev.lock().expect("Poisoned lock");
             let virtio_dev = locked_pci_dev.virtio_device();
-            // We need to call `prepare_save()` on the device before saving the transport
-            // so that, if we modify the transport state while preparing the device, e.g. sending
-            // an interrupt to the guest, this is correctly captured in the saved transport state.
             let mut locked_virtio_dev = virtio_dev.lock().expect("Poisoned lock");
-            locked_virtio_dev.prepare_save();
             let transport_state = locked_pci_dev.state();
 
             let sbdf = transport_state.sbdf;
@@ -804,6 +800,7 @@ mod tests {
                 memory_hotplug_config,
             );
 
+            vmm.device_manager.prepare_save().unwrap();
             let device_state = vmm.device_manager.save();
             serialized_data = bitcode::serialize(&device_state).unwrap();
             saved_allocator = vmm.vm.as_kvm().unwrap().resource_allocator().save()
@@ -879,7 +876,7 @@ mod tests {
     "vcpu_count": 1,
     "mem_size_mib": 128,
     "smt": false,
-    "track_dirty_pages": false,
+{pit}    "track_dirty_pages": false,
     "huge_pages": "None"
   }},
   "metrics": null,
@@ -926,6 +923,11 @@ mod tests {
             _block_files.last().unwrap().as_path().to_str().unwrap(),
             tmp_sock_file.as_path().to_str().unwrap(),
             _pmem_files.last().unwrap().as_path().to_str().unwrap(),
+            pit = if cfg!(target_arch = "x86_64") {
+                "    \"pit\": true,\n"
+            } else {
+                ""
+            },
         );
 
         assert_eq!(

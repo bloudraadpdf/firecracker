@@ -709,15 +709,19 @@ impl VirtioBlock {
     }
 
     /// Prepare device for being snapshotted.
-    pub fn prepare_save(&mut self) {
+    pub fn prepare_save(&mut self) -> Result<(), VirtioBlockError> {
         if !self.is_activated() {
-            return;
+            return Ok(());
         }
 
-        self.drain_and_flush(false);
+        self.disk
+            .file_engine
+            .drain_and_flush(false)
+            .map_err(VirtioBlockError::FileEngine)?;
         if let FileEngine::Async(ref _engine) = self.disk.file_engine {
             self.process_async_completion_queue();
         }
+        Ok(())
     }
 }
 
@@ -1816,6 +1820,7 @@ mod tests {
     fn test_prepare_save() {
         for engine in [FileEngineType::Sync, FileEngineType::Async] {
             let mut block = default_block(engine);
+            block.prepare_save().unwrap();
 
             let mem = default_mem();
             let interrupt = default_interrupt();
@@ -1826,10 +1831,21 @@ mod tests {
             // Add a batch of flush requests.
             add_flush_requests_batch(&mut block, &vq, 5);
             simulate_queue_event(&mut block, None);
-            block.prepare_save();
+            block.prepare_save().unwrap();
 
             // Check that all the pending flush requests were processed during `prepare_save()`.
             check_flush_requests_batch(5, &vq);
+
+            block.disk.file_engine = FileEngine::Sync(block_io::SyncFileEngine::from_file(
+                File::open("/dev/null").unwrap(),
+            ));
+            let VirtioBlockError::FileEngine(block_io::BlockIoError::Sync(
+                block_io::SyncIoError::SyncAll(error),
+            )) = block.prepare_save().unwrap_err()
+            else {
+                panic!("expected synchronous fsync failure");
+            };
+            assert_eq!(error.raw_os_error(), Some(libc::EINVAL));
         }
     }
 

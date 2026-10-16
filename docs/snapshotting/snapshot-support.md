@@ -744,3 +744,12 @@ host kernel (but not vice versa), but could not be restored on a m5n.metal host
 (Intel Cascade Lake).
 
 [man mincore]: https://man7.org/linux/man-pages/man2/mincore.2.html
+
+### Block flush failure
+
+Snapshot creation returns an error if an activated block device cannot drain its
+I/O or flush its backing file. Devices are prepared once, before transport and KVM
+state capture. No snapshot state or memory output is written after a preparation
+error. Preparation can have changed another device before the failure, including
+resetting vsock connections. A failed snapshot is not proof that the source's
+control connection remains usable.

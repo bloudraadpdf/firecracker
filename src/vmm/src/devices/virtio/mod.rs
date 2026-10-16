@@ -71,6 +71,13 @@ pub enum ActivateError {
     VsockBackend(vsock::VsockError),
 }
 
+/// Errors from preparing a device for snapshot capture.
+#[derive(Debug, thiserror::Error, displaydoc::Display)]
+pub enum PrepareSaveError {
+    /// Block: {0}
+    Block(#[from] block::virtio::VirtioBlockError),
+}
+
 /// Trait that helps in upcasting an object to Any
 pub trait AsAny {
     /// Return the immutable any encapsulated object.

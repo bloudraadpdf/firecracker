@@ -505,6 +505,7 @@ impl Vmm {
         // might modify the VirtIO transport and send an interrupt to the guest. If we save KVM
         // state before we save device state, that interrupt will never be delivered to the guest
         // upon resuming from the snapshot.
+        self.device_manager.prepare_save()?;
         let device_states = self.device_manager.save();
         let kvm_vm = self
             .vm

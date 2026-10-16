@@ -285,10 +285,6 @@ impl<'a> Persist<'a> for MMIOVirtioDevices {
         let _: Result<(), ()> = self.for_each_virtio_mmio_device(|_, devid, device| {
             let mmio_transport_locked = device.inner.lock().expect("Poisoned lock");
             let mut locked_device = mmio_transport_locked.locked_device();
-            // We need to call `prepare_save()` on the device before saving the transport
-            // so that, if we modify the transport state while preparing the device, e.g. sending
-            // an interrupt to the guest, this is correctly captured in the saved transport state.
-            locked_device.prepare_save();
             let transport_state = mmio_transport_locked.save();
             let device_info = device.resources;
             let device_id = devid.clone();
@@ -793,6 +789,7 @@ mod tests {
                 memory_hotplug_config,
             );
 
+            vmm.device_manager.prepare_save().unwrap();
             let device_state = vmm.device_manager.save();
             serialized_data = bitcode::serialize(&device_state).unwrap();
         }
@@ -859,7 +856,7 @@ mod tests {
     "vcpu_count": 1,
     "mem_size_mib": 128,
     "smt": false,
-    "track_dirty_pages": false,
+{pit}    "track_dirty_pages": false,
     "huge_pages": "None"
   }},
   "metrics": null,
@@ -906,6 +903,11 @@ mod tests {
             _block_files.last().unwrap().as_path().to_str().unwrap(),
             tmp_sock_file.as_path().to_str().unwrap(),
             _pmem_files.last().unwrap().as_path().to_str().unwrap(),
+            pit = if cfg!(target_arch = "x86_64") {
+                "    \"pit\": true,\n"
+            } else {
+                ""
+            },
         );
 
         assert_eq!(

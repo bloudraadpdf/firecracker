@@ -26,6 +26,7 @@ use crate::cpu_config::x86_64::cpuid::CpuidTrait;
 #[cfg(target_arch = "x86_64")]
 use crate::cpu_config::x86_64::cpuid::common::get_vendor_id_from_host;
 use crate::device_manager::{DevicePersistError, DevicesState};
+use crate::devices::virtio::PrepareSaveError;
 // Re-exported so external crates inspecting a `MicrovmState` snapshot can match on the
 // serialised virtio transport variant.
 pub use crate::device_manager::VirtioDevicesState;
@@ -130,6 +131,8 @@ pub struct GuestRegionUffdMapping {
 /// Errors related to saving and restoring Microvm state.
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum MicrovmStateError {
+    /// Cannot prepare devices for snapshot: {0}
+    PrepareDevices(#[from] PrepareSaveError),
     /// Operation not allowed: {0}
     NotAllowed(String),
     /// Cannot restore devices: {0}
@@ -748,8 +751,67 @@ mod tests {
     }
 
     #[test]
+    fn test_snapshot_flush_error_reaches_api() {
+        use crate::builder::tests::default_vmm_with_pci;
+        use crate::devices::virtio::block::device::Block;
+        use crate::devices::virtio::device::VirtioDevice;
+        use crate::devices::virtio::test_utils::{VirtQueue, default_interrupt, default_mem};
+        use crate::vstate::memory::GuestAddress;
+
+        for mut vmm in [default_vmm(), default_vmm_with_pci()] {
+            let mut event_manager = EventManager::new().unwrap();
+            let mut cmdline = default_kernel_cmdline();
+            let _files = insert_block_devices(
+                &mut vmm,
+                &mut cmdline,
+                &mut event_manager,
+                vec![CustomBlockConfig::new(
+                    "data".into(),
+                    false,
+                    None,
+                    false,
+                    CacheType::Writeback,
+                )],
+            );
+            vmm.device_manager
+                .with_virtio_device("data", |block: &mut Block| {
+                    let Block::Virtio(block) = block else {
+                        panic!("expected virtio block")
+                    };
+                    let mem = default_mem();
+                    let queue = VirtQueue::new(GuestAddress(0), &mem, 16);
+                    block.queues_mut()[0] = queue.create_queue();
+                    block.activate(mem, default_interrupt()).unwrap();
+                    block
+                        .disk
+                        .file_engine
+                        .update_file_path(File::open("/dev/null").unwrap())
+                        .unwrap();
+                })
+                .unwrap();
+            let output = vmm_sys_util::tempdir::TempDir::new().unwrap();
+            let params = CreateSnapshotParams {
+                snapshot_type: crate::vmm_config::snapshot::SnapshotType::Full,
+                snapshot_path: output.as_path().join("state"),
+                mem_file_path: output.as_path().join("memory"),
+                sync_snapshot_files: true,
+            };
+            let error = create_snapshot(&mut vmm, &VmInfo::default(), &params)
+                .expect_err("flush failure must reject the snapshot");
+            assert!(matches!(
+                error,
+                CreateSnapshotError::MicrovmState(MicrovmStateError::PrepareDevices(_))
+            ));
+            assert!(error.to_string().contains("SyncAll"), "{error}");
+            assert!(!params.snapshot_path.exists());
+            assert!(!params.mem_file_path.exists());
+        }
+    }
+
+    #[test]
     fn test_microvm_state_snapshot() {
         let vmm = default_vmm_with_devices();
+        vmm.device_manager.prepare_save().unwrap();
         let states = vmm.device_manager.save();
 
         // Only checking that all devices are saved, actual device state

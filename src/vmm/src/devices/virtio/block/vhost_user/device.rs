@@ -13,7 +13,6 @@ use vhost::vhost_user::message::*;
 use vmm_sys_util::eventfd::EventFd;
 
 use super::{NUM_QUEUES, QUEUE_SIZE, VhostUserBlockError};
-use crate::devices::virtio::ActivateError;
 use crate::devices::virtio::block::CacheType;
 use crate::devices::virtio::device::{ActiveState, DeviceState, VirtioDevice, VirtioDeviceType};
 use crate::devices::virtio::generated::virtio_blk::{VIRTIO_BLK_F_FLUSH, VIRTIO_BLK_F_RO};
@@ -25,6 +24,7 @@ use crate::devices::virtio::vhost_user::{VhostUserHandleBackend, VhostUserHandle
 use crate::devices::virtio::vhost_user_metrics::{
     VhostUserDeviceMetrics, VhostUserMetricsPerDevice,
 };
+use crate::devices::virtio::{ActivateError, PrepareSaveError};
 use crate::logger::{IncMetric, StoreMetric, log_dev_preview_warning};
 use crate::utils::u64_to_usize;
 use crate::vmm_config::drive::BlockDeviceConfig;
@@ -243,7 +243,7 @@ impl<T: VhostUserHandleBackend> VhostUserBlockImpl<T> {
     }
 
     /// Prepare device for being snapshotted.
-    pub fn prepare_save(&mut self) {
+    pub fn prepare_save(&mut self) -> Result<(), PrepareSaveError> {
         unimplemented!("VhostUserBlock does not support snapshotting yet");
     }
 

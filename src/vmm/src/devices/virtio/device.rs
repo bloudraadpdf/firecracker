@@ -12,9 +12,9 @@ use std::sync::atomic::AtomicU32;
 use serde::{Deserialize, Serialize};
 use vmm_sys_util::eventfd::EventFd;
 
-use super::ActivateError;
 use super::queue::{Queue, QueueError};
 use super::transport::VirtioInterrupt;
+use super::{ActivateError, PrepareSaveError};
 use crate::MutEventSubscriber;
 use crate::devices::virtio::AsAny;
 use crate::devices::virtio::generated::virtio_ids;
@@ -256,7 +256,9 @@ pub trait VirtioDevice: AsAny + MutEventSubscriber + Send {
     }
 
     /// Prepare the device for saving its state
-    fn prepare_save(&mut self) {}
+    fn prepare_save(&mut self) -> Result<(), PrepareSaveError> {
+        Ok(())
+    }
 }
 
 impl fmt::Debug for dyn VirtioDevice {

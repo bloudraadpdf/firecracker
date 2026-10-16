@@ -29,7 +29,6 @@ use vmm_sys_util::eventfd::EventFd;
 use super::super::super::DeviceError;
 use super::packet::{VSOCK_PKT_HDR_SIZE, VsockPacketRx, VsockPacketTx};
 use super::{VsockBackend, defs};
-use crate::devices::virtio::ActivateError;
 use crate::devices::virtio::device::{ActiveState, DeviceState, VirtioDevice, VirtioDeviceType};
 use crate::devices::virtio::generated::virtio_config::{VIRTIO_F_IN_ORDER, VIRTIO_F_VERSION_1};
 use crate::devices::virtio::generated::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
@@ -37,6 +36,7 @@ use crate::devices::virtio::queue::{InvalidAvailIdx, Queue as VirtQueue};
 use crate::devices::virtio::transport::{VirtioInterrupt, VirtioInterruptType};
 use crate::devices::virtio::vsock::VsockError;
 use crate::devices::virtio::vsock::metrics::METRICS;
+use crate::devices::virtio::{ActivateError, PrepareSaveError};
 use crate::impl_device_type;
 use crate::logger::{IncMetric, error, info, warn};
 use crate::vstate::memory::{ByteValued, Bytes, GuestMemoryMmap};
@@ -464,7 +464,7 @@ where
         }
     }
 
-    fn prepare_save(&mut self) {
+    fn prepare_save(&mut self) -> Result<(), PrepareSaveError> {
         // Send Transport event to reset connections if device
         // is activated.
         if self.is_activated() {
@@ -472,6 +472,7 @@ where
                 error!("Failed to send reset transport event: {:?}", err);
             });
         }
+        Ok(())
     }
 }
 
@@ -696,7 +697,7 @@ mod tests {
         ctx.mock_activate(test_ctx.mem.clone(), test_ctx.interrupt.clone());
         publish_evq_descriptor(&mut ctx);
 
-        ctx.device.prepare_save();
+        ctx.device.prepare_save().unwrap();
 
         assert!(ctx.device.pending_event_ack);
         assert_eq!(ctx.guest_evvq.used.idx.get(), 1);
@@ -708,7 +709,7 @@ mod tests {
         assert!(!ctx.device.is_activated());
 
         // Must not panic, must not arm the gate.
-        ctx.device.prepare_save();
+        ctx.device.prepare_save().unwrap();
 
         assert!(!ctx.device.pending_event_ack);
     }
