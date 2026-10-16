@@ -60,7 +60,7 @@ update.
 
 ## Checkpoints
 
-Snapshot format 25.0.0 includes complete TPM and variable-service state, and the
+Snapshot format 26.0.0 includes complete TPM and variable-service state, and the
 firmware profile/system UUID. Earlier snapshots require the matching earlier
 VMM; there is no implicit conversion. Display memory, TPM state and variables
 fit the bounded 32 MiB snapshot reader. Guest disks remain separate artifacts.
@@ -99,3 +99,18 @@ The launcher owns that publication boundary.
 An intentional restore also restores old revocation policy and TPM state. It
 cannot preserve a later dbx update while restoring an older matched checkpoint.
 A software TPM and host-managed variables do not protect against the host owner.
+
+## Physical presence
+
+The ACPI physical-presence interface uses a bounded mailbox in the existing
+variable-service page and the standard EDK II physical-presence variables.
+Requests and results persist in `Tcg2PhysicalPresence`; integrating firmware
+must lock confirmation flags against OS writes after initialisation and require
+console confirmation before destructive operations. The mandatory TPM2
+operations are 0, 5, 14, 21 and 22. The helper never executes or confirms a
+clear. Malformed calls, helper failure, busy snapshots and persistence have host
+tests. The complete helper protocol is in
+[its package](../tools/uefi-vars-helper/README.md).
+
+The normal VMM suite runs the real ACPICA physical-presence checks. Native hosts
+need `iasl` and `acpiexec`; the development container installs `acpica-tools`.
