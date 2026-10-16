@@ -1,0 +1,269 @@
+From: Jacques Germishuys <jacques.germishuys@bloudraad.io>
+Subject: [PATCH] feat: build the Viosock driver and provider for XP
+
+Use the XP import libraries, KMDF 1.9 and legacy nonpaged allocations.
+Keep Vista-only Winsock requests out of the XP provider. Remove unused
+locals so both legacy builds can treat warnings as errors.
+
+Signed-off-by: Jacques Germishuys <jacques.germishuys@bloudraad.io>
+---
+diff --git a/viosock/lib/viosocklib.c b/viosock/lib/viosocklib.c
+index 34c6139..e9653d6 100644
+--- a/viosock/lib/viosocklib.c
++++ b/viosock/lib/viosocklib.c
+@@ -616,6 +616,7 @@ VIOSockIoctl(
+         return SOCKET_ERROR;
+     }
+
++#if (_WIN32_WINNT >= 0x0600)
+     if (dwIoControlCode == SIO_BSP_HANDLE ||
+ //        dwIoControlCode == SIO_BSP_HANDLE_POLL ||
+         dwIoControlCode == SIO_BSP_HANDLE_SELECT)
+@@ -635,6 +636,7 @@ VIOSockIoctl(
+     }
+
+
++#endif
+     InParams.dwIoControlCode = dwIoControlCode;
+     InParams.lpvInBuffer = (ULONGLONG)lpvInBuffer;
+     InParams.cbInBuffer = cbInBuffer;
+diff --git a/viosock/sys/Device.c b/viosock/sys/Device.c
+index c038074..cd27a2e 100644
+--- a/viosock/sys/Device.c
++++ b/viosock/sys/Device.c
+@@ -149,8 +149,6 @@ VIOSockQueuesCleanup(
+     PDEVICE_CONTEXT pContext = GetDeviceContext(hDevice);
+     NTSTATUS status = STATUS_SUCCESS;
+
+-    ULONG uBufferSize;
+-
+     PAGED_CODE();
+
+     TraceEvents(TRACE_LEVEL_VERBOSE, DBG_HW_ACCESS, "--> %s\n", __FUNCTION__);
+@@ -178,8 +176,6 @@ VIOSockQueuesInit(
+     VIRTIO_WDF_QUEUE_PARAM params[VIOSOCK_VQ_MAX];
+     PVIOSOCK_VQ vqs[VIOSOCK_VQ_MAX];
+
+-    ULONG uBufferSize;
+-
+     TraceEvents(TRACE_LEVEL_VERBOSE, DBG_HW_ACCESS, "--> %s\n", __FUNCTION__);
+
+     // rx
+@@ -237,7 +233,6 @@ VIOSockEvtDeviceAdd(
+     PDEVICE_CONTEXT              pContext = NULL;
+     WDF_FILEOBJECT_CONFIG        fileConfig;
+     WDF_IO_QUEUE_CONFIG          queueConfig;
+-    WDF_WORKITEM_CONFIG          wrkConfig;
+
+     DECLARE_CONST_UNICODE_STRING(usDeviceName, VIOSOCK_DEVICE_NAME);
+     DECLARE_CONST_UNICODE_STRING(usDosDeviceName, VIOSOCK_SYMLINK_NAME);
+@@ -345,7 +340,7 @@ VIOSockEvtDeviceAdd(
+     Attributes.ParentObject = hDevice;
+
+     status = WdfLookasideListCreate(&Attributes,
+-        sizeof(VIOSOCK_ACCEPT_ENTRY), NonPagedPoolNx,
++        sizeof(VIOSOCK_ACCEPT_ENTRY), VIOSOCK_NONPAGED_POOL,
+         &Attributes, VIOSOCK_DRIVER_MEMORY_TAG,
+         &pContext->AcceptMemoryList);
+
+@@ -432,7 +427,6 @@ VIOSockEvtDevicePrepareHardware(
+ {
+     PDEVICE_CONTEXT pContext = GetDeviceContext(Device);
+     NTSTATUS status = STATUS_SUCCESS;
+-    UINT nr_ports;
+     u64 u64HostFeatures;
+     u64 u64GuestFeatures = 0;
+
+@@ -904,7 +898,6 @@ VIOSockSelectWorkitem(
+     do
+     {
+         LIST_ENTRY  CompletionList;
+-        WDFREQUEST  Request;
+         LONGLONG    TimePassed, Timeout = LONGLONG_MAX;
+         PLIST_ENTRY CurrentItem;
+         BOOLEAN     bRemove;
+diff --git a/viosock/sys/Evt.c b/viosock/sys/Evt.c
+index 30a293a..f1ac750 100644
+--- a/viosock/sys/Evt.c
++++ b/viosock/sys/Evt.c
+@@ -102,7 +102,7 @@ VIOSockEvtVqInit(
+ )
+ {
+     NTSTATUS status = STATUS_SUCCESS;
+-    ULONG uRingSize, uHeapSize, uBufferSize;
++    ULONG uBufferSize;
+
+     PAGED_CODE();
+
+diff --git a/viosock/sys/Rx.c b/viosock/sys/Rx.c
+index 85ae58a..6e97783 100644
+--- a/viosock/sys/Rx.c
++++ b/viosock/sys/Rx.c
+@@ -299,7 +299,7 @@ VIOSockRxCbInit(
+ {
+     ULONG i;
+     BOOLEAN bRes = TRUE;
+-    WDF_OBJECT_ATTRIBUTES lockAttributes, memAttributes;
++    WDF_OBJECT_ATTRIBUTES memAttributes;
+     NTSTATUS status;
+
+     PAGED_CODE();
+@@ -315,7 +315,7 @@ VIOSockRxCbInit(
+     memAttributes.ParentObject = pContext->ThisDevice;
+
+     status = WdfLookasideListCreate(&memAttributes,
+-        sizeof(VIOSOCK_RX_CB), NonPagedPoolNx,
++        sizeof(VIOSOCK_RX_CB), VIOSOCK_NONPAGED_POOL,
+         &memAttributes, VIOSOCK_DRIVER_MEMORY_TAG,
+         &pContext->RxCbBufferMemoryList);
+
+@@ -804,7 +804,6 @@ VIOSockRxRequestEnqueueCb(
+ {
+     PDEVICE_CONTEXT pContext = GetDeviceContextFromSocket(pSocket);
+     PVIOSOCK_RX_CB  pCurrentCb = NULL;
+-    ULONG           BufferFree;
+     NTSTATUS        status;
+
+     TraceEvents(TRACE_LEVEL_VERBOSE, DBG_READ, "--> %s\n", __FUNCTION__);
+@@ -948,12 +947,9 @@ VIOSockRxVqProcess(
+     PVIOSOCK_RX_PKT     pPkt;
+     UINT                len;
+     LIST_ENTRY          CompletionList;
+-    PSINGLE_LIST_ENTRY  pCurrentEntry;
+     PSOCKET_CONTEXT     pSocket = NULL;
+     BOOLEAN             bStop = FALSE;
+
+-    NTSTATUS            status;
+-
+     TraceEvents(TRACE_LEVEL_VERBOSE, DBG_HW_ACCESS, "--> %s\n", __FUNCTION__);
+
+     InitializeListHead(&CompletionList);
+diff --git a/viosock/sys/Socket.c b/viosock/sys/Socket.c
+index 2edaa95..3e0087d 100644
+--- a/viosock/sys/Socket.c
++++ b/viosock/sys/Socket.c
+@@ -925,8 +925,6 @@ VIOSockAcceptCleanup(
+     IN PSOCKET_CONTEXT pListenSocket
+ )
+ {
+-    WDFREQUEST PendedRequest;
+-
+     TraceEvents(TRACE_LEVEL_VERBOSE, DBG_SOCKET, "--> %s\n", __FUNCTION__);
+
+     WdfSpinLockAcquire(pListenSocket->RxLock);
+@@ -1062,7 +1060,7 @@ VIOSockCreate(
+             WDF_OBJECT_ATTRIBUTES   Attributes;
+             HANDLE                  hListenSocket;
+             PVIRTIO_VSOCK_PARAMS    pParams = (PVIRTIO_VSOCK_PARAMS)((PCHAR)EaBuffer +
+-                ((ULONG_PTR)UFIELD_OFFSET(FILE_FULL_EA_INFORMATION, EaName) + 1 + EaBuffer->EaNameLength));
++                ((ULONG_PTR)FIELD_OFFSET(FILE_FULL_EA_INFORMATION, EaName) + 1 + EaBuffer->EaNameLength));
+
+             TraceEvents(TRACE_LEVEL_INFORMATION, DBG_SOCKET, "Socket %d (%p) initializing\n",
+                 pSocket->SocketId, pSocket->ThisSocket);
+diff --git a/viosock/sys/Tx.c b/viosock/sys/Tx.c
+index bc34802..a95eb84 100644
+--- a/viosock/sys/Tx.c
++++ b/viosock/sys/Tx.c
+@@ -328,8 +328,6 @@ VIOSockTxVqProcess(
+     PVIOSOCK_TX_PKT pPkt;
+     UINT len;
+     LIST_ENTRY CompletionList, *CurrentItem;
+-    NTSTATUS status;
+-    WDFREQUEST Request;
+
+     TraceEvents(TRACE_LEVEL_VERBOSE, DBG_WRITE, "--> %s\n", __FUNCTION__);
+
+@@ -893,7 +891,7 @@ VIOSockWriteQueueInit(
+     memAttributes.ParentObject = pContext->ThisDevice;
+
+     status = WdfLookasideListCreate(&memAttributes,
+-        sizeof(VIOSOCK_TX_ENTRY), NonPagedPoolNx,
++        sizeof(VIOSOCK_TX_ENTRY), VIOSOCK_NONPAGED_POOL,
+         &memAttributes, VIOSOCK_DRIVER_MEMORY_TAG,
+         &pContext->TxMemoryList);
+
+@@ -1120,4 +1118,4 @@ VIOSockTxTimerFunc(
+     }
+
+     TraceEvents(TRACE_LEVEL_VERBOSE, DBG_WRITE, "<-- %s\n", __FUNCTION__);
+-}
+\ No newline at end of file
++}
+diff --git a/viosock/sys/precomp.h b/viosock/sys/precomp.h
+index 51a008c..f89d86d 100644
+--- a/viosock/sys/precomp.h
++++ b/viosock/sys/precomp.h
+@@ -28,6 +28,7 @@
+  */
+ #include <stddef.h>
+ #include <stdarg.h>
++#include <concurrencysal.h>
+ #include <ntifs.h>
+ #include <wdf.h>
+ #define NTSTRSAFE_LIB
+@@ -45,4 +46,14 @@
+
+ #include "trace.h"
+
++#if (_WIN32_WINNT < 0x0600)
++typedef unsigned short u_short;
++#define _IRQL_requires_(level) __drv_requiresIRQL(level)
++#define _IRQL_requires_max_(level) __drv_maxIRQL(level)
++#define _Analysis_assume_(expression) __analysis_assume(expression)
++#define VIOSOCK_NONPAGED_POOL NonPagedPool
++#else
++#define VIOSOCK_NONPAGED_POOL NonPagedPoolNx
++#endif
++
+ #include "..\inc\vio_sockets.h"
+diff --git a/viosock/sys/viosock.vcxproj b/viosock/sys/viosock.vcxproj
+index 41e5fb5..2d1e09b 100644
+--- a/viosock/sys/viosock.vcxproj
++++ b/viosock/sys/viosock.vcxproj
+@@ -1,6 +1,10 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <Project DefaultTargets="Build" ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+   <ItemGroup Label="ProjectConfigurations">
++    <ProjectConfiguration Include="WinXP Release|Win32">
++      <Configuration>WinXP Release</Configuration>
++      <Platform>Win32</Platform>
++    </ProjectConfiguration>
+     <ProjectConfiguration Include="Win10 Debug|ARM64">
+       <Configuration>Win10 Debug</Configuration>
+       <Platform>ARM64</Platform>
+@@ -117,6 +121,15 @@
+     <DriverType>KMDF</DriverType>
+   </PropertyGroup>
+   <Import Project="$(MSBuildProjectDirectory)\viosock.props" />
++  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='WinXP Release|Win32'">
++    <PlatformToolset>v142</PlatformToolset>
++    <UseLegacyDDK>true</UseLegacyDDK>
++    <ConfigurationType>Application</ConfigurationType>
++    <GenerateManifest>false</GenerateManifest>
++    <KMDF_VERSION_MINOR>9</KMDF_VERSION_MINOR>
++    <OutDir>objfre_wxp_x86\i386\</OutDir>
++    <IntDir>objfre_wxp_x86\i386\</IntDir>
++  </PropertyGroup>
+   <Import Project="$(MSBuildProjectDirectory)\..\..\Tools\Driver.Common.props" />
+   <ImportGroup Label="ExtensionSettings">
+   </ImportGroup>
+@@ -207,6 +220,12 @@
+       <AdditionalOptions>/osversion:6.1 %(AdditionalOptions)</AdditionalOptions>
+     </Link>
+   </ItemDefinitionGroup>
++  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='WinXP Release|Win32'">
++    <Link>
++      <Version>5.1</Version>
++      <AdditionalOptions>/kernel /osversion:5.1</AdditionalOptions>
++    </Link>
++  </ItemDefinitionGroup>
+   <ItemDefinitionGroup Condition="$(Configuration.EndsWith('Release'))">
+     <Link>
+       <AdditionalLibraryDirectories>..\..\VirtIO\$(OutDir);..\..\VirtIO\WDF\$(OutDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+@@ -258,4 +277,4 @@
+   <Import Project="$(MSBuildProjectDirectory)\..\..\Tools\Driver.Common.targets" />
+   <ImportGroup Label="ExtensionTargets">
+   </ImportGroup>
+-</Project>
+\ No newline at end of file
++</Project>
