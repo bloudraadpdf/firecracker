@@ -94,6 +94,9 @@ pub enum GdbTargetError {
     #[cfg(target_arch = "aarch64")]
     /// Error retrieving registers from a register vec.
     ReadRegisterVecError,
+    #[cfg(target_arch = "aarch64")]
+    /// Cannot inject guest debug exception with syndrome {0:#x}
+    UnsupportedGuestDebug(u32),
     /// Error while reading/writing to guest memory
     GuestMemoryError(#[from] GuestMemoryError),
 }
@@ -124,7 +127,7 @@ pub struct FirecrackerTarget {
     entry_addr: GuestAddress,
 
     /// Listener for events sent from the Vcpu
-    pub gdb_event: Receiver<usize>,
+    pub gdb_event: Receiver<crate::gdb::GdbEvent>,
 
     /// Used to track the currently configured hardware breakpoints.
     /// Limited to 4 in x86 see:
@@ -166,7 +169,11 @@ impl FirecrackerTarget {
     /// Creates a new Target for GDB stub. This is used as the layer between GDB and the VMM it
     /// will handle requests from GDB and perform the appropriate actions, while also updating GDB
     /// with the state of the VMM / Vcpu's as we hit debug events
-    pub fn new(vmm: Arc<Mutex<Vmm>>, gdb_event: Receiver<usize>, entry_addr: GuestAddress) -> Self {
+    pub fn new(
+        vmm: Arc<Mutex<Vmm>>,
+        gdb_event: Receiver<crate::gdb::GdbEvent>,
+        entry_addr: GuestAddress,
+    ) -> Self {
         let vcpus_count = {
             let vmm = vmm.lock().unwrap();
             let kvm_vm = vmm.vm.as_kvm().expect("GDB requires KVM");
@@ -277,6 +284,14 @@ impl FirecrackerTarget {
             .stop(FcExitCode::Ok)
     }
 
+    /// Stops every Vcpu before reporting an all-stop debugger event.
+    pub fn pause_all_vcpus(&mut self) -> Result<(), GdbTargetError> {
+        for cpu_id in 0..self.vcpu_state.len() {
+            self.pause_vcpu(vcpuid_to_tid(cpu_id)?)?;
+        }
+        Ok(())
+    }
+
     /// Pauses the requested Vcpu
     pub fn pause_vcpu(&mut self, tid: Tid) -> Result<(), GdbTargetError> {
         let vcpu_state = &mut self.vcpu_state[tid_to_vcpuid(tid)];
@@ -300,9 +315,13 @@ impl FirecrackerTarget {
     }
 
     /// A helper function to allow the event loop to inject this breakpoint back into the Vcpu
-    pub fn inject_bp_to_guest(&mut self, tid: Tid) -> Result<(), GdbTargetError> {
+    pub fn inject_bp_to_guest(
+        &mut self,
+        tid: Tid,
+        debug: kvm_bindings::kvm_debug_exit_arch,
+    ) -> Result<(), GdbTargetError> {
         self.with_vcpu_fd(tid_to_vcpuid(tid), |vcpu_fd, _| {
-            arch::vcpu_inject_bp(vcpu_fd, &self.hw_breakpoints, false)
+            arch::vcpu_inject_bp(vcpu_fd, &self.hw_breakpoints, false, debug)
         })
     }
 
@@ -355,17 +374,19 @@ impl FirecrackerTarget {
             return Ok(Some(MultiThreadStopReason::SwBreak(tid)));
         };
 
-        let gpa = arch::translate_gva(vcpu_fd, ip, &vmm)?;
-        if self.sw_breakpoints.contains_key(&gpa) {
-            return Ok(Some(MultiThreadStopReason::SwBreak(tid)));
-        }
-
         if self.hw_breakpoints.contains(&GuestAddress(ip)) {
             return Ok(Some(MultiThreadStopReason::HwBreak(tid)));
         }
 
         if ip == self.entry_addr.0 {
             return Ok(Some(MultiThreadStopReason::HwBreak(tid)));
+        }
+
+        if !self.sw_breakpoints.is_empty() {
+            let gpa = arch::translate_gva(vcpu_fd, ip, &vmm)?;
+            if self.sw_breakpoints.contains_key(&gpa) {
+                return Ok(Some(MultiThreadStopReason::SwBreak(tid)));
+            }
         }
 
         // This is not a breakpoint we've set, likely one set by the guest
