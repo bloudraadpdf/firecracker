@@ -1028,6 +1028,9 @@ class Microvm:
         # Check that the VM has not started yet
         assert self.state == "Not started"
 
+        if self.memory_monitor:
+            self.memory_monitor.set_pmem_files()
+
         self.api.actions.put(action_type="InstanceStart")
 
         # Check that the VM has started
@@ -1191,6 +1194,7 @@ class Microvm:
             self.mem_size_bytes = int(response.json()["mem_size_mib"]) * 2**20
             # Notify monitor that this is a restored VM
             self.memory_monitor.set_threshold_for_restored_vm()
+            self.memory_monitor.set_pmem_files()
             self.memory_monitor.start()
 
         # This is not a "wait for boot", but rather a "VM still works after restoration"
