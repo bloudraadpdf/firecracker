@@ -43,24 +43,44 @@ pub struct AsyncFileEngine {
 #[derive(Debug)]
 pub struct WrappedRequest {
     addr: Option<GuestAddress>,
+    vectors: Vec<libc::iovec>,
+    dirty_segments: Vec<(GuestAddress, u32)>,
     req: PendingRequest,
 }
 
+// SAFETY: vectors owns its table; its pointers refer to guest mappings kept alive
+// until all requests drain. Moving the request transfers exclusive table ownership.
+unsafe impl Send for WrappedRequest {}
+
 impl WrappedRequest {
     fn new(req: PendingRequest) -> Self {
-        WrappedRequest { addr: None, req }
+        WrappedRequest {
+            addr: None,
+            vectors: Vec::new(),
+            dirty_segments: Vec::new(),
+            req,
+        }
     }
 
     fn new_with_dirty_tracking(addr: GuestAddress, req: PendingRequest) -> Self {
         WrappedRequest {
             addr: Some(addr),
-            req,
+            ..Self::new(req)
         }
     }
 
     fn mark_dirty_mem_and_unwrap(self, mem: &GuestMemoryMmap, count: u32) -> PendingRequest {
         if let Some(addr) = self.addr {
             mem.mark_dirty(addr, count as usize)
+        }
+        let mut remaining = count;
+        for (addr, len) in &self.dirty_segments {
+            let written = remaining.min(*len);
+            mem.mark_dirty(*addr, written as usize);
+            remaining -= written;
+            if remaining == 0 {
+                break;
+            }
         }
 
         self.req
@@ -81,6 +101,8 @@ impl AsyncFileEngine {
                 // Allowlist of opcodes.
                 Restriction::AllowOpCode(OpCode::Read),
                 Restriction::AllowOpCode(OpCode::Write),
+                Restriction::AllowOpCode(OpCode::Readv),
+                Restriction::AllowOpCode(OpCode::Writev),
                 Restriction::AllowOpCode(OpCode::Fsync),
             ],
             Some(completion_fd),
@@ -183,6 +205,48 @@ impl AsyncFileEngine {
             .map_err(|(io_uring_error, data)| RequestError {
                 req: data.req,
                 error: AsyncIoError::IoUring(io_uring_error),
+            })
+    }
+
+    pub fn push_vectored(
+        &mut self,
+        write: bool,
+        offset: u64,
+        mem: &GuestMemoryMmap,
+        segments: &[(GuestAddress, u32)],
+        req: PendingRequest,
+    ) -> Result<(), RequestError<AsyncIoError>> {
+        let mut wrapped = WrappedRequest::new(req);
+        for (addr, len) in segments {
+            let slice = match mem.get_slice(*addr, *len as usize) {
+                Ok(slice) => slice,
+                Err(error) => {
+                    return Err(RequestError {
+                        req: wrapped.req,
+                        error: AsyncIoError::GuestMemory(error),
+                    });
+                }
+            };
+            wrapped.vectors.push(libc::iovec {
+                iov_base: slice.ptr_guard_mut().as_ptr().cast(),
+                iov_len: *len as usize,
+            });
+        }
+        if !write {
+            wrapped.dirty_segments.extend_from_slice(segments);
+        }
+        let address = wrapped.vectors.as_ptr() as usize;
+        let count = u32::try_from(wrapped.vectors.len()).unwrap();
+        let operation = if write {
+            Operation::writev(0, address, count, offset, wrapped)
+        } else {
+            Operation::readv(0, address, count, offset, wrapped)
+        };
+        self.ring
+            .push(operation)
+            .map_err(|(error, wrapped)| RequestError {
+                req: wrapped.req,
+                error: AsyncIoError::IoUring(error),
             })
     }
 
