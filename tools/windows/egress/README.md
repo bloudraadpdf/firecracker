@@ -58,3 +58,29 @@ Run it as root with a new absolute private state directory,
 refuses existing network objects. Run `network.sh cleanup STATE` after all
 namespace processes stop; do not change an active restore run's network
 identity. The script needs Bash, jq, iproute2, iptables and sysctl.
+
+## XP HTTP and storage probe
+
+XP uses `xp.rs` for HTTP, storage and TCP; this HTTPS executable does not
+establish XP TLS support. Both entry points share `http.rs`; keep the files
+together. Build the XP executable after selecting the XP x86 profile and
+regenerating `windows_rustflags` through the same procedure. Put the reachable
+lab host IPv4 address in `HOST_IPV4` before this block:
+
+```sh
+: "${HOST_IPV4:?Set the reachable Linux host IPv4 address}"
+WINDOWS_EGRESS_HOST="$HOST_IPV4" rustc --edition 2024 \
+  "${windows_rustflags[@]}" -D warnings \
+  tools/windows/egress/xp.rs -o build/windows/egress/restore-probe.exe
+rustc --edition 2024 -D warnings tools/windows/egress/verify-xp.rs \
+  -o build/windows/egress/verify-tap-xp
+```
+
+Copy `restore-probe.exe` to `C:\` and `xp-matrix.cmd` to the common Startup
+folder with CRLF line endings. Install the XP NetKVM driver and configure its
+static address, gateway and DNS before the matrix; XP has no PowerShell
+dependency. It reports progress through COM1. Use `WINDOWS_GUEST_TAG=XP` with
+the same controller and set `WINDOWS_GUEST_ADDRESS` in the verifier if its
+address differs from `172.30.254.2`. Set `WINDOWS_XP_VERIFIER` to the compiled
+host verifier. The XP verifier checks every byte against the seed in the guest
+transcript, including the seed stored in the first four bytes.
