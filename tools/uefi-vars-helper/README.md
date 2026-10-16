@@ -59,8 +59,8 @@ checkpoint restore and closes the management restore boundary like opcode 1.
 Functions 3 and 5 require an operation of zero. The argument must be zero,
 except function 7 revision 2 permits the PCR-bank argument for operation 23,
 which this implementation reports as unsupported. Unknown functions, revisions,
-unused arguments or payload lengths receive service status 1. An integrating VMM
-supplies the static ACPI functions separately.
+unused arguments or payload lengths receive service status 1. The VMM implements
+the static ACPI functions separately.
 
 The helper accepts only TPM2 mandatory operations 0, 5, 14, 21 and 22. Other
 operations return PPI code 1 on submission and code 0 on confirmation query.
