@@ -24,10 +24,144 @@ For the standalone crates' formatting and Clippy checks, install the components:
 rustup component add rustfmt clippy
 ```
 
+For Windows probe builds, also install their target libraries:
+
+```sh
+rustup target add i686-pc-windows-msvc x86_64-pc-windows-msvc
+```
+
 The
 [upstream developer tool](../../CONTRIBUTING.md#contribution-quality-standards)
 provides the normal build and style checks. Each tool's README gives its build
 commands and additional dependencies.
+
+## Windows probe linking
+
+The Windows user-mode probes use Rust `core`, VC-LTL5 and YY-Thunks. They do not
+use Rust's Windows `std`. The distributed `*-pc-windows-msvc` standard libraries
+do not establish XP or Windows 7 support. Keep the compatibility libraries
+external; do not replace them with a generated CRT import library. Kernel
+drivers retain the separate WDK build and signing procedure.
+
+Download the following pinned inputs from their publishers. Check each SHA-256
+before extraction. VC-LTL5 is EPL-2.0; YY-Thunks is MIT. The Microsoft SDK and
+compiler libraries have their own Microsoft terms. Preserve the original notices
+when preparing or distributing these inputs.
+
+| Input                                                                                                                                                                                                                                                    | SHA-256                                                            |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| [VC-LTL5 v5.3.1, VC-LTL-Binary.7z](https://github.com/Chuyu-Team/VC-LTL5/releases/download/v5.3.1/VC-LTL-Binary.7z)                                                                                                                                      | `7a18799ed3aa84a225610a5447a56bc534c5c98ccb8dec05caba0e3f633431ad` |
+| [YY-Thunks v1.2.3, YY-Thunks-Lib.zip](https://github.com/Chuyu-Team/YY-Thunks/releases/download/v1.2.3/YY-Thunks-Lib.zip)                                                                                                                                | `8d2417cea1914a678f766c73fd458bb85dfd6057878f8d1d87ddcfc370a42ef9` |
+| [Windows SDK x86 10.0.19041.5](https://api.nuget.org/v3-flatcontainer/microsoft.windows.sdk.cpp.x86/10.0.19041.5/microsoft.windows.sdk.cpp.x86.10.0.19041.5.nupkg)                                                                                       | `7d7213f0a675877437c9b1ca4ab4fa8cbff9f999a3f0121d2763c17a9b26bb42` |
+| [Windows SDK x64 10.0.19041.5](https://api.nuget.org/v3-flatcontainer/microsoft.windows.sdk.cpp.x64/10.0.19041.5/microsoft.windows.sdk.cpp.x64.10.0.19041.5.nupkg)                                                                                       | `ee8b7bc43ed58d17be795c8062ad32e355847aadad7dc8096cc04ccd1f2fdc2e` |
+| [Microsoft VC x86 Desktop 14.44.35226](https://download.visualstudio.microsoft.com/download/pr/67cf767c-5e71-47c2-a54a-cd5631e28942/e4dc8ef4551d621501295d2175c890788368d8f8a218401c7c96405d31cb8e41/Microsoft.VC.14.44.17.14.CRT.x86.Desktop.base.vsix) | `e4dc8ef4551d621501295d2175c890788368d8f8a218401c7c96405d31cb8e41` |
+| [Microsoft VC x64 Desktop 14.44.35226](https://download.visualstudio.microsoft.com/download/pr/67cf767c-5e71-47c2-a54a-cd5631e28942/f01f701a7bcd9587a340898c851424f6a52bb913a70c185ff0d5bf0288c5831a/Microsoft.VC.14.44.17.14.CRT.x64.Desktop.base.vsix) | `f01f701a7bcd9587a340898c851424f6a52bb913a70c185ff0d5bf0288c5831a` |
+
+VC-LTL5's source revision is `cba9ab9bda943d1659b3d89aef9227f53423f0d5`;
+YY-Thunks' is `b41fb80b8d316581eec0959600aeb0e7339d0e5e`. Use YY's **library**
+archive with LLD. Upstream's object-file integration can produce duplicate
+symbols with LLD. The published `vc-ltl` Rust crate fixes its x86/x64 floor at
+Vista and does not include the XP libraries, so it does not replace these
+inputs.
+
+Extract each archive into the layout below, keeping filenames and case. Use
+`7z x ARCHIVE -oDIRECTORY` for the 7z, ZIP, NuGet and VSIX containers. Only the
+selected architecture's SDK package and VC package are needed for one build. The
+VC package's internal directory is `14.44.35207`.
+
+```text
+build/windows/compat/
+  vc-ltl/TargetPlatform/<CRT baseline>/lib/<Win32 or x64>/
+  yy-thunks/Lib/<API baseline>/<x86 or x64>/
+  sdk/<x86 or x64>/c/um/<x86 or x64>/
+  msvc/<x86 or x64>/Contents/VC/Tools/MSVC/14.44.35207/lib/<x86 or x64>/
+```
+
+YY's archive includes its licence. The VC binary archive omits it; retain the
+pinned source's
+[licence](https://github.com/Chuyu-Team/VC-LTL5/blob/cba9ab9bda943d1659b3d89aef9227f53423f0d5/LICENSE)
+and
+[CRT notices](https://github.com/Chuyu-Team/VC-LTL5/tree/cba9ab9bda943d1659b3d89aef9227f53423f0d5/Sources/ucrt/Licenses).
+Retain the SDK packages' licence metadata and
+[SDK terms](https://aka.ms/WinSDKLicenseURL), and the
+[Build Tools terms](https://go.microsoft.com/fwlink/?LinkId=2179911).
+
+Use one Bash session for the following setup and the probe's build command. For
+Windows 7 SP1 x64 and later x64 guests, select:
+
+```bash
+compat_root="$PWD/build/windows/compat"
+windows_arch=x64
+windows_target=x86_64-pc-windows-msvc
+windows_subsystem=6.01
+windows_yy_lib="$compat_root/yy-thunks/Lib/6.1.7600.0/x64"
+windows_vc_lib="$compat_root/vc-ltl/TargetPlatform/6.0.6000.0/lib/x64"
+windows_sdk_lib="$compat_root/sdk/x64/c/um/x64"
+windows_crt_lib="$compat_root/msvc/x64/Contents/VC/Tools/MSVC/14.44.35207/lib/x64"
+```
+
+For XP SP3 x86, select these values instead:
+
+```bash
+compat_root="$PWD/build/windows/compat"
+windows_arch=x86
+windows_target=i686-pc-windows-msvc
+windows_subsystem=5.01
+windows_yy_lib="$compat_root/yy-thunks/Lib/5.1.2600.0/x86"
+windows_vc_lib="$compat_root/vc-ltl/TargetPlatform/5.1.2600.0/lib/Win32"
+windows_sdk_lib="$compat_root/sdk/x86/c/um/x86"
+windows_crt_lib="$compat_root/msvc/x86/Contents/VC/Tools/MSVC/14.44.35207/lib/x86"
+```
+
+Prepare LLD's case-insensitive library lookup. Windows library filenames and
+embedded `/DEFAULTLIB` directives have inconsistent case; lowercase filenames
+alone are insufficient on Linux. This JSON is an LLVM VFS description of the
+external files, not a replacement library. Missing directories fail here.
+
+```bash
+windows_overlay="$compat_root/libraries-$windows_target.json"
+python3 - "$windows_yy_lib" "$windows_vc_lib" "$windows_sdk_lib" "$windows_crt_lib" \
+  > "$windows_overlay" <<'PY'
+import json
+import pathlib
+import sys
+
+roots = []
+for argument in sys.argv[1:]:
+    directory = pathlib.Path(argument).resolve(strict=True)
+    libraries = sorted(p for p in directory.iterdir() if p.suffix.lower() == ".lib")
+    if not libraries:
+        raise SystemExit(f"No import libraries in {directory}")
+    roots.append({"type": "directory", "name": str(directory), "contents": [
+        {"type": "file", "name": p.name, "external-contents": str(p)} for p in libraries
+    ]})
+json.dump({"version": 0, "case-sensitive": False, "roots": roots}, sys.stdout)
+PY
+rust_linker="$(rustc --print sysroot)/lib/rustlib/$(rustc --print host-tuple)/bin/rust-lld"
+test -x "$rust_linker"
+windows_rustflags=(
+  --target "$windows_target"
+  -C panic=abort -C opt-level=2 -C lto=fat -C target-feature=+crt-static
+  -C "linker=$rust_linker"
+  -C link-arg=/entry:mainCRTStartup
+  -C "link-arg=/subsystem:console,$windows_subsystem"
+  -C "link-arg=/vfsoverlay:$windows_overlay" -C link-arg=/Brepro
+  -L "native=$windows_yy_lib" -L "native=$windows_vc_lib"
+  -L "native=$windows_sdk_lib" -L "native=$windows_crt_lib"
+  -l static=libvcruntime -l static=libucrt -l static=libcpmt
+)
+```
+
+Ordinary import-library linkage lets YY supply its API fallbacks. Do not use
+`raw-dylib` or `/nodefaultlib` with this procedure. The Windows API declarations
+keep the system ABI; the executable entry uses the C ABI. Require successful PE
+import/header inspection and actual execution on each declared minimum OS after
+rebuilding. A successful link does not prove runtime compatibility.
+
+The selected YY binary release has no ARM64 libraries. Its source has an ARM64
+build path, but that payload and the native ARM64 probes still need separate
+qualification. Do not substitute x64 libraries or call x64 emulation a native
+ARM64 result.
 
 ## Prepare an unattended installation
 

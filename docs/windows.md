@@ -104,3 +104,68 @@ and INTx, alongside modern capabilities. It preserves those states across
 snapshots. The XP test uses the
 [SeaBIOS PVH handoff](../resources/firmware/seabios/README.md); selecting this
 option alone does not supply BIOS firmware or install guest drivers.
+
+## Networking
+
+Add a network interface backed by an existing host TAP:
+
+```json
+"network-interfaces": [{
+  "iface_id": "net0",
+  "host_dev_name": "tap0",
+  "guest_mac": "06:00:ac:1e:fc:02"
+}]
+```
+
+The NetKVM driver must be installed in the guest. Configure DHCP or a static
+address for the host network. Firecracker does not provide DHCP or NAT. In SAC,
+`i` lists interfaces and `i -?` describes address configuration.
+
+## Vsock
+
+Windows can use virtio-vsock through the virtio-win `viosock` driver and its
+Winsock provider. Add this device to the boot configuration:
+
+```json
+"vsock": {
+  "guest_cid": 3,
+  "uds_path": "windows.vsock"
+}
+```
+
+Install `viosock/2k25/amd64/viosock.inf` from the virtio-win ISO with
+`pnputil /add-driver <path> /install`. The package installs the
+`VirtioSocketWSP` service and both Winsock provider DLLs. Check the service with
+`sc query VirtioSocketWSP`. The network interface is not required.
+
+The host uses Firecracker's [Unix socket protocol](vsock.md): connect to
+`windows.vsock` and send `CONNECT <guest-port>\n`, or listen on
+`windows.vsock_<host-port>` for a guest connection to CID 2.
+
+Windows programs must use the installed provider's address family, obtained
+through `ViosockGetAF`, and its `SOCKADDR_VM` layout. Do not assume Linux's
+numeric `AF_VSOCK` value. The upstream
+[socket header](https://github.com/virtio-win/kvm-guest-drivers-windows/blob/master/viosock/inc/vio_sockets.h)
+and `viosocklib-test.exe` describe the interface.
+
+Existing vsock connections do not survive snapshot restore. The guest agent must
+handle transport reset, reconnect and complete a new readiness handshake.
+
+The device accepts both event-queue notification and the required CID reread as
+reset acknowledgement. This supports Windows, which replenishes its event
+buffers without notifying that queue. The device supports indirect buffers on
+the receive, transmit and event queues.
+
+### Windows 7 TLS trust
+
+Windows 7's TLS test requires a current trusted root. The tested
+`www.microsoft.com` chain terminates at DigiCert Global Root G2. Download the
+[official DER certificate](https://cacerts.digicert.com/DigiCertGlobalRootG2.crt)
+and require SHA-256
+`cb3ccbb76031e5e0138f8dd39a23f9de47ffc35e43c1144cea27d46a5ab1cb5f` before
+copying it into the isolated guest. In an elevated command prompt, run
+`certutil -addstore -f Root C:\DigiCertGlobalRootG2.crt`.
+[DigiCert's root catalogue](https://knowledge.digicert.com/general-information/digicert-trusted-root-authority-certificates)
+identifies this root. Certificate validation remains enabled. A changed server
+chain can require a different trusted root; this guest trust-store prerequisite
+is separate from Firecracker support.
