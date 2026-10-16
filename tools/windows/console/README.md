@@ -181,12 +181,13 @@ acknowledgements have zero bytes after the status. Input-state replies use:
 | ------------- | ----------------------------------------------------------------------- |
 | 8             | Absolute pointer ready: 0 or 1                                          |
 | 9             | Guest keyboard LEDs: Scroll Lock bit 0, Num Lock bit 1, Caps Lock bit 2 |
-| 10            | Pending Num Lock/Caps Lock LED acknowledgement, using the same bits     |
+| 10            | Pending keyboard LED acknowledgements, using the same three bits        |
 | 11..15        | Zero                                                                    |
 
-The bridge waits up to 100 ms for a pending lock LED acknowledgement before a
-non-lock key press. It fails the session if the guest does not acknowledge; it
-does not guess the lock state. Key releases do not wait.
+The bridge waits up to 100 ms for a pending Caps Lock or Num Lock LED
+acknowledgement before a non-lock key press. It fails the session if the guest
+does not acknowledge; it does not guess the lock state. Scroll Lock does not
+affect printable translation and does not delay input. Key releases do not wait.
 
 Operation 6 uses request byte 5 for buttons (left bit 0, right bit 1, middle bit
 2), bytes 6..7 for little-endian X, bytes 8..9 for little-endian Y, byte 10 for

@@ -13,8 +13,7 @@ use crate::vmm_config::pmem::PmemConfig;
 pub mod balloon;
 /// Wrapper for configuring the microVM boot source.
 pub mod boot_source;
-/// Optional AMD64 graphical console and installation media.
-#[cfg(target_arch = "x86_64")]
+/// Optional graphical console and architecture-specific installation media.
 pub mod console;
 /// Wrapper for configuring the block devices.
 pub mod drive;
@@ -37,11 +36,9 @@ pub mod pmem;
 /// Wrapper for configuring microVM snapshots and the microVM state.
 pub mod serial;
 pub mod snapshot;
-/// Optional AMD64 TPM 2.0 backend.
-#[cfg(target_arch = "x86_64")]
+/// Optional TPM 2.0 backend.
 pub mod tpm;
 /// Optional protected UEFI variable service.
-#[cfg(target_arch = "x86_64")]
 pub mod uefi_vars;
 /// Wrapper for configuring the vsock devices attached to the microVM.
 pub mod vsock;

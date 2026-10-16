@@ -26,6 +26,8 @@ pub(crate) fn setup_arch_dsdt(
         pci.append_aml_bytes(bytes)?;
     }
     devices.acpi_devices.append_aml_bytes(bytes)?;
+    devices.append_tpm_aml(bytes)?;
+    devices.append_uefi_vars_aml(bytes)?;
     if let Some(serial) = devices.mmio_platform_devices.serial_device_info() {
         aml::Device::new(
             "_SB_.COM1".try_into()?,
@@ -87,6 +89,9 @@ pub(crate) fn create_acpi_tables(
         writer.build_madt(allocator, topology.madt_records(&cpus.mpidrs), 0)?,
         writer.build_mcfg(allocator, layout::PCI_MMCONFIG_START)?,
     ];
+    if devices.tpm.is_some() {
+        tables.push(writer.build_tpm2(allocator)?);
+    }
     for mut table in [
         ArmTable::timer(),
         ArmTable::serial(serial.addr, irq),

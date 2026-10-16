@@ -29,7 +29,12 @@ The patch also installs the FACS supplied through FADT. EDK II clears the FADT
 firmware-control pointer if the structure is not installed, which prevents
 Windows from loading conventional ACPI tables.
 
-The patch applies to Cloud Hypervisor EDK II tag `ch-97eeb7b09`.
+The patch applies to Cloud Hypervisor EDK II tag `ch-97eeb7b09`. The GCC release
+build boots Windows with virtio PCI disk and network devices. The corrected
+headless image passes the real UEFI memory-map probe, SHA-256
+`dc565fbd5facf9016863f3b91c732ee1196fa11f475a361c52654869f7d81d84`. Current
+Windows installation and egress checks use the graphical profiles; see
+[the validation record](../../docs/windows-validation.md).
 
 On a Linux build host with EDK II's build dependencies installed, run from the
 Firecracker worktree:
@@ -58,6 +63,10 @@ the modified upstream files. See the
 
 ## ARM64 firmware
 
+For the graphical and secure profiles, use the separate
+[ARM64 profile guide](cloudhv-secureboot/arm64/README.md). The following build
+selects the original headless profile.
+
 `cloudhv-firecracker-arm64.patch` applies to the same EDK II tag. It uses
 Firecracker's RAM, ECAM and PCI apertures, its MMIO 16550 UART, and a fixed
 FDT/RSDP handoff. Firmware reserves the platform data and firmware image in its
@@ -72,18 +81,9 @@ build -p ArmVirtPkg/ArmVirtCloudHv.dsc -a AARCH64 -t GCC -b RELEASE -n 2
 
 For a cross-build, set `GCC_AARCH64_PREFIX` to the AArch64 GCC tool prefix. The
 raw firmware is `Build/ArmVirtCloudHv-AARCH64/RELEASE_GCC/FV/CLOUDHV_EFI.fd`.
-Pass it as Firecracker's kernel image and enable PCI. See the
-[ARM64 guest guide](../../docs/windows-arm64.md) for host requirements.
-
-## Graphical AMD64 firmware
-
-The [console profile](cloudhv-console/README.md) adds GOP, keyboard and absolute
-pointer drivers. Its [external firmware probes](cloudhv-console/tests/README.md)
-check the memory map and pointer protocol before an OS starts.
-
-## ARM64 graphical and secure firmware
-
-The [external ARM64 profiles](cloudhv-secureboot/arm64/README.md) build
-headless, graphical and secure firmware separately. Their GOP, combined virtio
-input and optional security devices require the matching VMM platform. Source
-tests and cross-builds do not qualify an ARM Windows installer or runtime.
+Pass it as Firecracker's kernel image and enable PCI. Historical tests booted
+Windows ARM64 under Firecracker with PMUv3 and default seccomp. Its SHA-256 is
+`93692b58448e1754c5f6cf89ca4e361c54d90985e1461130b5d76d7ea491a74a`. See the
+[ARM64 guest guide](../../docs/windows-arm64.md) for host requirements and the
+historical vsock and snapshot results. Those results do not qualify the current
+ARM console or security changes.

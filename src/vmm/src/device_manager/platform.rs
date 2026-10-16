@@ -3,12 +3,22 @@
 
 //! Transactional event registration for platform devices.
 
+use super::DeviceManager;
+#[cfg(target_arch = "x86_64")]
+use super::VirtioDevices;
 use super::console_server::ConsoleServer;
+#[cfg(target_arch = "x86_64")]
 use super::console_usb::UsbDevice;
+#[cfg(target_arch = "x86_64")]
 use super::legacy::PortIODeviceManager;
-use super::{DeviceManager, VirtioDevices};
 use crate::EventManager;
+#[cfg(target_arch = "x86_64")]
 use crate::devices::legacy::{acpi::AcpiPower, cmos::Rtc};
+#[cfg(any(target_arch = "aarch64", test))]
+use crate::devices::virtio::device::VirtioDevice;
+#[cfg(any(target_arch = "aarch64", test))]
+use crate::devices::virtio::input::Input;
+#[cfg(target_arch = "x86_64")]
 use crate::pci::intx::PciIntxGroup;
 use event_manager::{SubscriberId, SubscriberOps};
 use std::io;
@@ -20,9 +30,15 @@ pub(crate) struct PlatformRegistration<'a> {
     subscriber: Option<SubscriberId>,
     uefi_vars: Option<(SubscriberId, Arc<Mutex<super::uefi_vars::UefiVarsDevice>>)>,
     tpm: Option<(SubscriberId, Arc<Mutex<super::tpm::TpmDevice>>)>,
+    #[cfg(target_arch = "x86_64")]
     usb: Option<(SubscriberId, Arc<Mutex<UsbDevice>>)>,
+    #[cfg(any(target_arch = "aarch64", test))]
+    input: Option<(SubscriberId, Arc<Mutex<dyn VirtioDevice>>)>,
+    #[cfg(target_arch = "x86_64")]
     intx: Option<(SubscriberId, Arc<Mutex<PciIntxGroup>>)>,
+    #[cfg(target_arch = "x86_64")]
     acpi_power: Option<(SubscriberId, Arc<Mutex<AcpiPower>>)>,
+    #[cfg(target_arch = "x86_64")]
     rtc: Option<(SubscriberId, Arc<Mutex<Rtc>>)>,
 }
 
@@ -34,11 +50,17 @@ impl<'a> PlatformRegistration<'a> {
         let registration = Self {
             subscriber: server.map(|server| events.add_subscriber(server.clone())),
             events,
+            #[cfg(any(target_arch = "aarch64", test))]
+            input: None,
+            #[cfg(target_arch = "x86_64")]
             intx: None,
             tpm: None,
             uefi_vars: None,
+            #[cfg(target_arch = "x86_64")]
             usb: None,
+            #[cfg(target_arch = "x86_64")]
             acpi_power: None,
+            #[cfg(target_arch = "x86_64")]
             rtc: None,
         };
         if let Some(server) = server {
@@ -47,6 +69,7 @@ impl<'a> PlatformRegistration<'a> {
         Ok(registration)
     }
 
+    #[cfg(target_arch = "x86_64")]
     fn with_legacy(mut self, legacy: Option<&PortIODeviceManager>) -> io::Result<Self> {
         if let Some(legacy) = legacy.and_then(|legacy| legacy.pc.as_ref()) {
             let id = self.events.add_subscriber(legacy.acpi_power.clone());
@@ -59,6 +82,7 @@ impl<'a> PlatformRegistration<'a> {
         Ok(self)
     }
 
+    #[cfg(target_arch = "x86_64")]
     pub(super) fn with_intx(mut self, group: Option<Arc<Mutex<PciIntxGroup>>>) -> io::Result<Self> {
         if let Some(group) = group {
             let id = self.events.add_subscriber(group.clone());
@@ -68,11 +92,31 @@ impl<'a> PlatformRegistration<'a> {
         Ok(self)
     }
 
+    #[cfg(target_arch = "x86_64")]
     pub(super) fn with_usb(mut self, usb: Option<&Arc<Mutex<UsbDevice>>>) -> io::Result<Self> {
         if let Some(usb) = usb {
             let id = self.events.add_subscriber(usb.clone());
             self.usb = Some((id, usb.clone()));
             usb.lock().unwrap().check_registered()?;
+        }
+        Ok(self)
+    }
+
+    #[cfg(any(target_arch = "aarch64", test))]
+    pub(super) fn with_input(
+        mut self,
+        input: Option<&Arc<Mutex<dyn VirtioDevice>>>,
+    ) -> io::Result<Self> {
+        if let Some(input) = input {
+            let id = self.events.add_subscriber(input.clone());
+            self.input = Some((id, input.clone()));
+            input
+                .lock()
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Input>()
+                .unwrap()
+                .check_registered()?;
         }
         Ok(self)
     }
@@ -105,10 +149,26 @@ impl<'a> PlatformRegistration<'a> {
         self.subscriber = None;
         self.tpm = None;
         self.uefi_vars = None;
-        self.usb = None;
-        self.intx = None;
-        self.acpi_power = None;
-        self.rtc = None;
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.usb = None;
+        }
+        #[cfg(any(target_arch = "aarch64", test))]
+        {
+            self.input = None;
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.intx = None;
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.acpi_power = None;
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.rtc = None;
+        }
     }
 }
 
@@ -122,21 +182,36 @@ impl Drop for PlatformRegistration<'_> {
             self.events.remove_subscriber(id).unwrap();
             tpm.lock().unwrap().reset_registration();
         }
+        #[cfg(target_arch = "x86_64")]
         if let Some((id, usb)) = self.usb.take() {
             self.events.remove_subscriber(id).unwrap();
             usb.lock().unwrap().reset_registration();
         }
+        #[cfg(target_arch = "x86_64")]
         if let Some((id, group)) = self.intx.take() {
             self.events.remove_subscriber(id).unwrap();
             group.lock().unwrap().reset_registration();
         }
+        #[cfg(target_arch = "x86_64")]
         if let Some((id, rtc)) = self.rtc.take() {
             self.events.remove_subscriber(id).unwrap();
             rtc.lock().unwrap().reset_registration();
         }
+        #[cfg(target_arch = "x86_64")]
         if let Some((id, power)) = self.acpi_power.take() {
             self.events.remove_subscriber(id).unwrap();
             power.lock().unwrap().reset_registration();
+        }
+        #[cfg(any(target_arch = "aarch64", test))]
+        if let Some((id, input)) = self.input.take() {
+            self.events.remove_subscriber(id).unwrap();
+            input
+                .lock()
+                .unwrap()
+                .as_mut_any()
+                .downcast_mut::<Input>()
+                .unwrap()
+                .reset_registration();
         }
         if let Some(subscriber) = self.subscriber.take() {
             self.events.remove_subscriber(subscriber).unwrap();
@@ -149,6 +224,7 @@ impl DeviceManager {
         &self,
         events: &'a mut EventManager,
     ) -> io::Result<PlatformRegistration<'a>> {
+        #[cfg(target_arch = "x86_64")]
         let intx = self
             .console
             .as_ref()
@@ -156,16 +232,35 @@ impl DeviceManager {
                 VirtioDevices::Pci(pci) => pci.unregistered_intx(),
                 VirtioDevices::Mmio(_) => None,
             });
-        PlatformRegistration::new(events, self.console.as_ref().map(|console| &console.server))?
-            .with_legacy(self.legacy_devices.as_ref())?
-            .with_intx(intx)?
-            .with_usb(self.console.as_ref().map(|console| &console.usb))?
+        let registration = PlatformRegistration::new(
+            events,
+            self.console.as_ref().map(|console| &console.server),
+        )?;
+        #[cfg(target_arch = "x86_64")]
+        let registration = registration.with_legacy(self.legacy_devices.as_ref())?;
+        #[cfg(target_arch = "x86_64")]
+        let registration = registration.with_intx(intx)?;
+        #[cfg(target_arch = "x86_64")]
+        let registration =
+            registration.with_usb(self.console.as_ref().map(|console| &console.usb))?;
+        #[cfg(target_arch = "aarch64")]
+        let registration = {
+            let input = self.console.as_ref().and_then(|_| {
+                self.get_virtio_device(
+                    crate::devices::virtio::device::VirtioDeviceType::Input,
+                    crate::devices::virtio::input::INPUT_DEV_ID,
+                )
+            });
+            registration.with_input(input.as_ref())?
+        };
+        registration
             .with_tpm(self.tpm.as_ref())?
             .with_uefi_vars(self.uefi_vars.as_ref())
     }
 }
 
 #[cfg(test)]
+#[cfg(target_arch = "x86_64")]
 mod tests {
     use super::*;
     use crate::vstate::vm::tests::setup_vm_with_memory;

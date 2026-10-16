@@ -6,6 +6,8 @@
 use std::fmt::{self, Debug};
 use std::sync::{Arc, Mutex};
 
+#[cfg(feature = "windows")]
+use event_manager::SubscriberOps;
 use serde::{Deserialize, Serialize};
 
 use super::acpi::ACPIDeviceManager;
@@ -22,6 +24,11 @@ use crate::devices::virtio::balloon::persist::{BalloonConstructorArgs, BalloonSt
 use crate::devices::virtio::block::device::Block;
 use crate::devices::virtio::block::persist::{BlockConstructorArgs, BlockState};
 use crate::devices::virtio::device::{VirtioDevice, VirtioDeviceType};
+#[cfg(feature = "windows")]
+use crate::devices::virtio::input::Input;
+use crate::devices::virtio::input::persist::InputState;
+#[cfg(feature = "windows")]
+use crate::devices::virtio::input::persist::{InputConstructorArgs, InputPersistError};
 use crate::devices::virtio::mem::VirtioMem;
 use crate::devices::virtio::mem::persist::{VirtioMemConstructorArgs, VirtioMemState};
 use crate::devices::virtio::net::Net;
@@ -129,6 +136,38 @@ pub struct DeviceStates {
     pub pmem_devices: Vec<VirtioDeviceState<PmemState>>,
     /// Memory device state.
     pub memory_device: Option<VirtioDeviceState<VirtioMemState>>,
+    /// Keyboard and absolute-pointer device states.
+    pub input_device: Option<VirtioDeviceState<InputState>>,
+}
+
+#[cfg(target_arch = "aarch64")]
+#[cfg(feature = "windows")]
+impl DeviceStates {
+    pub(super) fn mmio_regions(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
+        self.block_devices
+            .iter()
+            .map(|state| &state.device_info)
+            .chain(self.net_devices.iter().map(|state| &state.device_info))
+            .chain(self.pmem_devices.iter().map(|state| &state.device_info))
+            .chain(
+                [
+                    self.vsock_device.as_ref().map(|state| &state.device_info),
+                    self.balloon_device.as_ref().map(|state| &state.device_info),
+                    self.entropy_device.as_ref().map(|state| &state.device_info),
+                    self.memory_device.as_ref().map(|state| &state.device_info),
+                    self.input_device.as_ref().map(|state| &state.device_info),
+                ]
+                .into_iter()
+                .flatten(),
+            )
+            .map(|region| (region.addr, region.len))
+            .chain(self.pmem_devices.iter().map(|state| {
+                (
+                    state.device_state.config_space.start,
+                    state.device_state.config_space.size,
+                )
+            }))
+    }
 }
 
 pub struct MMIODevManagerConstructorArgs<'a> {
@@ -381,6 +420,24 @@ impl<'a> Persist<'a> for MMIOVirtioDevices {
                         device_info,
                     })
                 }
+                VirtioDeviceType::Input => {
+                    #[cfg(feature = "windows")]
+                    {
+                        let device_state = locked_device
+                            .as_any()
+                            .downcast_ref::<Input>()
+                            .unwrap()
+                            .save();
+                        states.input_device = Some(VirtioDeviceState {
+                            device_id,
+                            device_state,
+                            transport_state,
+                            device_info,
+                        });
+                    }
+                    #[cfg(not(feature = "windows"))]
+                    unreachable!("virtio-input requires the windows build feature");
+                }
                 VirtioDeviceType::Mem => {
                     let mem = locked_device
                         .as_mut_any()
@@ -406,6 +463,10 @@ impl<'a> Persist<'a> for MMIOVirtioDevices {
         constructor_args: Self::ConstructorArgs,
         state: &Self::State,
     ) -> Result<Self, Self::Error> {
+        if state.input_device.is_some() {
+            crate::vmm_config::require_windows_support()?;
+        }
+
         let mut dev_manager = MMIOVirtioDevices::new();
         let mem = constructor_args.mem;
         let vm = constructor_args.vm;
@@ -593,6 +654,37 @@ impl<'a> Persist<'a> for MMIOVirtioDevices {
             )?;
         }
 
+        #[cfg(feature = "windows")]
+        if let Some(input_state) = &state.input_device {
+            let device = Arc::new(Mutex::new(Input::restore(
+                InputConstructorArgs { mem: mem.clone() },
+                &input_state.device_state,
+            )?));
+            restore_helper(
+                device.clone(),
+                input_state.device_state.virtio_state.activated,
+                false,
+                &input_state.device_id,
+                &input_state.transport_state,
+                &input_state.device_info,
+                constructor_args.event_manager,
+            )?;
+            if let Err(error) = device.lock().unwrap().check_registered() {
+                let id = dev_manager
+                    .get_virtio_device(VirtioDeviceType::Input, &input_state.device_id)
+                    .unwrap()
+                    .sub_id
+                    .unwrap();
+                constructor_args
+                    .event_manager
+                    .remove_subscriber(id)
+                    .map_err(|error| {
+                        InputPersistError::Registration(std::io::Error::other(error))
+                    })?;
+                return Err(InputPersistError::Registration(error).into());
+            }
+        }
+
         for pmem_state in &state.pmem_devices {
             let device = Arc::new(Mutex::new(Pmem::restore(
                 PmemConstructorArgs {
@@ -677,6 +769,7 @@ mod tests {
                 && self.vsock_device == other.vsock_device
                 && self.entropy_device == other.entropy_device
                 && self.memory_device == other.memory_device
+                && self.input_device == other.input_device
         }
     }
 
@@ -906,11 +999,6 @@ mod tests {
             _pmem_files.last().unwrap().as_path().to_str().unwrap(),
             hyperv = if cfg!(target_arch = "x86_64") {
                 "    \"hyperv\": false,\n"
-            } else {
-                ""
-            },
-            pit = if cfg!(target_arch = "x86_64") {
-                "    \"pit\": true,\n"
             } else {
                 ""
             },

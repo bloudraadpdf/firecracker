@@ -278,5 +278,15 @@ The preparation tool does not activate the installed guest.
 
 An unactivated or expired Windows 11 evaluation can
 [shut down every hour](https://www.microsoft.com/en-us/evalcenter/evaluate-windows-11-enterprise).
-A clean Firecracker exit alone does not establish workload success. Require all
-guest pass markers and a valid evaluation state for each run.
+The ARM TAP test encountered this shutdown after full restore; its Application
+log recorded WLMS events 100 and 101. A clean Firecracker exit is therefore
+insufficient evidence of workload success. Check all guest pass markers and the
+activation state. The activation-gated retry passed both TAP and CONNECT checks;
+see the [validation record](../../docs/windows-validation.md).
+
+## ARM64 installation
+
+The former QEMU installation generator has been removed. The separate
+[ARM64 guide](../../docs/windows-arm64.md) retains the provenance of earlier
+prepared-disk tests. A direct Firecracker ARM64 installer is not qualified; the
+AMD64 console and installation procedure do not establish ARM64 support.

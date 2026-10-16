@@ -91,3 +91,27 @@ successful Windows installer boot.
 The firmware patch follows the upstream `BSD-2-Clause-Patent` licence. The Rust
 VGA device is independent of QEMU's device implementation. UEFI uses
 QemuVideoDxe directly; the SeaVGABIOS option ROM is for the BIOS path.
+
+## Build evidence
+
+The AMD64 release profile built with two jobs and produced a 4 MiB image with
+SHA-256 `730de0fca7791d7623336b5c87d53e076c941e53f1118cb3b26d91445cbf7a16`. The
+corrected image passes the UEFI memory-map probe and the recorded Windows
+installation/restore matrix. The USB profile also passes the no-OS
+absolute-pointer probe. Keep firmware images immutable while their guests or
+snapshots exist.
+
+The console platform initialiser was validated with a DEBUG serial build: the
+root bridge reported I/O `0x1000..0xffff`, EDK II identified and booted the
+native IDE optical drive, and Windows 11 started the generic IDE controller,
+both channels and the CD-ROM driver. WinPE read the prepared ISO's
+`Drivers\viostor` directory. Windows Setup displayed at 800 by 600 pixels;
+remote input accepted the CD boot prompt, opened Shift+F10, ran commands and
+moved the pointer. Completed installation is tracked in the
+[validation record](../../../docs/windows-validation.md).
+
+The optical controller's single-session READ TOC format 1 response also passes
+an unchanged Windows 11 ISO test: WinPE mounts UDF and reads the full
+4,332,322,774-byte installation image. The earlier CDFS fallback was an ATAPI
+command omission, independent of firmware and image preparation. No registry
+modification or WIM splitting is required.

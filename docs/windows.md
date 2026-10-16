@@ -1,11 +1,32 @@
 # Windows guests (AMD64, experimental)
 
-Build with `cargo build --features windows` for the optional Windows platform.
-Default builds retain the API schema and reject Windows-only configurations
-before they open boot files or attach devices. Saved state has the same data
-layout in both builds; default builds reject saved Windows devices explicitly.
+Historical tests ran AMD64 Windows Server 2025 Core, Windows 10, Windows 11, XP
+x86 and Windows 7 x64 on Linux/KVM with virtio PCI storage, networking and
+full/differential snapshots. Support is experimental; the
+[validation record](windows-validation.md#current-integration-candidate)
+separates current checks from those earlier results. This adds no Windows host
+backend. See the [ARM64 guide](windows-arm64.md) for the separate firmware path
+and its validation status.
 
-This firmware path requires Linux/KVM. It adds no Windows host backend.
+## Build
+
+The Windows platform is an optional build capability. On an AMD64 Linux build
+host, follow the [build prerequisites](getting-started.md), then build the VMM,
+jailer and matching snapshot editor with the pinned Rust toolchain:
+
+```sh
+cargo build --release --locked --target x86_64-unknown-linux-musl \
+  -p firecracker -p jailer -p snapshot-editor \
+  --features firecracker/windows,snapshot-editor/windows
+```
+
+The binaries are in `build/cargo_target/x86_64-unknown-linux-musl/release/`. Use
+the VMM and editor from the same build. Ordinary builds leave this capability
+disabled; firmware, graphical console, TPM, variable services and Hyper-V
+requests then return an unsupported-build error. Both builds use the same
+snapshot schema and can exchange ordinary Linux snapshots. A build without this
+capability rejects saved Windows devices before creating destination VMs or
+connecting to helpers.
 
 ## Boot configuration
 
@@ -81,29 +102,40 @@ uses interrupt 3, with a level/low MADT override. Reset and S5 terminate the
 Firecracker process, like the existing i8042 reset operation. An external
 supervisor must start a new process for a guest reboot.
 
-An explicit firmware profile selects this conventional PC power/timer hardware
-and the CMOS/RTC on IRQ 8. A direct Linux kernel retains hardware-reduced ACPI,
-without these devices, their event descriptors or the IRQ 8 reservation. PCI and
-Hyper-V settings do not select PC timers.
+An explicit firmware profile or graphical console selects this conventional PC
+power/timer hardware and the CMOS/RTC on IRQ 8. A direct Linux kernel without a
+console retains hardware-reduced ACPI, without these devices, their event
+descriptors or the IRQ 8 reservation. PCI and Hyper-V settings do not select PC
+timers.
 
-Use a prepared GPT disk with an EFI system partition and matching signed virtio
-storage drivers. For an installer display and read-only installation media,
-select the optional [AMD64 console](windows-console.md). The headless profile
-does not provide them.
+## Prepare the disk
 
-### Transitional PCI platform
+1. Download the AMD64 ISO from the
+   [Microsoft Windows Server 2025 Evaluation Center](https://www.microsoft.com/en-us/evalcenter/download-windows-server-2025).
 
-On x86, `"pci_transport": "transitional"` in `machine-config` selects the 32-bit
-PCI memory aperture. It requires `--enable-pci`; ARM64 rejects this selection.
-The allocator persists the selection and uses the same window for BAR
-allocation, relocation and release. The ACPI PCI root omits the unused 64-bit
-aperture. Default configurations retain modern PCI.
+1. Obtain the
+   [virtio Windows drivers](https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/)
+   and build the
+   [Firecracker CloudHv firmware](../resources/firmware/README.md). Record
+   resolved versions and SHA-256 digests with the test results.
 
-The transport supplies legacy PCI IDs, I/O registers, queue page-frame addresses
-and INTx, alongside modern capabilities. It preserves those states across
-snapshots. The XP test uses the
-[SeaBIOS PVH handoff](../resources/firmware/seabios/README.md); selecting this
-option alone does not supply BIOS firmware or install guest drivers.
+1. Prepare a new raw disk and matching installation media with the
+   [Rust preparation tools](../tools/windows/README.md). They do not start a VM
+   and do not invoke QEMU.
+
+1. Install directly in Firecracker with the
+   [installation console](windows-console.md). Load the matching signed
+   `viostor` driver in Setup and retain it in the installed image. Install
+   NetKVM if the guest needs a conventional network interface.
+
+1. Retain the system UUID, disk and optional protected stores across installer
+   reboots. Firecracker exits on guest reset; the supervisor restarts it.
+
+1. Eject the installation ISO before booting the installed disk. Enable
+   [EMS/SAC](https://learn.microsoft.com/en-us/windows-hardware/drivers/devtest/bcdedit--emssettings)
+   for serial administration where the selected Windows edition supplies SAC.
+   The Server Core answer file configures it after `bcdboot` installs the EFI
+   fallback path.
 
 ## Networking
 
@@ -156,7 +188,113 @@ reset acknowledgement. This supports Windows, which replenishes its event
 buffers without notifying that queue. The device supports indirect buffers on
 the receive, transmit and event queues.
 
-### Windows 7 TLS trust
+### Tokoloshe egress
+
+Tokoloshe's socket-grant proxy accepts HTTP CONNECT on host CID 2, port 4750. A
+Windows client opens a provider socket to that endpoint, sends
+`CONNECT <host>:<port> HTTP/1.1` with a matching `Host` header and an empty
+line, then waits for status 200 before sending tunnel data. Bind the granted
+host Unix socket at `windows.vsock_4750` in the Firecracker namespace.
+
+The [validation matrix](windows-validation.md) records native Firecracker tests
+with the actual `tokoloshe-egress` sidecar, allowed transfers, policy denials,
+independent byte accounting and offline storage verification after cold boot and
+both restore types. The tested Windows clients use the native Winsock provider.
+Tokoloshe's Windows job runtime is outside this scope. HTTPS certificate
+validation and proxy configuration remain application responsibilities.
+
+## Conventional network egress
+
+The TAP tests use NetKVM, a separate host network namespace, a veth route and
+source NAT on the host uplink. They verify static IPv4 configuration, name
+resolution and a byte-checked 2 MiB TCP echo transfer. Modern guest probes also
+verify HTTPS certificates with proxies disabled; XP uses HTTP. The results do
+not establish DHCP or IPv6 support. See the
+[egress tools](../tools/windows/egress/README.md) for setup and offline checks,
+and the separate [ARM64 validation](windows-arm64.md) for that architecture.
+
+## Snapshots
+
+This branch uses snapshot format 32.0.0. It saves the selected PCI transport,
+firmware profile and system UUID, CET/Hyper-V processor state, ACPI timer/power
+registers, CMOS/RTC state and optional console, TPM and authenticated-variable
+checkpoints. Restore recreates the saved PC timer group, independently of the
+boot configuration, and rejects a snapshot with only one of RTC and power state.
+Format 29 changes firmware profile encoding; it cannot load format 28 snapshots.
+Use the matching earlier VMM for older snapshots. The optical media path is part
+of console configuration and is not duplicated in the optical device checkpoint.
+See [the validation record](windows-validation.md) and
+[the secure platform](windows-secure-boot.md).
+
+The RTC follows host UTC plus the saved guest adjustment, including elapsed time
+while the VM is stopped. It provides periodic, alarm and update interrupts on
+reserved IRQ 8. Register C reads acknowledge pending flags.
+
+The VMClock device publishes generation and disruption counters. Its
+`clock_status` remains `UNKNOWN` and its `counter_id` remains `INVALID`; this
+implementation does not advertise a usable precision clock. AWS provides a
+[null driver package](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/other-windows-device-drivers.html)
+that lets Windows recognise the device without adding clock functionality. AWS
+documents support for Windows Server 2016, 2019, 2022 and 2025. Windows 10
+recognised `AMZNC10C` as `AWS VMClock Device` with device problem code 0 after
+installation of the unmodified signed INF/catalog, without reboot. This verifies
+device recognition, not counter consumption. No functional Windows VMClock
+driver has been verified. Installing the null package does not resolve guest
+time lag; clock accuracy requires separate validation.
+
+The guest CPUID records whether Hyper-V is enabled. Restore derives the machine
+configuration from that state and checks destination-host support. The vCPU
+snapshot includes Hyper-V control MSRs, SynIC state, and synthetic timer
+configuration and counts. SynIC2 avoids clearing restored guest message and
+event pages. The reference clock is restored through the VM clock state, rather
+than writing its read-only counter MSR.
+
+The x86 FADT publishes conventional ACPI fixed hardware and an aligned FACS. The
+PM timer resumes from its saved count and signals SCI when an enabled
+timer-status event is pending. ARM64 retains hardware-reduced ACPI; see its
+separate [validation results](windows-arm64.md#egress-and-validation).
+
+Snapshots do not include the disk. Preserve a matching disk when retaining or
+copying a memory snapshot. Do not restore old memory against a disk that has
+since changed. Only one VM may write the disk at a time.
+
+## Guest clock policy
+
+Firecracker's virtual CMOS clock uses UTC. Prepare modern Windows images with a
+matching RTC policy: use the UTC timezone (`tzutil /s "UTC"`), or retain the
+chosen display timezone and set the DWORD `RealTimeIsUniversal` to `1` under
+`HKLM\SYSTEM\CurrentControlSet\Control\TimeZoneInformation`, then reboot.
+Microsoft documents
+[tzutil](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/tzutil);
+AWS documents the
+[UTC RTC policy for Windows guests](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/change-time-zone-of-instance.html).
+These are image configuration choices; Firecracker does not change the guest's
+timezone or registry.
+
+Windows images with a local RTC policy can report a timezone offset after cold
+boot. Network time synchronisation can later change that clock. Use host
+timestamps to identify validation phases independently of guest wall time.
+
+The Windows 10 clock check distinguishes pause from restore: UTC and the
+performance counter advance during pause. With `clock_realtime: false`, restore
+omits the stopped interval; with `clock_realtime: true`, it compensates that
+interval. These short measurements do not establish long-term accuracy. No VMBus
+time synchronisation service is provided. Cross-host migration and
+firmware-stage snapshots remain unvalidated.
+
+## Legacy Windows
+
+Use the [validation matrix](windows-validation.md) for exact tested builds. XP
+SP3 x86 uses SeaBIOS, transitional PCI and one vCPU with its uniprocessor HAL.
+Its checks do not establish SMP or HTTPS support. The recorded format-31 Windows
+7 SP1 x64 preparation and TAP/CONNECT checks use SeaBIOS, transitional PCI, two
+vCPUs and Hyper-V. The earlier GPT/EFI installation used corrected CloudHv
+firmware; it is a separate historical profile. Both operating systems require
+drivers matched to their OS version. Contemporary virtio-win media has no
+compatible Viosock package; the tested historical drivers require the documented
+receive, reset and DMA fixes. These packages are test-signed. Build and
+installation instructions are in
+[legacy-vsock](../tools/windows/legacy-vsock/README.md).
 
 Windows 7's TLS test requires a current trusted root. The tested
 `www.microsoft.com` chain terminates at DigiCert Global Root G2. Download the
@@ -170,26 +308,24 @@ identifies this root. Certificate validation remains enabled. A changed server
 chain can require a different trusted root; this guest trust-store prerequisite
 is separate from Firecracker support.
 
-## Legacy Windows
+The [egress regression tools](../tools/windows/egress/README.md) open fresh
+connections after each restore; they do not test preservation of live TCP
+sessions. XP also verifies a flushed 65,536-byte patterned file. CONNECT runs
+omit the guest NIC and check allowed byte transfers, zero-payload denials and
+flushed storage. Read-only disk checks and host accounting verify the guest
+reports. These platform results do not establish that Tokoloshe can replace
+Toets' QEMU backend for Windows jobs.
 
-XP SP3 x86 uses SeaBIOS, transitional PCI and one vCPU with its uniprocessor
-HAL. These device choices do not establish SMP or HTTPS support. Windows 7 SP1
-x64 uses GPT/EFI with matching signed storage and network drivers. Contemporary
-virtio-win media has no compatible Viosock package for these guests. The
-[test-driver procedure](../tools/windows/legacy-vsock/README.md) retains the
-required receive, reset and DMA fixes and uses test signing. A test-driver build
-does not qualify an installed guest. No production-signed package is supplied.
+### Transitional PCI platform
 
-### Tokoloshe egress
+On x86, `"pci_transport": "transitional"` in `machine-config` selects the 32-bit
+PCI memory aperture. It requires `--enable-pci`; ARM64 rejects this selection.
+The allocator persists the selection and uses the same window for BAR
+allocation, relocation and release. The ACPI PCI root omits the unused 64-bit
+aperture. Default configurations retain modern PCI.
 
-Tokoloshe's socket-grant proxy accepts HTTP CONNECT on host CID 2, port 4750. A
-Windows client opens a provider socket to that endpoint, sends
-`CONNECT <host>:<port> HTTP/1.1` with a matching `Host` header and an empty
-line, then waits for status 200 before sending tunnel data. Bind the granted
-host Unix socket at `windows.vsock_4750` in the Firecracker namespace.
-
-Use the [egress controllers](../tools/windows/egress/README.md) for separate TAP
-and CONNECT cold/full/differential checks. They stage matched state, reject open
-disks, verify guest and host byte counts and inspect storage read-only after
-clean shutdown. HTTPS validation and proxy configuration remain application
-responsibilities. Tokoloshe's Windows job runtime is outside this device scope.
+The transport supplies legacy PCI IDs, I/O registers, queue page-frame addresses
+and INTx, alongside modern capabilities. It preserves those states across
+snapshots. The XP test uses the
+[SeaBIOS PVH handoff](../resources/firmware/seabios/README.md); selecting this
+option alone does not supply BIOS firmware or install guest drivers.

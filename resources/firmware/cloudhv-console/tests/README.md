@@ -32,8 +32,7 @@ one vCPU, 256 MiB RAM and the console enabled. Bound the VMM lifetime with a
 180-second timeout. Send absolute pointer requests through the console socket.
 The console multiplexer scales the tablet's `0..32767` axes to `0..65536`.
 
-A historical native Firecracker probe produced these values. They do not qualify
-a rebuilt firmware or VMM:
+The native Firecracker probe produced these values:
 
 | Injected X, Y | EFI X, Y     | Button |
 | ------------- | ------------ | ------ |

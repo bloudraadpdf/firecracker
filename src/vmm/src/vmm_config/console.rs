@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-/// Local endpoints and read-only installation media for an AMD64 console.
+/// Local console endpoint and architecture-specific installation hardware.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConsoleConfig {
@@ -45,6 +45,8 @@ impl ConsoleConfig {
                 "VGA option ROM is required unless CloudHv firmware is explicitly selected",
             ));
         }
+        #[cfg(target_arch = "aarch64")]
+        let _ = firmware;
         Ok(())
     }
 }
@@ -126,5 +128,23 @@ mod memory_tests {
             size - 0x20000
         );
         assert_eq!(reserve_vga_memory(regions.clone()), regions);
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "windows")]
+#[cfg(target_arch = "aarch64")]
+mod arm_tests {
+    use super::*;
+
+    #[test]
+    fn arm_console_accepts_only_the_private_socket() {
+        let config: ConsoleConfig =
+            serde_json::from_str(r#"{"socket_path":"console.sock"}"#).unwrap();
+        config.validate().unwrap();
+        for property in ["vga_rom_path", "optical_image_path"] {
+            let value = serde_json::json!({"socket_path":"console.sock", (property):"unsupported"});
+            serde_json::from_value::<ConsoleConfig>(value).unwrap_err();
+        }
     }
 }

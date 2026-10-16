@@ -1,9 +1,13 @@
 # Standard Windows 11 platform
 
-Standard Windows 11 Pro and Enterprise are in the acceptance scope. Support is
-experimental. Historical Enterprise Evaluation results do not qualify this
-rewritten source boundary or every edition. Do not bypass Setup's hardware
-checks.
+Standard Windows 11 Pro and Enterprise are in the acceptance scope. Historical
+Enterprise Evaluation tests passed installation, Secure Boot, TPM,
+cold/full/differential restore and both egress paths on the recorded build. The
+[validation record](windows-validation.md#current-integration-candidate)
+separates those results from current qualification. Support is experimental. The
+prior IoT Enterprise LTSC result does not qualify these editions. Do not bypass
+Setup's hardware checks. Windows 11 Pro has not been separately installed or
+qualified; Enterprise Evaluation results do not qualify every edition.
 
 The opt-in platform adds two separate services:
 
@@ -63,7 +67,7 @@ update.
 
 ## Checkpoints
 
-Snapshot format 26.0.0 includes complete TPM and variable-service state,
+Snapshot format 32.0.0 includes complete TPM and variable-service state,
 physical-presence registers and the firmware profile/system UUID. Earlier
 snapshots require the matching earlier VMM; there is no implicit conversion.
 Display memory, TPM state and variables fit the bounded 32 MiB snapshot reader.
@@ -103,6 +107,33 @@ An intentional restore also restores old revocation policy and TPM state. It
 cannot preserve a later dbx update while restoring an older matched checkpoint.
 A software TPM and host-managed variables do not protect against the host owner.
 
+## Validation
+
+The [validation matrix](windows-validation.md) records the exact installed
+Windows edition, build and snapshot format. Standard Enterprise Evaluation
+passes Secure Boot, Get-Tpm readiness, public TBS GetRandom, PCR 7 and existing
+persistent-object identity checks after cold boot and both restore types.
+Installation uses Microsoft's CA2023 boot files with the current revocation
+database and a signed viostor driver, without hardware-check bypasses or forced
+unsigned drivers. Public TPM baselines also match across the cold boot between
+TAP and CONNECT runs.
+
+BitLocker automatically encrypted the guest volume. The recorded volume is
+unlocked, protection is off and no key protectors are configured. Read-only
+validation uses its existing clear key and matching TPM state. This does not
+qualify TPM-sealed recovery or attestation. The desktop's evaluation status and
+legacy registry branding are recorded in the validation matrix; no licence or
+activation changes were made.
+
+Host and firmware regressions cover real swtpm startup, PCR extension,
+export/import; bounded variable frames, deadlines and DMA; RESET isolation;
+signed updates, tamper, replay and policy; staged restore failure; and helper
+disconnection. A signed EFI probe verifies Secure Boot, unsigned-image
+rejection, TPM discovery and the event log. Persistent variables survive cold
+boot and isolated full/differential restores. Unauthenticated PK deletion and
+writes to derived Secure Boot state are rejected. Runtime Windows checks
+exercise services after `ExitBootServices`, separately from the EFI probe.
+
 ## Physical presence
 
 The ACPI physical-presence interface uses a bounded mailbox in the existing
@@ -116,9 +147,8 @@ security boundary.
 
 Malformed calls, helper failure, busy snapshots and request persistence have
 host regressions. Disposable firmware tests retain an owner NV index after
-refused clear and remove it after confirmed clear. Historical Windows Get-Tpm
-and WMI transition results require their original binaries and matched guest
-state.
+refused clear and remove it after confirmed clear. Windows Get-Tpm and WMI
+transition queries pass. See [the validation record](windows-validation.md).
 
 References:
 

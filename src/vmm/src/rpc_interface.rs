@@ -943,7 +943,7 @@ impl RuntimeApiController {
         let create_start_us = get_time_us(ClockType::Monotonic);
 
         let result = create_snapshot(&mut locked_vmm, &vm_info, create_params);
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(feature = "windows")]
         if locked_vmm.device_manager.uefi_vars_failed() {
             locked_vmm.stop(crate::FcExitCode::GenericError);
         }
@@ -1353,9 +1353,7 @@ mod tests {
                 resume_vm: false,
                 network_overrides: vec![],
                 vsock_override: None,
-                #[cfg(target_arch = "x86_64")]
                 tpm: None,
-                #[cfg(target_arch = "x86_64")]
                 uefi_vars: None,
                 clock_realtime: false,
                 huge_pages: SnapshotLoadHugePageConfig::Snapshot,
