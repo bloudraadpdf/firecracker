@@ -58,3 +58,12 @@ Windows loader then selects four levels while retaining that table address and
 faults. Exposing 48 bits makes firmware use four levels and allows Windows
 kernel execution. On hosts already exposing 48 bits or less, omit this modifier;
 it must not increase the host's address width.
+
+## Stable firmware identity
+
+Declare the CloudHv ABI with `firmware.type: "cloud-hv"` and a stable
+`firmware.system_uuid`. Firecracker reserves one 4 KiB page at `0x801e0000` and
+publishes the SMBIOS system UUID there before constructing ACPI tables. Retain
+the UUID across cold boots and restores. Without the declaration, no identity
+page is reserved or written. SeaBIOS remains AMD64-only. This identity path does
+not qualify ARM Secure Boot or a Windows installation.
