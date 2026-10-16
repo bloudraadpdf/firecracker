@@ -10,6 +10,7 @@ name = "snapshot-editor"
 bench = false
 
 [features]
+windows = ["vmm/windows"]
 tracing = ["log-instrument", "fc_utils/tracing", "vmm/tracing"]
 
 [dependencies]

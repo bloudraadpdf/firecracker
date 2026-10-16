@@ -795,3 +795,15 @@ sudo env PYTHONPATH=tests HOME=$HOME ~/.local/bin/ipython3 -i tools/sandbox.py -
 The normal build tests discover tracked standalone Rust tool workspaces.
 `test_tool_unittests` runs their unit tests and compiles their examples;
 `test_tool_clippy` checks their native GNU targets.
+
+### Optional Windows capability
+
+The normal Rust unit, example and benchmark checks cover default and `windows`
+builds. Clippy checks default and all features. Use
+`cargo build --features windows` to enable the optional platform. Default
+binaries keep the API fields and reject requests which need this capability.
+
+The platform integration tests use the supplied `--binary-dir` Windows release
+pair, or build it with the existing Cargo helper. They build a separate default
+release counterpart and keep both VMs under the normal factory teardown. Both
+variants retain the normal memory thresholds.

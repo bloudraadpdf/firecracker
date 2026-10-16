@@ -348,6 +348,12 @@ def test_api_machine_config(uvm):
     response = test_microvm.api.machine_config.get()
     assert response.json()["smt"] is False
 
+    if platform.machine() == "x86_64":
+        assert response.json()["hyperv"] is False
+    else:
+        with pytest.raises(RuntimeError, match="unknown field `hyperv`"):
+            test_microvm.api.machine_config.patch(hyperv=True)
+
     # Test that smt=True errors on ARM.
     if platform.machine() == "x86_64":
         test_microvm.api.machine_config.patch(smt=True)
@@ -1321,6 +1327,9 @@ def test_get_full_config_after_restoring_snapshot(microvm_factory, uvm_configure
 
     if cpu_vendor == utils_cpuid.CpuVendor.ARM:
         setup_cfg["machine-config"]["smt"] = False
+    else:
+        setup_cfg["machine-config"]["hyperv"] = False
+        setup_cfg["machine-config"]["pit"] = True
 
     if len(SUPPORTED_CPU_TEMPLATES) != 0:
         setup_cfg["machine-config"]["cpu_template"] = SUPPORTED_CPU_TEMPLATES[0]
@@ -1470,6 +1479,9 @@ def test_get_full_config(uvm):
         "track_dirty_pages": False,
         "huge_pages": "None",
     }
+    if platform.machine() == "x86_64":
+        expected_cfg["machine-config"]["hyperv"] = False
+        expected_cfg["machine-config"]["pit"] = True
     expected_cfg["cpu-config"] = None
     expected_cfg["boot-source"] = {
         "boot_args": "",
