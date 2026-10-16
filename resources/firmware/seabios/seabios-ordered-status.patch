@@ -1,0 +1,12 @@
+diff --git a/src/hw/virtio-pci.c b/src/hw/virtio-pci.c
+index 89a4f50..c9726bc 100644
+--- a/src/hw/virtio-pci.c
++++ b/src/hw/virtio-pci.c
+@@ -543,6 +543,7 @@ void vp_init_simple(struct vp_device *vp, struct pci_device *pci)
+
+     vp_reset(vp);
+     pci_enable_busmaster(pci);
++    vp_set_status(vp, VIRTIO_CONFIG_S_ACKNOWLEDGE);
+     vp_set_status(vp, VIRTIO_CONFIG_S_ACKNOWLEDGE |
+                   VIRTIO_CONFIG_S_DRIVER );
+ }
