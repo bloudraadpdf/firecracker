@@ -37,6 +37,26 @@ pub mod snapshot;
 /// Wrapper for configuring the vsock devices attached to the microVM.
 pub mod vsock;
 
+/// The requested platform requires an optional build capability.
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[error("This configuration requires the windows build feature")]
+pub struct WindowsFeatureDisabled;
+
+impl From<WindowsFeatureDisabled> for std::io::Error {
+    fn from(error: WindowsFeatureDisabled) -> Self {
+        Self::new(std::io::ErrorKind::Unsupported, error)
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn require_windows_support() -> Result<(), WindowsFeatureDisabled> {
+    if cfg!(feature = "windows") {
+        Ok(())
+    } else {
+        Err(WindowsFeatureDisabled)
+    }
+}
+
 #[allow(missing_docs)]
 #[derive(Debug)]
 pub enum HotplugDeviceConfig {

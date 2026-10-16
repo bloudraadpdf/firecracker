@@ -38,6 +38,8 @@ use crate::vstate::memory::{GuestRegionMmap, MemoryError};
 /// Errors encountered when configuring microVM resources.
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum ResourcesError {
+    /// Unsupported build configuration: {0}
+    WindowsFeature(#[from] crate::vmm_config::WindowsFeatureDisabled),
     /// Balloon device error: {0}
     BalloonDevice(#[from] BalloonConfigError),
     /// Block device error: {0}
@@ -150,6 +152,16 @@ pub struct VmResources {
 }
 
 impl VmResources {
+    pub(crate) fn validate_windows_support(
+        &self,
+    ) -> Result<(), crate::vmm_config::WindowsFeatureDisabled> {
+        #[cfg(target_arch = "x86_64")]
+        if self.machine_config.hyperv {
+            crate::vmm_config::require_windows_support()?;
+        }
+        Ok(())
+    }
+
     /// Returns a `TokenBucket` from the serial rate limiter config, if configured.
     pub fn serial_rate_limiter(&self) -> Option<crate::rate_limiter::TokenBucket> {
         self.serial_rate_limiter_cfg.as_ref().and_then(|cfg| {
@@ -169,6 +181,15 @@ impl VmResources {
         metadata_json: Option<&str>,
     ) -> Result<Self, ResourcesError> {
         let vmm_config = serde_json::from_str::<VmmConfig>(config_json)?;
+
+        #[cfg(target_arch = "x86_64")]
+        if vmm_config
+            .machine_config
+            .as_ref()
+            .is_some_and(|config| config.hyperv)
+        {
+            crate::vmm_config::require_windows_support()?;
+        }
 
         if let Some(logger_config) = vmm_config.logger {
             crate::logger::LOGGER.update(logger_config)?;
@@ -595,6 +616,26 @@ mod tests {
     use crate::vmm_config::machine_config::{HugePageConfig, MachineConfig, MachineConfigError};
     use crate::vmm_config::net::{NetBuilder, NetworkInterfaceConfig};
     use crate::vmm_config::vsock::tests::default_config;
+
+    #[cfg(all(target_arch = "x86_64", not(feature = "windows")))]
+    #[test]
+    fn windows_configuration_is_rejected_before_file_access() {
+        let config = serde_json::json!({
+            "boot-source":{"kernel_image_path":"/nonexistent/windows-feature/kernel"},
+            "cpu-config":"/nonexistent/windows-feature/cpu-template",
+            "logger":{"log_path":"/nonexistent/windows-feature/log"},
+            "metrics":{"metrics_path":"/nonexistent/windows-feature/metrics"},
+            "machine-config":{"vcpu_count":1,"mem_size_mib":128,"hyperv":true},
+            "drives":[]
+        });
+        let error = VmResources::from_json(&config.to_string(), &InstanceInfo::default(), 0, None)
+            .unwrap_err();
+        assert!(
+            matches!(error, ResourcesError::WindowsFeature(_)),
+            "{error}"
+        );
+        assert!(error.to_string().contains("windows build feature"));
+    }
 
     fn default_net_cfg() -> NetworkInterfaceConfig {
         NetworkInterfaceConfig {
@@ -1453,6 +1494,8 @@ mod tests {
             vcpu_count: Some(32),
             mem_size_mib: Some(512),
             smt: Some(false),
+            #[cfg(target_arch = "x86_64")]
+            hyperv: Some(false),
             #[cfg(target_arch = "x86_64")]
             pit: Some(true),
             #[cfg(target_arch = "x86_64")]

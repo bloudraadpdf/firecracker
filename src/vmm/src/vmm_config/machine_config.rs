@@ -16,6 +16,8 @@ pub const MAX_SUPPORTED_VCPUS: u8 = 32;
 #[rustfmt::skip]
 #[derive(Debug, thiserror::Error, displaydoc::Display, PartialEq, Eq)]
 pub enum MachineConfigError {
+    /// Unsupported build configuration: {0}
+    WindowsFeature(#[from] super::WindowsFeatureDisabled),
     /// The memory size (MiB) is smaller than the previously set balloon device target size.
     IncompatibleBalloonSize,
     /// The memory size (MiB) is either 0, or not a multiple of the configured page size.
@@ -113,6 +115,10 @@ pub struct MachineConfig {
     /// Enables or disabled SMT.
     #[serde(default)]
     pub smt: bool,
+    /// Expose Hyper-V enlightenments for Windows guests (x86_64 only).
+    #[cfg(target_arch = "x86_64")]
+    #[serde(default)]
+    pub hyperv: bool,
     /// Enables the legacy programmable interval timer on x86_64.
     #[cfg(target_arch = "x86_64")]
     #[serde(default = "default_pit")]
@@ -177,6 +183,8 @@ impl Default for MachineConfig {
             mem_size_mib: DEFAULT_MEM_SIZE_MIB,
             smt: false,
             #[cfg(target_arch = "x86_64")]
+            hyperv: false,
+            #[cfg(target_arch = "x86_64")]
             pit: true,
             cpu_template: None,
             track_dirty_pages: false,
@@ -205,6 +213,10 @@ pub struct MachineConfigUpdate {
     /// Enables or disabled SMT.
     #[serde(default)]
     pub smt: Option<bool>,
+    /// Enable or disable Hyper-V enlightenments (x86_64 only).
+    #[cfg(target_arch = "x86_64")]
+    #[serde(default)]
+    pub hyperv: Option<bool>,
     /// Enables the legacy programmable interval timer on x86_64.
     #[cfg(target_arch = "x86_64")]
     #[serde(default)]
@@ -240,6 +252,8 @@ impl From<MachineConfig> for MachineConfigUpdate {
             mem_size_mib: Some(cfg.mem_size_mib),
             smt: Some(cfg.smt),
             #[cfg(target_arch = "x86_64")]
+            hyperv: Some(cfg.hyperv),
+            #[cfg(target_arch = "x86_64")]
             pit: Some(cfg.pit),
             cpu_template: cfg.static_template(),
             track_dirty_pages: Some(cfg.track_dirty_pages),
@@ -272,6 +286,10 @@ impl MachineConfig {
         &self,
         update: &MachineConfigUpdate,
     ) -> Result<MachineConfig, MachineConfigError> {
+        #[cfg(target_arch = "x86_64")]
+        if update.hyperv.unwrap_or(self.hyperv) {
+            super::require_windows_support()?;
+        }
         let vcpu_count = update.vcpu_count.unwrap_or(self.vcpu_count);
 
         let smt = update.smt.unwrap_or(self.smt);
@@ -309,6 +327,8 @@ impl MachineConfig {
             mem_size_mib,
             smt,
             #[cfg(target_arch = "x86_64")]
+            hyperv: update.hyperv.unwrap_or(self.hyperv),
+            #[cfg(target_arch = "x86_64")]
             pit: update.pit.unwrap_or(self.pit),
             cpu_template,
             track_dirty_pages: update.track_dirty_pages.unwrap_or(self.track_dirty_pages),
@@ -323,6 +343,36 @@ impl MachineConfig {
 mod tests {
     use crate::cpu_config::templates::{CpuTemplateType, CustomCpuTemplate, StaticCpuTemplate};
     use crate::vmm_config::machine_config::MachineConfig;
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    #[cfg(feature = "windows")]
+    fn hyperv_put_and_patch() {
+        use super::MachineConfigUpdate;
+
+        let put: MachineConfig =
+            serde_json::from_str(r#"{"vcpu_count":2,"mem_size_mib":2048}"#).unwrap();
+        assert!(!put.hyperv);
+        let enable: MachineConfigUpdate = serde_json::from_str(r#"{"hyperv":true}"#).unwrap();
+        assert!(!enable.is_empty());
+        let enabled = put.update(&enable).unwrap();
+        assert!(enabled.hyperv);
+        assert!(
+            enabled
+                .update(&MachineConfigUpdate::default())
+                .unwrap()
+                .hyperv
+        );
+        let disable: MachineConfigUpdate = serde_json::from_str(r#"{"hyperv":false}"#).unwrap();
+        assert!(!enabled.update(&disable).unwrap().hyperv);
+        assert!(!enabled.update(&put.into()).unwrap().hyperv);
+        let encoded = serde_json::to_string(&enabled).unwrap();
+        assert!(
+            serde_json::from_str::<MachineConfig>(&encoded)
+                .unwrap()
+                .hyperv
+        );
+    }
 
     #[cfg(target_arch = "x86_64")]
     #[test]
