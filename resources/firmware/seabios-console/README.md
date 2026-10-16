@@ -71,7 +71,8 @@ backing bytes as VGA planes.
 The implementation does not yet qualify every historical VGA mode. In particular
 CGA interleaved modes, programmable character blink, underline, and
 pixel-panning behaviour require further coverage. Passing device tests is not
-evidence that Windows installation or a firmware boot has passed.
+evidence that Windows installation or a firmware boot has passed. See the
+[validation record](../../../docs/windows-validation.md) for the guest tests.
 
 ## References and build evidence
 

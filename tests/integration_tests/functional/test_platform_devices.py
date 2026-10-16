@@ -204,54 +204,6 @@ def test_console_boot_and_restore(
     assert not (Path(rejected.chroot()) / "console.sock").exists()
 
 
-@pin_guest_kernel(GUEST_KERNEL_DEFAULT)
-@pytest.mark.parametrize(
-    "windows_source", [False, True], ids=["default-to-windows", "windows-to-default"]
-)
-def test_linux_snapshot_across_windows_capability(
-    microvm_factory,
-    guest_kernel,
-    rootfs,
-    pci_enabled,
-    windows_binary_dir,
-    default_binary_dir,
-    windows_source,
-    record_property,
-):
-    """Restore an ordinary Linux snapshot in the other capability build."""
-    source_dir, restore_dir = (
-        (windows_binary_dir, default_binary_dir)
-        if windows_source
-        else (default_binary_dir, windows_binary_dir)
-    )
-    record_property("snapshot_source_bin", str(source_dir / "firecracker"))
-    record_property("snapshot_restore_bin", str(restore_dir / "firecracker"))
-    vm = microvm_factory.build(
-        guest_kernel,
-        rootfs,
-        pci=pci_enabled,
-        fc_binary_path=source_dir / "firecracker",
-        jailer_binary_path=source_dir / "jailer",
-    )
-    vm.spawn()
-    vm.basic_config()
-    vm.add_net_iface()
-    vm.start()
-    vm.ssh.check_output("true")
-    snapshot = vm.snapshot_full()
-    vm.kill()
-
-    restored = microvm_factory.build(
-        pci=pci_enabled,
-        fc_binary_path=restore_dir / "firecracker",
-        jailer_binary_path=restore_dir / "jailer",
-    )
-    restored.spawn()
-    restored.restore_from_snapshot(snapshot, resume=True)
-    assert restored.state == "Running"
-    restored.ssh.check_output("true")
-
-
 @retry(stop=stop_after_delay(5), wait=wait_fixed(0.01), reraise=True)
 def _ready(process, path, vm, *, mode=None):
     assert process.poll() is None
@@ -348,7 +300,12 @@ def platform_helpers(microvm_factory, variable_helper):
 
 @pytest.mark.skipif(platform.machine() != "x86_64", reason="AMD64 platform")
 def test_protected_services_restore_generation(
-    microvm_factory, platform_boot_image, platform_helpers, windows_binaries
+    microvm_factory,
+    platform_boot_image,
+    platform_helpers,
+    windows_binaries,
+    default_binary_dir,
+    record_property,
 ):
     """Restore real swtpm/helper state and reject a stale destination generation."""
     vm = microvm_factory.build(pci=True, **windows_binaries)
@@ -356,6 +313,17 @@ def test_protected_services_restore_generation(
     _configure(vm, platform_boot_image, {"tpm": tpm, "uefi-vars": variables})
     snapshot = _snapshot(vm)
     vm.kill()
+
+    record_property("default_firecracker_bin", str(default_binary_dir / "firecracker"))
+    rejected = microvm_factory.build(
+        pci=True,
+        fc_binary_path=default_binary_dir / "firecracker",
+        jailer_binary_path=default_binary_dir / "jailer",
+    )
+    with pytest.raises(RuntimeError, match="windows build feature"):
+        _load(rejected, snapshot)
+    rejected.mark_killed()
+
     generation = json.loads(store.read_text(encoding="utf-8"))["generation"]
     restored = microvm_factory.build(pci=True, **windows_binaries)
     tpm, variables, destination, _helper = platform_helpers(restored, store)
@@ -398,3 +366,51 @@ def test_protected_services_restore_generation(
         )
     restored.check_log_message("UEFI variable service failed")
     restored.mark_killed()
+
+
+@pin_guest_kernel(GUEST_KERNEL_DEFAULT)
+@pytest.mark.parametrize(
+    "windows_source", [False, True], ids=["default-to-windows", "windows-to-default"]
+)
+def test_linux_snapshot_across_windows_capability(
+    microvm_factory,
+    guest_kernel,
+    rootfs,
+    pci_enabled,
+    windows_binary_dir,
+    default_binary_dir,
+    windows_source,
+    record_property,
+):
+    """Restore an ordinary Linux snapshot in the other capability build."""
+    source_dir, restore_dir = (
+        (windows_binary_dir, default_binary_dir)
+        if windows_source
+        else (default_binary_dir, windows_binary_dir)
+    )
+    record_property("snapshot_source_bin", str(source_dir / "firecracker"))
+    record_property("snapshot_restore_bin", str(restore_dir / "firecracker"))
+    vm = microvm_factory.build(
+        guest_kernel,
+        rootfs,
+        pci=pci_enabled,
+        fc_binary_path=source_dir / "firecracker",
+        jailer_binary_path=source_dir / "jailer",
+    )
+    vm.spawn()
+    vm.basic_config()
+    vm.add_net_iface()
+    vm.start()
+    vm.ssh.check_output("true")
+    snapshot = vm.snapshot_full()
+    vm.kill()
+
+    restored = microvm_factory.build(
+        pci=pci_enabled,
+        fc_binary_path=restore_dir / "firecracker",
+        jailer_binary_path=restore_dir / "jailer",
+    )
+    restored.spawn()
+    restored.restore_from_snapshot(snapshot, resume=True)
+    assert restored.state == "Running"
+    restored.ssh.check_output("true")

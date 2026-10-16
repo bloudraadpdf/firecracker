@@ -5,6 +5,9 @@ variables. It is not linked into Firecracker. The firmware uses EDK2's
 BSD-licensed `VirtMmCommunicationDxe` transport and `VariableSmmRuntimeDxe`
 client.
 
+See the [validation record](../../docs/windows-validation.md) for the tested
+Windows builds, Secure Boot checks and checkpoint results.
+
 ## Boundary
 
 The helper receives copied messages, never guest memory mappings or arbitrary
@@ -15,9 +18,11 @@ PKCS#7 verification, authenticated timestamps, PK/KEK/db/dbx hierarchy and
 variable policy. Secure Boot is forced and custom mode is disabled after host
 provisioning. Host administrators and the VMM are trusted.
 
-The AMD64 transport occupies the reserved page at `0xfed50000`; registers follow
-`OvmfPkg/Include/IndustryStandard/QemuUefiVars.h`. The separate TPM CRB page is
-`0xfed40000`. See the [VMM service contract](../../docs/windows-secure-boot.md).
+The transport occupies one reserved page: `0xfed50000` on AMD64 or `0x10001000`
+on ARM64. Registers follow `OvmfPkg/Include/IndustryStandard/QemuUefiVars.h`;
+firmware uses DMA messages. The separate TPM CRB page is `0xfed40000` on AMD64
+or `0x10000000` on ARM64. The helper protocol is independent of architecture;
+see the [ARM64 guide](../../docs/windows-arm64.md#optional-security-devices).
 
 ## IPC version 1
 

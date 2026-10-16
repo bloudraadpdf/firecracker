@@ -501,6 +501,60 @@
                 ]
             },
             {
+                "syscall": "setsockopt",
+                "comment": "Bound TPM control socket reads and writes during checkpoint and cancellation",
+                "args": [
+                    {
+                        "index": 1,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 1
+                    },
+                    {
+                        "index": 2,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 20
+                    }
+                ]
+            },
+            {
+                "syscall": "setsockopt",
+                "comment": "Bound TPM control socket reads and writes during checkpoint and cancellation",
+                "args": [
+                    {
+                        "index": 1,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 1
+                    },
+                    {
+                        "index": 2,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 21
+                    }
+                ]
+            },
+            {
+                "syscall": "clock_nanosleep",
+                "comment": "Bounded relative wait for protected-variable checkpoint IPC",
+                "args": [
+                    {
+                        "index": 0,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 1
+                    },
+                    {
+                        "index": 1,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 0
+                    }
+                ]
+            },
+            {
                 "syscall": "timerfd_create",
                 "comment": "Needed for creating rate limiters during device hotplug",
                 "args": [

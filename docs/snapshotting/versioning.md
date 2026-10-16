@@ -83,6 +83,18 @@ The current implementation relies on the
 
 ## Snapshot compatibility
 
+This fork uses format32.0.0. The x86 PIT state is optional and records whether
+the timer exists; restore uses that saved hardware choice. The format also
+contains optional virtio-input state, the ARM64 console/security topology and
+the optional AMD64 VGA expansion ROM. The input device owns its pending frames,
+accepted and delivered keys, position and guest/pending lock LEDs. Console
+restore reuses that saved PCI backend. The AMD64 display saves two MMIO mappings
+and a typed optional ROM containing its bytes, mapping and PCI ROM BAR state; an
+absent ROM has no mapping or ROM BAR. The console's saved configuration also
+records the optional ROM path. Format29.0.0, format30.0.0 and format31.0.0 files
+require their matching older binaries; format32 does not decode them. Snapshot
+state remains specific to its CPU architecture.
+
 ### Host kernel
 
 Snapshots can be saved and restored on the same kernel version without any

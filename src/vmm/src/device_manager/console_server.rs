@@ -3,7 +3,9 @@
 
 //! Bounded local display/input protocol; remote sessions belong to the sidecar.
 
-use std::collections::{BTreeSet, HashMap};
+#[cfg(target_arch = "x86_64")]
+use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
@@ -16,13 +18,25 @@ use event_manager::{EventOps, Events, MutEventSubscriber};
 use utils::time::TimerFd;
 use vmm_sys_util::epoll::EventSet;
 
+use super::console_input::ConsoleInput;
+#[cfg(target_arch = "x86_64")]
 use super::console_optical::OpticalDevice;
 use crate::devices::display::Vga;
+#[cfg(all(target_arch = "x86_64", test))]
 use crate::devices::legacy::I8042Device;
 
 const CLIENT_LIMIT: usize = 4;
 const REQUEST_SIZE: usize = 12;
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[cfg(test)]
+fn request(op: u8, payload: &[u8]) -> [u8; REQUEST_SIZE] {
+    let mut request = [0; REQUEST_SIZE];
+    request[..4].copy_from_slice(b"FCC1");
+    request[4] = op;
+    request[5..5 + payload.len()].copy_from_slice(payload);
+    request
+}
 
 #[derive(Debug)]
 struct Client {
@@ -76,19 +90,21 @@ pub struct ConsoleServer {
     timer: TimerFd,
     clients: HashMap<RawFd, Client>,
     vga: Arc<Mutex<Vga>>,
-    input: Arc<Mutex<I8042Device>>,
+    input: ConsoleInput,
+    #[cfg(target_arch = "x86_64")]
     optical: Option<Arc<Mutex<OpticalDevice>>>,
+    #[cfg(target_arch = "x86_64")]
     held: BTreeSet<(u8, bool)>,
+    #[cfg(target_arch = "x86_64")]
     release_pending: bool,
-    tablet: Option<Arc<Mutex<super::console_usb::UsbDevice>>>,
 }
 
 impl ConsoleServer {
-    pub fn new(
+    pub(super) fn new(
         path: &Path,
         vga: Arc<Mutex<Vga>>,
-        input: Arc<Mutex<I8042Device>>,
-        optical: Option<Arc<Mutex<OpticalDevice>>>,
+        input: ConsoleInput,
+        #[cfg(target_arch = "x86_64")] optical: Option<Arc<Mutex<OpticalDevice>>>,
     ) -> io::Result<Self> {
         let listener = UnixListener::bind(path)?;
         let socket_path = SocketPath::capture(path)?;
@@ -104,10 +120,12 @@ impl ConsoleServer {
             clients: HashMap::new(),
             vga,
             input,
+            #[cfg(target_arch = "x86_64")]
             optical,
+            #[cfg(target_arch = "x86_64")]
             held: BTreeSet::new(),
+            #[cfg(target_arch = "x86_64")]
             release_pending: false,
-            tablet: None,
         })
     }
 
@@ -120,25 +138,20 @@ impl ConsoleServer {
     }
 
     fn valid_key(code: u8, extended: bool) -> bool {
-        if matches!(code, 0xe0 | 0xe1) {
-            !extended
-        } else {
-            I8042Device::valid_key(code, extended)
-        }
+        crate::devices::keyboard::evdev_key(code, extended).is_some()
     }
 
+    #[cfg(target_arch = "x86_64")]
     pub fn held_keys(&self) -> Vec<(u8, bool)> {
         self.held.iter().copied().collect()
     }
 
-    pub fn set_tablet(&mut self, tablet: Arc<Mutex<super::console_usb::UsbDevice>>) {
-        self.tablet = Some(tablet);
-    }
-
+    #[cfg(target_arch = "x86_64")]
     pub fn release_pending(&self) -> bool {
         self.release_pending
     }
 
+    #[cfg(target_arch = "x86_64")]
     pub fn restore_release_pending(&mut self, pending: bool) {
         self.release_pending = pending;
         let period = if pending {
@@ -149,6 +162,7 @@ impl ConsoleServer {
         self.timer.arm(period, Some(period));
     }
 
+    #[cfg(target_arch = "x86_64")]
     pub fn restore_held(&mut self, held: &[(u8, bool)]) -> io::Result<()> {
         if held.len() > 128
             || held
@@ -173,36 +187,47 @@ impl ConsoleServer {
     }
 
     fn release_keys(&mut self) -> bool {
-        let mut input = self.input.lock().unwrap();
-        let mut released = Vec::new();
-        for &(code, extended) in &self.held {
-            let result = if code == 0xe0 {
-                input.inject_print_screen(false)
-            } else {
-                input.inject_key(code, extended, false)
-            };
-            if result.is_ok() {
-                released.push((code, extended));
+        match &self.input {
+            #[cfg(target_arch = "x86_64")]
+            ConsoleInput::Legacy { keyboard, tablet } => {
+                let mut input = keyboard.lock().unwrap();
+                self.held.retain(|&(code, extended)| {
+                    let result = if code == 0xe0 {
+                        input.inject_print_screen(false)
+                    } else {
+                        input.inject_key(code, extended, false)
+                    };
+                    result.is_err()
+                });
+                let keys_released = self.held.is_empty();
+                drop(input);
+                let tablet_released = tablet
+                    .as_ref()
+                    .is_none_or(|tablet| tablet.lock().unwrap().release().is_ok());
+                let released = keys_released && tablet_released;
+                self.restore_release_pending(!released);
+                released
+            }
+            #[cfg(any(target_arch = "aarch64", test))]
+            ConsoleInput::Virtio(input) => {
+                input
+                    .lock()
+                    .unwrap()
+                    .as_mut_any()
+                    .downcast_mut::<crate::devices::virtio::input::Input>()
+                    .unwrap()
+                    .release_all()
+                    .unwrap();
+                true
             }
         }
-        for key in released {
-            self.held.remove(&key);
-        }
-        let keys_released = self.held.is_empty();
-        drop(input);
-        let tablet_released = self
-            .tablet
-            .as_ref()
-            .is_none_or(|tablet| tablet.lock().unwrap().release().is_ok());
-        let released = keys_released && tablet_released;
-        self.restore_release_pending(!released);
-        released
     }
 
     fn handle(&mut self, request: &[u8; REQUEST_SIZE]) -> Vec<u8> {
         if &request[..4] != b"FCC1" {
             return Self::acknowledge(1);
         }
+        #[cfg(target_arch = "x86_64")]
         if matches!(request[4], 1 | 6) && self.release_pending && !self.release_keys() {
             return Self::acknowledge(2);
         }
@@ -229,17 +254,11 @@ impl ConsoleServer {
                 if !Self::valid_key(code, extended) {
                     return Self::acknowledge(1);
                 }
-                let mut input = self.input.lock().unwrap();
-                let result = match code {
-                    0xe1 if pressed => input.inject_pause(),
-                    0xe1 => return Self::acknowledge(0),
-                    0xe0 => input.inject_print_screen(pressed),
-                    _ => input.inject_key(code, extended, pressed),
-                };
-                if result.is_err() {
+                if !self.input.key(code, extended, pressed) {
                     return Self::acknowledge(2);
                 }
-                if code != 0xe1 {
+                #[cfg(target_arch = "x86_64")]
+                if matches!(&self.input, ConsoleInput::Legacy { .. }) && code != 0xe1 {
                     if pressed {
                         self.held.insert((code, extended));
                     } else {
@@ -252,6 +271,7 @@ impl ConsoleServer {
                 let released = self.release_keys();
                 Self::acknowledge(if released { 0 } else { 2 })
             }
+            #[cfg(target_arch = "x86_64")]
             4 if request[5..].iter().all(|byte| *byte == 0) => {
                 let result = self
                     .optical
@@ -261,26 +281,15 @@ impl ConsoleServer {
             }
             5 if request[5..].iter().all(|byte| *byte == 0) => {
                 let mut response = Self::acknowledge(0);
-                response[8] = u8::from(
-                    self.tablet
-                        .as_ref()
-                        .is_some_and(|tablet| tablet.lock().unwrap().tablet_ready()),
-                );
-                let input = self.input.lock().unwrap();
-                response[9] = input.keyboard_leds();
-                response[10] = input.keyboard_pending_leds();
+                response[8..11].copy_from_slice(&self.input.feedback());
                 response
             }
             6 if request[5] <= 7 && request[10] != 128 && request[11] == 0 => {
                 let x = u16::from_le_bytes([request[6], request[7]]);
                 let y = u16::from_le_bytes([request[8], request[9]]);
-                let accepted = self.tablet.as_ref().is_some_and(|tablet| {
-                    tablet
-                        .lock()
-                        .unwrap()
-                        .pointer(x, y, request[5], i8::from_ne_bytes([request[10]]))
-                        .is_ok()
-                });
+                let accepted =
+                    self.input
+                        .pointer(x, y, request[5], i8::from_ne_bytes([request[10]]));
                 Self::acknowledge(if accepted { 0 } else { 2 })
             }
             _ => Self::acknowledge(1),
@@ -385,6 +394,7 @@ impl MutEventSubscriber for ConsoleServer {
             self.accept(ops);
         } else if event.fd() == self.timer.as_raw_fd() {
             self.timer.read();
+            #[cfg(target_arch = "x86_64")]
             if self.release_pending {
                 self.release_keys();
             }
@@ -403,6 +413,7 @@ impl MutEventSubscriber for ConsoleServer {
 }
 
 #[cfg(test)]
+#[cfg(target_arch = "x86_64")]
 mod tests {
     use std::ops::{Deref, DerefMut};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -428,7 +439,10 @@ mod tests {
             let server = ConsoleServer::new(
                 &path,
                 Arc::new(Mutex::new(Vga::default())),
-                Arc::new(Mutex::new(input)),
+                ConsoleInput::Legacy {
+                    keyboard: Arc::new(Mutex::new(input)),
+                    tablet: None,
+                },
                 None,
             )
             .unwrap();
@@ -449,16 +463,15 @@ mod tests {
         }
     }
 
-    fn request(op: u8, payload: &[u8]) -> [u8; REQUEST_SIZE] {
-        let mut request = [0; REQUEST_SIZE];
-        request[..4].copy_from_slice(b"FCC1");
-        request[4] = op;
-        request[5..5 + payload.len()].copy_from_slice(payload);
-        request
+    fn keyboard(server: &ConsoleServer) -> &Arc<Mutex<I8042Device>> {
+        let ConsoleInput::Legacy { keyboard, .. } = &server.input else {
+            panic!("expected PS/2");
+        };
+        keyboard
     }
 
     fn drain_input(server: &ConsoleServer) -> Vec<u8> {
-        let mut input = server.input.lock().unwrap();
+        let mut input = keyboard(server).lock().unwrap();
         let mut result = Vec::new();
         loop {
             let mut status = [0];
@@ -527,10 +540,9 @@ mod tests {
             ConsoleServer::acknowledge(0)
         );
         assert_eq!(drain_input(&original), [0x14, 0xe0, 0x71]);
-        let state = original.input.lock().unwrap().save_state();
+        let state = keyboard(&original).lock().unwrap().save_state();
         let mut restored = Fixture::new();
-        restored
-            .input
+        keyboard(&restored)
             .lock()
             .unwrap()
             .restore_state(&state)
@@ -549,7 +561,7 @@ mod tests {
         let mut original = Fixture::new();
         assert_eq!(original.handle(&request(5, &[]))[9], 0);
         {
-            let mut input = original.input.lock().unwrap();
+            let mut input = keyboard(&original).lock().unwrap();
             input.write(0, 0, &[0xed]);
             input.write(0, 0, &[6]);
         }
@@ -559,10 +571,9 @@ mod tests {
         );
         original.handle(&request(1, &[0x58, 0, 1]));
         assert_eq!(original.handle(&request(5, &[]))[10], 4);
-        let state = original.input.lock().unwrap().save_state();
+        let state = keyboard(&original).lock().unwrap().save_state();
         let mut restored = Fixture::new();
-        restored
-            .input
+        keyboard(&restored)
             .lock()
             .unwrap()
             .restore_state(&state)
@@ -592,10 +603,9 @@ mod tests {
             ConsoleServer::acknowledge(2)
         );
         assert_eq!(original.held_keys(), [(0x1c, false)]);
-        let state = original.input.lock().unwrap().save_state();
+        let state = keyboard(&original).lock().unwrap().save_state();
         let mut restored = Fixture::new();
-        restored
-            .input
+        keyboard(&restored)
             .lock()
             .unwrap()
             .restore_state(&state)
@@ -753,3 +763,7 @@ mod tests {
         manager.remove_subscriber(id).unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "console_server/input_tests.rs"]
+mod input_tests;

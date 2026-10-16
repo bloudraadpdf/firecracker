@@ -275,7 +275,7 @@ pub fn serve(
                 if request[0] != 0 {
                     let state = backend.input_state()?;
                     keyboard.set_leds(state.leds);
-                    pending_leds = state.pending_leds;
+                    pending_leds = state.pending_leds & 6;
                 }
                 if request[0] != 0 && !matches!(keysym, 0xffe5 | 0xff7f) {
                     let deadline =
@@ -287,7 +287,7 @@ pub fn serve(
                         std::thread::sleep(std::time::Duration::from_millis(1));
                         let state = backend.input_state()?;
                         keyboard.set_leds(state.leds);
-                        pending_leds = state.pending_leds;
+                        pending_leds = state.pending_leds & 6;
                     }
                 }
                 keyboard.event(keysym, request[0] != 0, |code, extended, pressed| {

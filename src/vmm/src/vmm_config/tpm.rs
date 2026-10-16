@@ -1,7 +1,7 @@
 // Copyright 2026 Bloudraad.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Optional AMD64 TPM backend supplied by the launcher.
+//! Optional TPM backend supplied by the launcher.
 
 use std::path::PathBuf;
 

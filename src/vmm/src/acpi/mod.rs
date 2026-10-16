@@ -125,7 +125,7 @@ impl AcpiTableWriter<'_> {
         Ok(addr)
     }
 
-    #[cfg(all(target_arch = "x86_64", feature = "windows"))]
+    #[cfg(feature = "windows")]
     fn build_tpm2(&mut self, allocator: &mut ResourceAllocator) -> Result<u64, AcpiError> {
         let mut table = acpi_tables::Tpm2::new(
             OEM_ID,

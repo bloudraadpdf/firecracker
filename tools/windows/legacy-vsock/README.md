@@ -169,3 +169,6 @@ records its final SHA-256 in the transcript.
 `win7-connect.ps1` also accepts `-Prefix` and `-Tag` for newer Windows with
 signed Viosock drivers. The [egress harness](../egress/README.md) provides the
 shared offline verifier and the separate TAP regression procedure.
+
+The tested profiles and evidence are in the
+[Windows validation record](../../../docs/windows-validation.md).

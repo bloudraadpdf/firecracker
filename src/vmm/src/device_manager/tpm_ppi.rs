@@ -244,7 +244,10 @@ mod tests {
         let mut bytes = Vec::new();
         append(&mut bytes).unwrap();
         assert!(contains(&bytes, b"_DSM\x0c"));
-        assert!(contains(&bytes, b"PPIR\x00\x0c\x00\x01\xd5\xfe\x0a\x20"));
+        let mut region = b"PPIR\x00\x0c".to_vec();
+        region.extend_from_slice(&u32::try_from(MMIO_BASE + 0x100).unwrap().to_le_bytes());
+        region.extend_from_slice(&[0x0a, 0x20]);
+        assert!(contains(&bytes, &region));
         assert!(contains(
             &bytes,
             b"PPIR\x03PSTS\x20PFUN\x20PREV\x20POPR\x20PARG\x20PRET\x20PVAL\x20PRES\x20"

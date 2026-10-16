@@ -1389,10 +1389,12 @@ definitions:
     type: object
     additionalProperties: false
     description: |
-      Optional AMD64 VGA, PS/2 keyboard, USB absolute HID mouse and optical
-      installation hardware. Requires PCI,
-      at least 64 MiB guest memory and ordinary pages. Set through the startup
-      configuration file; there is no separate console configuration endpoint.
+      Optional graphical console. AMD64 attaches VGA, PS/2 keyboard, USB
+      absolute HID mouse and optional optical media. ARM64 attaches an MMIO
+      display and one combined virtio keyboard/absolute pointer with modern PCI;
+      its configuration accepts only socket_path. Both require PCI, at least
+      64 MiB and ordinary pages. Set through the startup configuration file;
+      there is no separate console configuration endpoint.
     required:
       - socket_path
     properties:
@@ -1401,12 +1403,14 @@ definitions:
         description: Private host Unix socket for the console bridge, at most 107 bytes.
       vga_rom_path:
         type: string
-        description: |
-          Optional host path to the SeaVGABIOS expansion ROM when CloudHv firmware
-          is explicitly selected. Required for SeaBIOS and legacy profiles.
+        description: >-
+          AMD64 host path to the SeaVGABIOS expansion ROM. Required for SeaBIOS
+          and when no firmware profile is selected; optional with explicit
+          cloud-hv firmware, whose GOP driver uses the display BARs directly.
+          Omission creates no ROM mapping or ROM BAR. Not accepted on ARM64.
       optical_image_path:
         type: string
-        description: Optional host path to a read-only installation ISO.
+        description: Optional AMD64 host path to a read-only installation ISO; not accepted on ARM64.
 
   FullVmConfiguration:
     type: object
