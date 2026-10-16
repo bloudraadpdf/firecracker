@@ -789,3 +789,9 @@ sudo env PYTHONPATH=tests HOME=$HOME ~/.local/bin/ipython3 -i tools/sandbox.py -
 > [!WARNING]
 >
 > **Notice this runs as root!**
+
+## Standalone tools and platform devices
+
+The normal build tests discover tracked standalone Rust tool workspaces.
+`test_tool_unittests` runs their unit tests and compiles their examples;
+`test_tool_clippy` checks their native GNU targets.
