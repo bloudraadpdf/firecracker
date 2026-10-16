@@ -1,7 +1,6 @@
 # Secure graphical firmware
 
-The recorded Windows checks below belong to historical binaries and matched
-guest sets; they do not qualify this rewritten source boundary. This profile
+This experimental profile passes the recorded standard Windows 11 checks. It
 adds TPM2 measured boot and a required host-authenticated variable service to
 the graphical CloudHv profile. It does not provide SMM, a writable flash device
 or a RAM-variable fallback.

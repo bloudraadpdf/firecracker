@@ -84,10 +84,9 @@ const E820_RAM: u32 = 1;
 const E820_RESERVED: u32 = 2;
 const MEMMAP_TYPE_RAM: u32 = 1;
 
-/// Fixed TPM CRB aperture.
+/// Fixed TPM CRB locality-zero page.
 pub const TPM_MEM_START: u64 = 0xfed4_0000;
-
-/// Fixed protected-variable register page.
+/// Fixed protected-variable and physical-presence register page.
 pub const UEFI_VARS_MEM_START: u64 = 0xfed5_0000;
 
 /// Errors thrown while configuring x86_64 system.

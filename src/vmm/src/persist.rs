@@ -158,10 +158,10 @@ pub struct GuestRegionUffdMapping {
 /// Errors related to saving and restoring Microvm state.
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum MicrovmStateError {
-    /// Cannot prepare devices for snapshot: {0}
-    PrepareDevices(#[from] PrepareSaveError),
     /// Cannot capture device state: {0}
     SaveDevices(crate::device_manager::DeviceManagerSaveError),
+    /// Cannot prepare devices for snapshot: {0}
+    PrepareDevices(#[from] PrepareSaveError),
     /// Operation not allowed: {0}
     NotAllowed(String),
     /// Cannot restore devices: {0}
@@ -195,7 +195,7 @@ pub enum CreateSnapshotError {
 }
 
 /// Snapshot version
-pub const SNAPSHOT_VERSION: Version = Version::new(26, 0, 0);
+pub const SNAPSHOT_VERSION: Version = Version::new(32, 0, 0);
 
 /// Creates a Microvm snapshot.
 pub fn create_snapshot(
@@ -417,7 +417,6 @@ pub fn restore_from_snapshot(
 ) -> Result<Arc<Mutex<Vmm>>, RestoreFromSnapshotError> {
     let mut microvm_state = snapshot_state_from_file(&params.snapshot_path)?;
     microvm_state.validate_windows_support()?;
-    #[cfg(target_arch = "x86_64")]
     if params.tpm.is_some() || params.uefi_vars.is_some() {
         crate::vmm_config::require_windows_support()?;
     }
@@ -462,32 +461,29 @@ pub fn restore_from_snapshot(
             .uds_path
             .clone_from(&vsock_override.uds_path);
     }
-    #[cfg(target_arch = "x86_64")]
-    {
-        if microvm_state.device_states.tpm.is_some() != params.tpm.is_some() {
-            return Err(SnapshotStateFromFileError::TpmBackend.into());
-        }
-        if let Some(tpm) = &params.tpm {
-            tpm.validate().map_err(SnapshotStateFromFileError::Open)?;
-        }
-        vm_resources.tpm = params.tpm.clone();
-        if microvm_state.device_states.uefi_vars.is_some() != params.uefi_vars.is_some() {
-            return Err(SnapshotStateFromFileError::UefiVarsBackend.into());
-        }
-        vm_resources.uefi_vars =
-            params
-                .uefi_vars
-                .as_ref()
-                .map(|restore| crate::vmm_config::uefi_vars::UefiVarsConfig {
-                    socket_path: restore.socket_path.clone(),
-                });
-        if let Some(config) = &vm_resources.uefi_vars {
-            config
-                .validate()
-                .map_err(SnapshotStateFromFileError::Open)?;
-        }
-        vm_resources.uefi_vars_restore = params.uefi_vars.clone();
+    if microvm_state.device_states.tpm.is_some() != params.tpm.is_some() {
+        return Err(SnapshotStateFromFileError::TpmBackend.into());
     }
+    if let Some(tpm) = &params.tpm {
+        tpm.validate().map_err(SnapshotStateFromFileError::Open)?;
+    }
+    vm_resources.tpm = params.tpm.clone();
+    if microvm_state.device_states.uefi_vars.is_some() != params.uefi_vars.is_some() {
+        return Err(SnapshotStateFromFileError::UefiVarsBackend.into());
+    }
+    vm_resources.uefi_vars =
+        params
+            .uefi_vars
+            .as_ref()
+            .map(|restore| crate::vmm_config::uefi_vars::UefiVarsConfig {
+                socket_path: restore.socket_path.clone(),
+            });
+    if let Some(config) = &vm_resources.uefi_vars {
+        config
+            .validate()
+            .map_err(SnapshotStateFromFileError::Open)?;
+    }
+    vm_resources.uefi_vars_restore = params.uefi_vars.clone();
     let track_dirty_pages = params.track_dirty_pages;
 
     let vcpu_count = microvm_state
@@ -572,10 +568,8 @@ pub fn restore_from_snapshot(
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum SnapshotStateFromFileError {
     /// A dedicated variable-service backend and expected generation are required exactly when the snapshot contains protected variables.
-    #[cfg(target_arch = "x86_64")]
     UefiVarsBackend,
     /// A dedicated TPM backend is required exactly when the snapshot contains TPM state.
-    #[cfg(target_arch = "x86_64")]
     TpmBackend,
     /// Failed to open snapshot file: {0}
     Open(#[from] std::io::Error),
@@ -763,6 +757,9 @@ mod tests {
     #[cfg(target_arch = "aarch64")]
     use crate::construct_kvm_mpidrs;
     use crate::devices::virtio::block::CacheType;
+    #[cfg(target_arch = "aarch64")]
+    #[cfg(feature = "windows")]
+    use crate::snapshot::Persist;
     use crate::vmm_config::balloon::BalloonDeviceConfig;
     use crate::vmm_config::net::NetworkInterfaceConfig;
     use crate::vmm_config::vsock::tests::default_config;
@@ -825,7 +822,6 @@ mod tests {
         vmm
     }
 
-    #[cfg(target_arch = "x86_64")]
     #[test]
     #[cfg(feature = "windows")]
     fn maximum_optional_buffers_fit_snapshot_reader() {
@@ -833,18 +829,26 @@ mod tests {
         use crate::vmm_config::console::ConsoleConfig;
         use crate::vmm_config::machine_config::MAX_SUPPORTED_VCPUS;
         use crate::vstate::vm::tests::setup_vm_with_memory;
+        #[cfg(target_arch = "x86_64")]
         use std::io::Write;
         use vmm_sys_util::tempdir::TempDir;
 
         let directory = TempDir::new().unwrap();
-        let rom = TempFile::new().unwrap();
-        let mut bytes: Vec<u8> = (0..=255).cycle().take(65536).collect();
-        bytes[..3].copy_from_slice(&[0x55, 0xaa, 128]);
-        let checksum = bytes.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte));
-        bytes[65535] = bytes[65535].wrapping_sub(checksum);
-        rom.as_file().write_all(&bytes).unwrap();
+        #[cfg(target_arch = "x86_64")]
+        let rom = {
+            let rom = TempFile::new().unwrap();
+            let mut bytes: Vec<u8> = (0..=255).cycle().take(65536).collect();
+            bytes[..3].copy_from_slice(&[0x55, 0xaa, 128]);
+            let checksum = bytes.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte));
+            bytes[65535] = bytes[65535].wrapping_sub(checksum);
+            rom.as_file().write_all(&bytes).unwrap();
+            rom
+        };
         let mut vm = setup_vm_with_memory(0x1000);
+        #[cfg(target_arch = "x86_64")]
         vm.setup_irqchip(true).unwrap();
+        #[cfg(target_arch = "aarch64")]
+        vm.setup_irqchip(1).unwrap();
         let vm = Arc::new(vm);
         let mut events = EventManager::new().unwrap();
         let mut manager = DeviceManager::new(
@@ -862,16 +866,31 @@ mod tests {
                 &vm,
                 &ConsoleConfig {
                     socket_path: directory.as_path().join("console.sock"),
+                    #[cfg(target_arch = "x86_64")]
                     vga_rom_path: Some(rom.as_path().to_owned()),
+                    #[cfg(target_arch = "x86_64")]
                     optical_image_path: None,
                 },
                 None,
+                #[cfg(target_arch = "aarch64")]
+                &mut events,
             )
             .unwrap();
         manager.console.as_ref().unwrap().fill_test_framebuffer();
         let mut state = MicrovmState {
             device_states: crate::device_manager::DevicesState {
                 console: manager.save_console(),
+                #[cfg(target_arch = "aarch64")]
+                virtio_state: {
+                    let crate::device_manager::VirtioDevices::Pci(pci) = &manager.virtio_devices
+                    else {
+                        panic!("expected PCI");
+                    };
+                    let mut saved = pci.save();
+                    saved.input_device.as_mut().unwrap().device_state =
+                        crate::devices::virtio::input::persist::InputState::maximum_test_state();
+                    crate::device_manager::VirtioDevicesState::Pci(saved)
+                },
                 ..Default::default()
             },
             // Maximum supported count, without running guest instructions. Hardware

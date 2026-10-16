@@ -181,8 +181,8 @@ the KVM clock. Unsupported configurations fail before execution. The guest must
 also enable and use those facilities.
 
 Snapshots store PIT state only when the device exists. Restore uses that saved
-choice, with no independent PIT override. Format 12 is incompatible with format
-11; create fresh snapshots when updating this fork.
+choice, with no independent PIT override. Format 32 is incompatible with format
+31; create fresh snapshots when updating this fork.
 
 ## Snapshot versioning
 

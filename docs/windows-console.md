@@ -1,18 +1,21 @@
 # Windows console (experimental)
 
-The optional AMD64 console provides a private display/input endpoint without
-guest networking or vsock. It adds VGA/VBE graphics, a PS/2 keyboard, a USB HID
-pointer and optional read-only ATAPI installation media. This is a device and
-installation interface; each Windows edition still requires guest qualification.
+The optional console provides a private display/input endpoint without guest
+networking or vsock. The AMD64 profile adds VGA/VBE graphics, a PS/2 keyboard, a
+USB HID pointer and optional read-only ATAPI installation media. The ARM64
+profile adds an MMIO display and one combined virtio keyboard/absolute pointer.
+The recorded AMD64 results are historical; see the matrix below and the
+[current validation boundary](windows-validation.md#current-integration-candidate).
+ARM64 guest qualification remains pending.
 
 The AMD64 device path is:
 
 ```text
-external console client
+remote browser or VNC viewer
              |
      SSH tunnel / HTTPS gateway
              |
-     external console bridge
+     host console bridge (RFB)
              |
       private Unix socket
              |
@@ -75,8 +78,71 @@ SHA-256 digest and the VGA ROM contents when a ROM is configured.
 
 Follow the [console bridge instructions](../tools/windows/console/README.md) for
 SSH, RFB, browser access, screenshots and keyboard input. The bridge runs
-outside the VMM. TCP listeners accept only loopback addresses; a remote
+outside the VMM. Its TCP listeners accept only loopback addresses. A remote
 deployment supplies authentication and TLS through its gateway or SSH.
+
+### ARM64
+
+Build the
+[ARM64 graphical firmware](../resources/firmware/cloudhv-secureboot/arm64/README.md).
+Select `ArmVirtCloudHvConsole.dsc`, or `ArmVirtCloudHvSecure.dsc` with the TPM
+and protected variable devices. The original `ArmVirtCloudHv.dsc` is headless;
+console JSON alone does not select a graphical firmware build.
+
+Add only the private console socket to the ARM64 startup configuration:
+
+```json
+{
+  "console": {
+    "socket_path": "console.sock"
+  }
+}
+```
+
+Use `--enable-pci`, modern PCI, at least 64 MiB RAM and ordinary pages. ARM64
+uses 64 MiB as a device-attachment minimum, not a Windows installation minimum.
+It rejects `vga_rom_path` and `optical_image_path`. The device profile contains
+no VGA option ROM, legacy VGA aperture, PS/2 controller, USB controller, ISA
+bridge, A20 port or IDE controller. The display has a framebuffer BAR and a
+register BAR; the keyboard and pointer share one virtio PCI function.
+
+```text
+private console socket
+          |
+     ConsoleServer
+       |       |
+ MMIO display  virtio-input (keyboard + absolute pointer)
+       |       |
+       +---+---+
+           |
+      ARM64 firmware / Windows
+```
+
+Firmware must provide the matching MMIO GOP and virtio input drivers before
+Windows starts. Windows needs the signed ARM64 virtio-input driver. The pinned
+source accepts the combined keyboard/pointer capabilities; a source review and
+cross-build do not prove signed-driver loading or ARM64 guest operation. See the
+[ARM64 prerequisites and validation limits](windows-arm64.md).
+
+A direct ARM64 installation path has not been qualified. It needs prepared
+GPT/FAT media on virtio block storage; this profile has no optical device.
+Preparation must handle split WIM files and load the matching signed ARM64
+storage and input drivers in both WinPE and the installed image. A driver
+directory beside `boot.wim` does not load those drivers. The AMD64 ATAPI ISO
+procedure below does not apply.
+
+The same external bridge, SSH routing and FCC1 protocol serve both profiles.
+FCC1 keys are PS/2 set-2 physical codes; Firecracker translates them to evdev
+for ARM64, including Windows keys, keypad keys, PrintScreen and Pause. Pointer
+coordinates are 0..32767. Guest LEDs retain the existing PS/2 wire order. Full
+input queues return a retry response without accepting half an update. On
+disconnect, Input finishes a started report, cancels untouched reports and
+queues releases for the resulting pressed keys. It retains lock transitions
+already written to the guest and cancels feedback waits for discarded makes.
+Releases remain queued until guest buffers return; firmware does not have to
+notify the host when it replenishes those buffers. The event queue is required;
+the status queue is optional for virtio input. The graphical firmware must send
+real LED status for the bridge's lock-key synchronisation.
 
 ## AMD64 installation and reboot
 
@@ -148,15 +214,12 @@ partial images. Existing output directories are refused. Keep `media.rs` beside
 both standalone tool sources; it supplies shared checksum, boot-catalogue and
 cleanup helpers.
 
+`win11` selects the tested IoT Enterprise LTSC image. For standard Enterprise
+Evaluation and its 2023-signed boot files, use `win11-enterprise-26h2` with the
+[secure firmware and media procedure](../resources/firmware/cloudhv-secureboot/README.md#current-windows-installation-media).
 The accepted source digests are in
 [`profile_config`](../tools/windows/prepare-nt6.rs); the tool rejects other
-images. Preparing installation media does not establish a successful
-installation or Windows hardware-requirement qualification.
-
-For standard Windows 11 Enterprise Evaluation and its 2023-signed boot files,
-use `win11-enterprise-26h2` with the
-[secure firmware and media procedure](../resources/firmware/cloudhv-secureboot/README.md#current-windows-installation-media).
-This is separate from the `win11` IoT Enterprise LTSC media profile.
+images.
 
 For unattended installation, the
 [preparation tool](../tools/windows/README.md#prepare-an-unattended-installation)
@@ -206,9 +269,24 @@ would otherwise select installation media again.
 AMD64 console snapshots contain display memory and registers, keyboard/mouse
 queues, held input, pending releases, keyboard LEDs and pending lock updates,
 USB controller/HID state, PCI state, optical transfer state and media identity.
-The current snapshot format is 26.0.0. Display state adds about 16 MiB; the
+The current snapshot format is 32.0.0. Display state adds about 16 MiB; the
 bounded snapshot reader accepts at most 32 MiB. The guest disk remains a
 separate artifact, as with ordinary Firecracker snapshots.
+
+ARM64 console snapshots save display/configuration and one typed virtio-input
+state in the PCI device manager. The console reuses that backend on restore; it
+does not save a second held-key or LED state. Pending frames, partial-frame
+cursor, position, held releases and guest/pending lock LEDs travel with Input.
+Missing, stray or mismatched console/input topology is rejected before backend
+attachment. Format29 through format31 snapshots require their matching older
+binaries; format32 has no decoder for them. Snapshots do not move between AMD64
+and ARM64.
+
+The Windows 11 test edition is IoT Enterprise LTSC 2024. It passed Setup's
+hardware check without registry bypasses. The optional
+[secure platform](windows-secure-boot.md) adds TPM and protected firmware
+variables. Standard Windows 11 Enterprise Evaluation passes the recorded secure
+matrix; other editions are not inferred from that result.
 
 The console reserves the VGA aperture at `0xa0000..0xbffff` and platform table
 memory at 32..33 MiB. The IDE interrupt uses PCI GSI16 in native mode and IRQ14
@@ -259,18 +337,23 @@ There is one keyboard and one pointer. The auxiliary PS/2 port is absent, IRQ12
 is not attached, and there is no USB keyboard. The second UHCI root port is
 disconnected. Removing `optical_image_path` removes the IDE controller; it does
 not leave an empty CD-ROM attached. Disk, network and vsock devices remain
-separate explicit configuration choices.
+separate explicit configuration choices. TPM and protected firmware variables
+are also opt-in.
 
-The selected PC platform exposes serial, RTC, i8042, VM Generation ID, GED and
-VMClock. XP and Windows 7 do not bind drivers to all these ACPI features. XP
+The existing platform still exposes serial, RTC, i8042, VM Generation ID, GED
+and VMClock. XP and Windows 7 do not bind drivers to all these ACPI features. XP
 also retains a VGA device warning while its basic display works. These
 limitations are separate from the keyboard and pointer drivers; do not report a
 completely clean device inventory for those guests.
 
-The private FCC1 protocol carries physical keyboard scan codes and absolute
-pointer coordinates. A console client must preserve key releases and follow the
-server's bounded input acknowledgements. Closing a connection does not stop the
-VM.
+The bridge uses the guest keyboard LEDs to preserve printable ASCII case and
+punctuation with Caps Lock and Num Lock. It waits at most 100 ms for a pending
+Caps Lock or Num Lock acknowledgement before sending another non-lock key press.
+Scroll Lock does not delay input. Disconnect releases are retried if the guest
+input queue is full, including after restore. Arbitrary guest keyboard layouts
+and Unicode text injection are not implemented. See the
+[bridge protocol](../tools/windows/console/README.md#behaviour-and-limits) for
+the input-state and absolute-pointer requests.
 
 Buffered input retains the scan-code format selected when injected, as in
 [QEMU](https://github.com/qemu/qemu/blob/master/hw/input/ps2.c). The controller
@@ -278,3 +361,10 @@ does not model serial-clock timing. Clipboard sharing and audio are not
 implemented. Port `0x92` and the i8042 output port record A20 requests, but KVM
 does not provide the CPU address wrapping used by an A20-disabled software
 emulator.
+
+## Validation
+
+The [validation record](windows-validation.md) lists exact tested editions and
+installation, input, egress and restore checks. The
+[console bridge](../tools/windows/console/README.md) describes native VNC and
+browser access, authentication and the bounded input protocol.

@@ -10,11 +10,13 @@
 use std::io;
 
 pub mod acpi;
-#[cfg(target_arch = "x86_64")]
 pub mod display;
+pub(crate) mod keyboard;
 pub mod legacy;
 pub mod pci;
 pub mod pseudo;
+pub mod tpm;
+pub mod uefi_vars;
 #[cfg(target_arch = "x86_64")]
 pub mod usb;
 pub mod virtio;
@@ -56,11 +58,3 @@ pub enum DeviceError {
     /// Vsock device error: {0}
     VsockError(#[from] VsockError),
 }
-
-/// TPM 2.0 CRB with private swtpm state.
-#[cfg(target_arch = "x86_64")]
-pub mod tpm;
-
-/// Protected firmware-variable transport.
-#[cfg(target_arch = "x86_64")]
-pub mod uefi_vars;

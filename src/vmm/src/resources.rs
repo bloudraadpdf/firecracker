@@ -85,13 +85,10 @@ pub enum CustomCpuTemplateOrPath {
 #[serde(rename_all = "kebab-case")]
 #[allow(missing_docs)]
 pub struct VmmConfig {
-    #[cfg(target_arch = "x86_64")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub uefi_vars: Option<crate::vmm_config::uefi_vars::UefiVarsConfig>,
-    #[cfg(target_arch = "x86_64")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tpm: Option<crate::vmm_config::tpm::TpmConfig>,
-    #[cfg(target_arch = "x86_64")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub console: Option<crate::vmm_config::console::ConsoleConfig>,
     pub balloon: Option<BalloonDeviceConfig>,
@@ -129,16 +126,12 @@ pub struct LaunchIo {
 #[derive(Debug, Default)]
 pub struct VmResources {
     /// Optional protected firmware variable service.
-    #[cfg(target_arch = "x86_64")]
     pub uefi_vars: Option<crate::vmm_config::uefi_vars::UefiVarsConfig>,
     /// Explicit destination store generation, used only during snapshot loading.
-    #[cfg(target_arch = "x86_64")]
     pub uefi_vars_restore: Option<crate::vmm_config::uefi_vars::UefiVarsRestoreConfig>,
     /// Optional private TPM backend.
-    #[cfg(target_arch = "x86_64")]
     pub tpm: Option<crate::vmm_config::tpm::TpmConfig>,
     /// Optional graphical console and optical media.
-    #[cfg(target_arch = "x86_64")]
     pub console: Option<crate::vmm_config::console::ConsoleConfig>,
     /// The vCpu and memory configuration for this microVM.
     pub machine_config: MachineConfig,
@@ -178,11 +171,11 @@ impl VmResources {
     pub(crate) fn validate_windows_support(
         &self,
     ) -> Result<(), crate::vmm_config::WindowsFeatureDisabled> {
-        #[cfg(target_arch = "x86_64")]
-        if self.console.is_some() || self.tpm.is_some() || self.uefi_vars.is_some() {
-            crate::vmm_config::require_windows_support()?;
-        }
-        if self.boot_source.config.firmware.is_some() {
+        if self.console.is_some()
+            || self.tpm.is_some()
+            || self.uefi_vars.is_some()
+            || self.boot_source.config.firmware.is_some()
+        {
             crate::vmm_config::require_windows_support()?;
         }
         #[cfg(target_arch = "x86_64")]
@@ -211,15 +204,13 @@ impl VmResources {
         metadata_json: Option<&str>,
     ) -> Result<Self, ResourcesError> {
         let vmm_config = serde_json::from_str::<VmmConfig>(config_json)?;
-        #[cfg(target_arch = "x86_64")]
+
         if vmm_config.console.is_some()
             || vmm_config.tpm.is_some()
             || vmm_config.uefi_vars.is_some()
         {
             crate::vmm_config::require_windows_support()?;
         }
-        vmm_config.boot_source.validate()?;
-
         #[cfg(target_arch = "x86_64")]
         if vmm_config
             .machine_config
@@ -228,6 +219,7 @@ impl VmResources {
         {
             crate::vmm_config::require_windows_support()?;
         }
+        vmm_config.boot_source.validate()?;
 
         if let Some(logger_config) = vmm_config.logger {
             crate::logger::LOGGER.update(logger_config)?;
@@ -260,19 +252,16 @@ impl VmResources {
             }
         }
 
-        #[cfg(target_arch = "x86_64")]
         if let Some(console) = vmm_config.console {
             console.validate_for_firmware(vmm_config.boot_source.firmware.as_ref())?;
             resources.console = Some(console);
         }
 
-        #[cfg(target_arch = "x86_64")]
         if let Some(tpm) = vmm_config.tpm {
             tpm.validate()?;
             resources.tpm = Some(tpm);
         }
 
-        #[cfg(target_arch = "x86_64")]
         if let Some(uefi_vars) = vmm_config.uefi_vars {
             uefi_vars.validate()?;
             resources.uefi_vars = Some(uefi_vars);
@@ -632,11 +621,8 @@ impl VmResources {
 impl From<&VmResources> for VmmConfig {
     fn from(resources: &VmResources) -> Self {
         VmmConfig {
-            #[cfg(target_arch = "x86_64")]
             console: resources.console.clone(),
-            #[cfg(target_arch = "x86_64")]
             tpm: resources.tpm.clone(),
-            #[cfg(target_arch = "x86_64")]
             uefi_vars: resources.uefi_vars.clone(),
             balloon: resources.balloon.get_config().ok(),
             drives: resources.block.configs(),
@@ -688,19 +674,21 @@ mod tests {
     #[cfg(not(feature = "windows"))]
     #[test]
     fn windows_configuration_is_rejected_before_file_access() {
-        let requests = [serde_json::json!({"boot-source":{
-            "kernel_image_path":"/nonexistent/windows-feature/kernel",
-            "firmware":{"type":"seabios"}
-        }})];
-        #[cfg(target_arch = "x86_64")]
-        let requests = requests.into_iter().chain([
+        let requests = [
             serde_json::json!({"console":{"socket_path":"console.sock"}}),
             serde_json::json!({"tpm":{"socket_path":"tpm.sock"}}),
             serde_json::json!({"uefi-vars":{"socket_path":"variables.sock"}}),
-            serde_json::json!({"machine-config":{
-                "vcpu_count":1,"mem_size_mib":128,"hyperv":true
+            serde_json::json!({"boot-source":{
+                "kernel_image_path":"/nonexistent/windows-feature/kernel",
+                "firmware":{"type":"seabios"}
             }}),
-        ]);
+        ];
+        #[cfg(target_arch = "x86_64")]
+        let requests = requests
+            .into_iter()
+            .chain([serde_json::json!({"machine-config":{
+                "vcpu_count":1,"mem_size_mib":128,"hyperv":true
+            }})]);
         for request in requests {
             let mut config = serde_json::json!({
                 "boot-source":{"kernel_image_path":"/nonexistent/windows-feature/kernel"},
@@ -831,13 +819,9 @@ mod tests {
 
     fn default_vm_resources() -> VmResources {
         VmResources {
-            #[cfg(target_arch = "x86_64")]
             console: None,
-            #[cfg(target_arch = "x86_64")]
             tpm: None,
-            #[cfg(target_arch = "x86_64")]
             uefi_vars: None,
-            #[cfg(target_arch = "x86_64")]
             uefi_vars_restore: None,
             machine_config: MachineConfig::default(),
             boot_source: default_boot_cfg(),

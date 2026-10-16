@@ -17,6 +17,11 @@ use crate::devices::virtio::balloon::persist::{BalloonConstructorArgs, BalloonSt
 use crate::devices::virtio::block::device::Block;
 use crate::devices::virtio::block::persist::{BlockConstructorArgs, BlockState};
 use crate::devices::virtio::device::{VirtioDevice, VirtioDeviceId, VirtioDeviceType};
+#[cfg(feature = "windows")]
+use crate::devices::virtio::input::Input;
+#[cfg(feature = "windows")]
+use crate::devices::virtio::input::persist::InputConstructorArgs;
+use crate::devices::virtio::input::persist::InputState;
 use crate::devices::virtio::mem::VirtioMem;
 use crate::devices::virtio::mem::persist::{VirtioMemConstructorArgs, VirtioMemState};
 use crate::devices::virtio::net::Net;
@@ -156,8 +161,10 @@ impl PciDevices {
 
             device.register_notification_ioevents(vm)?;
 
-            let sub_id = event_manager.add_subscriber(device.virtio_device());
-            device.sub_id = Some(sub_id);
+            if device_type != VirtioDeviceType::Input {
+                let sub_id = event_manager.add_subscriber(device.virtio_device());
+                device.sub_id = Some(sub_id);
+            }
 
             (
                 device.bar_address(),
@@ -419,6 +426,48 @@ pub struct PciDevicesState {
     pub pmem_devices: Vec<VirtioDeviceState<PmemState>>,
     /// Memory device state.
     pub memory_device: Option<VirtioDeviceState<VirtioMemState>>,
+    /// Keyboard and absolute-pointer device states.
+    pub input_device: Option<VirtioDeviceState<InputState>>,
+}
+
+#[cfg(target_arch = "aarch64")]
+#[cfg(feature = "windows")]
+impl PciDevicesState {
+    pub(super) fn mmio_regions(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
+        self.block_devices
+            .iter()
+            .map(|state| &state.transport_state)
+            .chain(self.net_devices.iter().map(|state| &state.transport_state))
+            .chain(self.pmem_devices.iter().map(|state| &state.transport_state))
+            .chain(
+                [
+                    self.vsock_device
+                        .as_ref()
+                        .map(|state| &state.transport_state),
+                    self.balloon_device
+                        .as_ref()
+                        .map(|state| &state.transport_state),
+                    self.entropy_device
+                        .as_ref()
+                        .map(|state| &state.transport_state),
+                    self.memory_device
+                        .as_ref()
+                        .map(|state| &state.transport_state),
+                    self.input_device
+                        .as_ref()
+                        .map(|state| &state.transport_state),
+                ]
+                .into_iter()
+                .flatten(),
+            )
+            .map(|region| (region.bar_address, CAPABILITY_BAR_SIZE))
+            .chain(self.pmem_devices.iter().map(|state| {
+                (
+                    state.device_state.config_space.start,
+                    state.device_state.config_space.size,
+                )
+            }))
+    }
 }
 
 pub struct PciDevicesConstructorArgs<'a> {
@@ -561,6 +610,20 @@ impl<'a> Persist<'a> for PciDevices {
                         transport_state,
                     });
                 }
+                VirtioDeviceType::Input => {
+                    #[cfg(feature = "windows")]
+                    {
+                        let input = locked_virtio_dev.as_any().downcast_ref::<Input>().unwrap();
+                        state.input_device = Some(VirtioDeviceState {
+                            device_id: input.id().to_string(),
+                            sbdf,
+                            device_state: input.save(),
+                            transport_state,
+                        });
+                    }
+                    #[cfg(not(feature = "windows"))]
+                    unreachable!("virtio-input requires the windows build feature");
+                }
                 VirtioDeviceType::Mem => {
                     let mem_dev = locked_virtio_dev
                         .as_mut_any()
@@ -585,6 +648,10 @@ impl<'a> Persist<'a> for PciDevices {
         constructor_args: Self::ConstructorArgs,
         state: &Self::State,
     ) -> Result<Self, Self::Error> {
+        if state.input_device.is_some() {
+            crate::vmm_config::require_windows_support()?;
+        }
+
         let mem = constructor_args.mem;
         let mut pci_devices = PciDevices::new(constructor_args.vm)?;
 
@@ -729,6 +796,21 @@ impl<'a> Persist<'a> for PciDevices {
                 &entropy_state.transport_state,
                 constructor_args.event_manager,
             )?
+        }
+
+        #[cfg(feature = "windows")]
+        if let Some(input_state) = &state.input_device {
+            let device = Arc::new(Mutex::new(Input::restore(
+                InputConstructorArgs { mem: mem.clone() },
+                &input_state.device_state,
+            )?));
+            pci_devices.restore_pci_device(
+                constructor_args.vm,
+                device.clone(),
+                &input_state.device_id,
+                &input_state.transport_state,
+                constructor_args.event_manager,
+            )?;
         }
 
         for pmem_state in &state.pmem_devices {
