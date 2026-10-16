@@ -1,5 +1,7 @@
 # CloudHv firmware for Firecracker
 
+For BIOS disks, use the separate [SeaBIOS PVH handoff](seabios/README.md).
+
 The additional [PVH memory-map fix](pvh-memory-map.md) is required for all AMD64
 CloudHv profiles, including headless and Secure Boot. The current AMD64 image
 digests include that fix. Recreate snapshots from a cold boot with corrected
