@@ -156,6 +156,48 @@ impl FileEngine {
         }
     }
 
+    pub fn transfer_vectored(
+        &mut self,
+        write: bool,
+        offset: u64,
+        mem: &GuestMemoryMmap,
+        segments: &[(GuestAddress, u32)],
+        req: PendingRequest,
+    ) -> Result<FileEngineOk, RequestError<BlockIoError>> {
+        match self {
+            Self::Async(engine) => engine
+                .push_vectored(write, offset, mem, segments, req)
+                .map(|()| FileEngineOk::Submitted)
+                .map_err(|error| RequestError {
+                    req: error.req,
+                    error: BlockIoError::Async(error.error),
+                }),
+            Self::Sync(engine) => {
+                let mut transferred = 0;
+                for (addr, count) in segments {
+                    let result = if write {
+                        engine.write(offset + u64::from(transferred), mem, *addr, *count)
+                    } else {
+                        engine.read(offset + u64::from(transferred), mem, *addr, *count)
+                    };
+                    match result {
+                        Ok(count) => transferred += count,
+                        Err(error) => {
+                            return Err(RequestError {
+                                req,
+                                error: BlockIoError::Sync(error),
+                            });
+                        }
+                    }
+                }
+                Ok(FileEngineOk::Executed(RequestOk {
+                    req,
+                    count: transferred,
+                }))
+            }
+        }
+    }
+
     pub fn drain(&mut self, discard: bool) -> Result<(), BlockIoError> {
         match self {
             FileEngine::Async(engine) => engine.drain(discard).map_err(BlockIoError::Async),
@@ -246,6 +288,50 @@ pub mod tests {
         let bitmap = mem.find_region(addr).unwrap().bitmap();
         for offset in addr.0..addr.0 + u64::from(len) {
             assert!(!bitmap.dirty_at(u64_to_usize(offset)));
+        }
+    }
+
+    #[test]
+    fn vectored_disk_io_preserves_segments_and_tracks_dirty_pages() {
+        for kind in [FileEngineType::Sync, FileEngineType::Async] {
+            let mut engine =
+                FileEngine::from_file(TempFile::new().unwrap().into_file(), kind).unwrap();
+            let source = create_mem();
+            source.write_slice(&[0x5a; 512], GuestAddress(0)).unwrap();
+            source
+                .write_slice(&[0xa5; 512], GuestAddress(4096))
+                .unwrap();
+            let segments = [(GuestAddress(0), 512), (GuestAddress(4096), 512)];
+            let result =
+                engine.transfer_vectored(true, 512, &source, &segments, PendingRequest::default());
+            match kind {
+                FileEngineType::Sync => assert_sync_execution!(result, 1024),
+                FileEngineType::Async => {
+                    assert_queued!(result);
+                    assert_async_execution(&source, &mut engine, 1024);
+                }
+            }
+            let destination = create_mem();
+            let result = engine.transfer_vectored(
+                false,
+                512,
+                &destination,
+                &segments,
+                PendingRequest::default(),
+            );
+            match kind {
+                FileEngineType::Sync => assert_sync_execution!(result, 1024),
+                FileEngineType::Async => {
+                    assert_queued!(result);
+                    assert_async_execution(&destination, &mut engine, 1024);
+                }
+            }
+            for (addr, value) in [(GuestAddress(0), 0x5a), (GuestAddress(4096), 0xa5)] {
+                let mut bytes = [0; 512];
+                destination.read_slice(&mut bytes, addr).unwrap();
+                assert_eq!(bytes, [value; 512]);
+                check_dirty_mem(&destination, addr, 512);
+            }
         }
     }
 
