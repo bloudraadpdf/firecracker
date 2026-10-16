@@ -3,6 +3,7 @@
 
 """Utilities for measuring memory utilization for a process."""
 
+import posixpath
 import time
 from threading import Thread
 
@@ -63,6 +64,7 @@ class MemoryMonitor(Thread):
         self._period_s = period_s
         self._should_stop = False
         self._current_rss = 0
+        self._pmem_files = set()
         self.daemon = True
 
     def signal_stop(self):
@@ -76,6 +78,14 @@ class MemoryMonitor(Thread):
     def set_threshold_for_snapshot(self):
         """Set threshold for snapshot creation."""
         self.threshold = self.threshold_snapshot
+
+    def set_pmem_files(self):
+        """Exclude configured guest pmem backing files from VMM overhead."""
+        config = self._vm.api.vm_config.get().json()
+        self._pmem_files = {
+            posixpath.normpath("/" + device["path_on_host"].lstrip("/"))
+            for device in config["pmem"]
+        }
 
     def stop(self):
         """Stop the thread"""
@@ -102,7 +112,10 @@ class MemoryMonitor(Thread):
                 return
             mem_total = 0
             for mmap in mmaps:
-                if self.is_guest_mem(mmap.size, guest_mem_bytes):
+                if (
+                    self.is_guest_mem(mmap.size, guest_mem_bytes)
+                    or mmap.path in self._pmem_files
+                ):
                     continue
 
                 mem_total += mmap.rss
