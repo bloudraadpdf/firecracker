@@ -876,7 +876,7 @@ mod tests {
     "vcpu_count": 1,
     "mem_size_mib": 128,
     "smt": false,
-{pit}    "track_dirty_pages": false,
+{hyperv}{pit}    "track_dirty_pages": false,
     "huge_pages": "None"
   }},
   "metrics": null,
@@ -923,6 +923,11 @@ mod tests {
             _block_files.last().unwrap().as_path().to_str().unwrap(),
             tmp_sock_file.as_path().to_str().unwrap(),
             _pmem_files.last().unwrap().as_path().to_str().unwrap(),
+            hyperv = if cfg!(target_arch = "x86_64") {
+                "    \"hyperv\": false,\n"
+            } else {
+                ""
+            },
             pit = if cfg!(target_arch = "x86_64") {
                 "    \"pit\": true,\n"
             } else {
