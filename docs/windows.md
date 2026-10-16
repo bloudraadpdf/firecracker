@@ -179,3 +179,17 @@ virtio-win media has no compatible Viosock package for these guests. The
 [test-driver procedure](../tools/windows/legacy-vsock/README.md) retains the
 required receive, reset and DMA fixes and uses test signing. A test-driver build
 does not qualify an installed guest. No production-signed package is supplied.
+
+### Tokoloshe egress
+
+Tokoloshe's socket-grant proxy accepts HTTP CONNECT on host CID 2, port 4750. A
+Windows client opens a provider socket to that endpoint, sends
+`CONNECT <host>:<port> HTTP/1.1` with a matching `Host` header and an empty
+line, then waits for status 200 before sending tunnel data. Bind the granted
+host Unix socket at `windows.vsock_4750` in the Firecracker namespace.
+
+Use the [egress controllers](../tools/windows/egress/README.md) for separate TAP
+and CONNECT cold/full/differential checks. They stage matched state, reject open
+disks, verify guest and host byte counts and inspect storage read-only after
+clean shutdown. HTTPS validation and proxy configuration remain application
+responsibilities. Tokoloshe's Windows job runtime is outside this device scope.

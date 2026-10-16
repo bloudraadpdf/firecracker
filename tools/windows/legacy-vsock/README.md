@@ -141,3 +141,31 @@ in each direction, then requires HTTP 403 for the denied destination. There is a
 restore in a fresh Firecracker process: full snapshot first, then differential
 snapshot rebased onto the full memory file. Use the same disk in this linear
 sequence. Do not restore an older snapshot with a disk modified by a later run.
+
+The preserved `check.sh` runs this sequence. Set `WINDOWS_CONNECT_BASE` to a
+fresh test directory containing `config.json`, with absolute firmware and disk
+paths, `track_dirty_pages: true`, CID 3, and `uds_path: "vsock.sock"`. Set
+`WINDOWS_CONNECT_FC`, `WINDOWS_CONNECT_PROXY` (Tokoloshe `windows_probe`),
+`WINDOWS_CONNECT_SIDECAR` (`tokoloshe-egress`), `WINDOWS_CONNECT_PROXY_ROOT`,
+and `WINDOWS_CONNECT_SNAPSHOT_EDITOR` to their absolute paths. Set
+`WINDOWS_CONNECT_UID` and `WINDOWS_CONNECT_GID` to the test user. The controller
+creates `run/`; preserve or remove an earlier run before starting another. It
+executes a read-only per-run copy of its shell source. For a graphical guest,
+use the relative console path `console.sock`; cleanup removes its stale socket
+only after the owned VMM has stopped. User and group IDs default to the invoking
+user. When changing identity, it initialises that user's supplementary groups.
+API requests have time limits. On exit it allows each child ten seconds to stop,
+then kills a child that does not exit. The proxy uses a separate process group
+so cleanup also stops a stalled sidecar. A forced stop fails the run.
+
+Require three guest pass markers, six sealed proxy accounting entries (three
+allowed 2 MiB transfers, three denied requests with zero payload),
+guest-requested S5 and Firecracker exit zero. After all guest processes have
+exited, mount the disk read-only and verify the final data. On XP, compile
+`verify-xp.rs` for the host and pass it the extracted `xp-legacy-data.bin`; it
+checks every byte of the final iteration's deterministic 2 MiB file. Windows 7
+records its final SHA-256 in the transcript.
+
+`win7-connect.ps1` also accepts `-Prefix` and `-Tag` for newer Windows with
+signed Viosock drivers. The [egress harness](../egress/README.md) provides the
+shared offline verifier and the separate TAP regression procedure.

@@ -1,7 +1,7 @@
 # Copyright 2026 Bloudraad.
 # SPDX-License-Identifier: Apache-2.0
 
-param([string]$Prefix = 'win7-legacy', [string]$Tag = 'WIN7LEGACY')
+param([string]$Prefix = 'win7-legacy', [string]$Tag = 'WIN7LEGACY', [switch]$SecureChecks)
 $ErrorActionPreference = 'Stop'
 $transcriptStarted = $false
 try {
@@ -12,6 +12,7 @@ try {
     $device | Format-List Name,DeviceID,ConfigManagerErrorCode,Status
     if (@($device).Count -ne 1 -or $device.ConfigManagerErrorCode -ne 0) { throw 'Viosock device did not start' }
     for ($iteration = 1; $iteration -le 3; $iteration++) {
+        if ($SecureChecks) { & "$PSScriptRoot\secure-check.ps1" -Iteration $iteration }
         $data = New-Object byte[] 2097152
         $random = New-Object Security.Cryptography.RNGCryptoServiceProvider
         $random.GetBytes($data)
