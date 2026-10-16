@@ -67,6 +67,9 @@ use crate::{EventManager, Vmm, VmmError};
 pub enum StartMicrovmError {
     /// Unsupported build configuration: {0}
     WindowsFeature(#[from] crate::vmm_config::WindowsFeatureDisabled),
+    /// Graphical console configuration or attachment failed: {0}
+    #[cfg(target_arch = "x86_64")]
+    Console(std::io::Error),
     /// The transitional PCI platform requires --enable-pci.
     PciDisabled,
     /// Unable to attach block device to Vmm: {0}
@@ -157,6 +160,22 @@ pub fn build_microvm_for_boot(
     if !vm_resources.pci_enabled && !vm_resources.machine_config.pci_transport.is_modern() {
         return Err(StartMicrovmError::PciDisabled);
     }
+    #[cfg(target_arch = "x86_64")]
+    if vm_resources.console.is_some()
+        && (!vm_resources.pci_enabled
+            || vm_resources.machine_config.huge_pages.is_hugetlbfs()
+            || vm_resources.machine_config.mem_size_mib < 64)
+    {
+        return Err(StartMicrovmError::Console(std::io::Error::other(
+            "console requires PCI, at least 64 MiB and non-hugetlbfs memory",
+        )));
+    }
+    #[cfg(all(target_arch = "x86_64", feature = "windows"))]
+    if let Some(console) = &vm_resources.console {
+        console
+            .validate_for_firmware(vm_resources.boot_source.config.firmware.as_ref())
+            .map_err(StartMicrovmError::Console)?;
+    }
     // Timestamp for measuring microVM boot duration.
     let request_ts = TimestampUs::default();
 
@@ -188,6 +207,23 @@ pub fn build_microvm_for_boot(
     // Build custom CPU config if a custom template is provided.
     let mut vm = KvmVm::new(kvm)?;
     vm.resource_allocator().pci_transport = vm_resources.machine_config.pci_transport;
+    #[cfg(target_arch = "x86_64")]
+    #[cfg(feature = "windows")]
+    if let Some(console) = &vm_resources.console {
+        vm.resource_allocator().system_memory = vm_allocator::AddressAllocator::new(
+            crate::arch::x86_64::layout::CONSOLE_SYSTEM_MEM_START,
+            crate::arch::x86_64::layout::CONSOLE_SYSTEM_MEM_SIZE,
+        )
+        .map_err(|error| StartMicrovmError::Console(std::io::Error::other(error.to_string())))?;
+        if console.optical_image_path.is_some() {
+            vm.resource_allocator()
+                .gsi_legacy_allocator
+                .allocate_id_at(crate::devices::legacy::atapi::IRQ)
+                .map_err(|error| {
+                    StartMicrovmError::Console(std::io::Error::other(error.to_string()))
+                })?;
+        }
+    }
     let vcpus = vm.create_vcpus(&vm_resources.machine_config)?;
     vm.register_dram_memory_regions(guest_memory)?;
 
@@ -214,6 +250,8 @@ pub fn build_microvm_for_boot(
     let vm = Vm::Kvm(kvm_vm.clone());
 
     let pc_enabled = vm_resources.boot_source.config.firmware.is_some();
+    #[cfg(target_arch = "x86_64")]
+    let pc_enabled = pc_enabled || vm_resources.console.is_some();
     let mut device_manager = DeviceManager::new(
         event_manager,
         kvm_vm.vcpus_exit_evt(),
@@ -337,6 +375,12 @@ pub fn build_microvm_for_boot(
         vm_resources.serial_rate_limiter(),
     )?;
 
+    #[cfg(all(target_arch = "x86_64", feature = "windows"))]
+    if let Some(console) = &vm_resources.console {
+        device_manager
+            .attach_console(&kvm_vm, console, None)
+            .map_err(StartMicrovmError::Console)?;
+    }
     device_manager.attach_vmgenid_device(&kvm_vm)?;
     device_manager.attach_vmclock_device(&kvm_vm)?;
 
@@ -489,6 +533,12 @@ pub fn build_microvm_from_snapshot(
 ) -> Result<Arc<Mutex<Vmm>>, BuildMicrovmFromSnapshotError> {
     microvm_state.validate_windows_support()?;
     microvm_state.vm_info.boot_source.validate()?;
+    #[cfg(all(target_arch = "x86_64", feature = "windows"))]
+    if let Some(console) = &microvm_state.device_states.console {
+        console
+            .validate_for_firmware(microvm_state.vm_info.boot_source.firmware.as_ref())
+            .map_err(StartMicrovmError::Console)?;
+    }
     // Build Vmm.
     debug!("event_start: build microvm from snapshot");
 
@@ -942,6 +992,112 @@ pub(crate) mod tests {
             &Default::default(),
         );
         assert!(matches!(result, Err(StartMicrovmError::PciDisabled)));
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    #[cfg(feature = "windows")]
+    fn console_rom_validation_follows_current_boot_profile() {
+        use crate::vmm_config::boot_source::FirmwareConfig;
+        let mut resources = VmResources {
+            pci_enabled: true,
+            console: Some(crate::vmm_config::console::ConsoleConfig {
+                socket_path: "console.sock".into(),
+                vga_rom_path: None,
+                optical_image_path: None,
+            }),
+            ..Default::default()
+        };
+        let cloud_hv = FirmwareConfig::CloudHv {
+            system_uuid: "11223344-5566-7788-99aa-bbccddeeff01"
+                .to_string()
+                .try_into()
+                .unwrap(),
+        };
+        // Boot-source API updates can replace the profile after loading startup configuration.
+        for profile in [None, Some(cloud_hv), Some(FirmwareConfig::SeaBios), None] {
+            resources.boot_source.config.firmware = profile;
+            let error = build_microvm_for_boot(
+                &InstanceInfo::default(),
+                &resources,
+                &mut EventManager::new().unwrap(),
+                &Default::default(),
+            )
+            .unwrap_err();
+            if profile == Some(cloud_hv) {
+                assert!(matches!(error, StartMicrovmError::MissingKernelConfig));
+            } else {
+                assert!(matches!(error, StartMicrovmError::Console(_)));
+            }
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    #[cfg(feature = "windows")]
+    fn console_reserves_only_attached_optical_irq_on_boot_and_restore() {
+        use std::io::Write;
+        use vmm_sys_util::tempdir::TempDir;
+
+        use crate::device_manager::DeviceRestoreArgs;
+        use crate::snapshot::Persist;
+        use crate::test_utils::mock_resources::{MockBootSourceConfig, MockVmResources};
+        use crate::vmm_config::console::ConsoleConfig;
+        use crate::vstate::resources::ResourceAllocator;
+
+        let directory = TempDir::new().unwrap();
+        let rom = TempFile::new().unwrap();
+        rom.as_file().write_all(&[0x55, 0xaa, 1]).unwrap();
+        rom.as_file().set_len(512).unwrap();
+        let iso = TempFile::new().unwrap();
+        iso.as_file().set_len(2048).unwrap();
+
+        for optical in [false, true] {
+            let mut resources: VmResources = MockVmResources::new()
+                .with_boot_source(MockBootSourceConfig::new().into())
+                .into();
+            resources.pci_enabled = true;
+            resources.console = Some(ConsoleConfig {
+                socket_path: directory.as_path().join("console.sock"),
+                vga_rom_path: Some(rom.as_path().to_owned()),
+                optical_image_path: optical.then(|| iso.as_path().to_owned()),
+            });
+            let mut events = EventManager::new().unwrap();
+            let source = boot_test_vm(&resources, &mut events);
+            let (devices, allocations) = {
+                let vmm = source.lock().unwrap();
+                let vm = vmm.vm.as_kvm().unwrap();
+                let allocator = vm.resource_allocator();
+                assert!(!allocator.gsi_legacy_allocator.is_allocated(12));
+                assert_eq!(allocator.gsi_legacy_allocator.is_allocated(14), optical);
+                (vmm.device_manager.save(), allocator.save())
+            };
+            drop(source);
+            drop(events);
+
+            let mut target = setup_vm_with_memory(mib_to_bytes(128));
+            target.setup_irqchip(true).unwrap();
+            let target = Arc::new(target);
+            *target.resource_allocator() = ResourceAllocator::restore((), &allocations).unwrap();
+            let mut events = EventManager::new().unwrap();
+            let _restored = DeviceManager::restore(
+                DeviceRestoreArgs {
+                    mem: target.guest_memory(),
+                    vm: &target,
+                    event_manager: &mut events,
+                    vcpus_exit_evt: target.vcpus_exit_evt(),
+                    vm_resources: &mut resources,
+                    instance_id: "console-irq-test",
+                    vmgenid_notification: Default::default(),
+                    vmclock_notification: Default::default(),
+                },
+                &devices,
+            )
+            .unwrap();
+            let allocator = target.resource_allocator();
+            assert!(!allocator.gsi_legacy_allocator.is_allocated(12));
+            assert_eq!(allocator.gsi_legacy_allocator.is_allocated(14), optical);
+        }
     }
 
     pub(crate) fn default_vmm_with_pci() -> Vmm {

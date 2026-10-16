@@ -10,6 +10,8 @@ use zerocopy::{Immutable, IntoBytes};
 use crate::{GenericAddressStructure, Result, Sdt, SdtHeader, checksum};
 
 #[cfg(target_arch = "x86_64")]
+pub const IAPC_BOOT_ARG_FLAGS_8042: u16 = 1;
+#[cfg(target_arch = "x86_64")]
 pub const IAPC_BOOT_ARG_FLAGS_VGA_NOT_PRESENT: u16 = 2;
 #[cfg(target_arch = "x86_64")]
 pub const IAPC_BOOT_ARG_FLAGS_MSI_NOT_PRESENT: u16 = 3;
