@@ -802,6 +802,11 @@ required checkpoint storage locking; use the development container on such
 hosts. The real swtpm checkpoint test runs with the normal VMM unit suite; a
 missing executable is a test failure.
 
+The Apache-licensed variable helper is a separate Rust workspace. It uses
+RustCrypto for CMS/DER/X.509 parsing and the existing AWS-LC backend for RSA
+verification. Building it needs the existing AWS-LC C compiler and assembly
+toolchain. The normal standalone tool unit and Clippy gates include it.
+
 ### Optional Windows capability
 
 The normal Rust unit, example and benchmark checks cover default and `windows`
