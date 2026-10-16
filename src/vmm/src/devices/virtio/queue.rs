@@ -7,14 +7,15 @@
 
 use std::num::Wrapping;
 use std::sync::atomic::{Ordering, fence};
-use vm_memory::GuestMemoryBackend;
+use vm_memory::{Address, Bytes, GuestMemoryBackend};
 
 use crate::logger::error;
 use crate::utils::u64_to_usize;
-use crate::vstate::memory::{Bitmap, ByteValued, GuestAddress};
+use crate::vstate::memory::{Bitmap, ByteValued, GuestAddress, GuestMemoryMmap};
 
 pub const VIRTQ_DESC_F_NEXT: u16 = 0x1;
 pub const VIRTQ_DESC_F_WRITE: u16 = 0x2;
+pub const VIRTQ_DESC_F_INDIRECT: u16 = 0x4;
 
 /// Max size of virtio queues offered by firecracker's virtio devices.
 pub(super) const FIRECRACKER_MAX_QUEUE_SIZE: u16 = 256;
@@ -29,9 +30,11 @@ pub(super) const FIRECRACKER_MAX_QUEUE_SIZE: u16 = 256;
 
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum QueueError {
+    /// Invalid, nested or overlong descriptor chain.
+    InvalidDescriptorChain,
     /// Descriptor index out of bounds: {0}.
     DescIndexOutOfBounds(u16),
-    /// Failed to write value into the virtio queue used ring: {0}
+    /// Guest memory access failed: {0}
     MemoryError(#[from] vm_memory::GuestMemoryError),
     /// Pointer is not aligned properly: {0:#x} not {1}-byte aligned.
     PointerNotAligned(usize, usize),
@@ -113,6 +116,15 @@ pub struct DescriptorChain {
 }
 
 impl DescriptorChain {
+    /// Walk direct and indirect descriptors with a shared queue-size bound.
+    pub fn checked_iter(self, mem: &GuestMemoryMmap) -> DescriptorReader<'_> {
+        DescriptorReader {
+            mem,
+            remaining: self.queue_size,
+            next: Some(DescriptorLocation::Direct(self)),
+        }
+    }
+
     /// Creates a new `DescriptorChain` from the given memory and descriptor table.
     ///
     /// Note that the desc_table and queue_size are assumed to be validated by the caller.
@@ -169,6 +181,109 @@ impl DescriptorChain {
             )
         } else {
             None
+        }
+    }
+}
+
+#[derive(Debug)]
+enum DescriptorLocation {
+    Direct(DescriptorChain),
+    Indirect {
+        table: GuestAddress,
+        count: u32,
+        index: u16,
+    },
+}
+
+/// A bounded descriptor walk that rejects malformed indirect tables and cycles.
+#[derive(Debug)]
+pub struct DescriptorReader<'a> {
+    mem: &'a GuestMemoryMmap,
+    remaining: u16,
+    next: Option<DescriptorLocation>,
+}
+
+impl DescriptorReader<'_> {
+    fn read_next(&mut self) -> Result<Option<Descriptor>, QueueError> {
+        let descriptor_size = u32::try_from(size_of::<Descriptor>()).unwrap();
+        while let Some(location) = self.next.take() {
+            if self.remaining == 0 {
+                return Err(QueueError::InvalidDescriptorChain);
+            }
+            let desc = match location {
+                DescriptorLocation::Direct(chain) => {
+                    if chain.flags & VIRTQ_DESC_F_INDIRECT != 0 {
+                        if chain.flags & VIRTQ_DESC_F_NEXT != 0
+                            || chain.len == 0
+                            || !chain.len.is_multiple_of(descriptor_size)
+                        {
+                            return Err(QueueError::InvalidDescriptorChain);
+                        }
+                        // Validate the complete table before following its entries.
+                        self.mem.get_slice(chain.addr, chain.len as usize)?;
+                        self.next = Some(DescriptorLocation::Indirect {
+                            table: chain.addr,
+                            count: chain.len / descriptor_size,
+                            index: 0,
+                        });
+                        continue;
+                    }
+                    if chain.flags & VIRTQ_DESC_F_NEXT != 0 {
+                        self.next = Some(DescriptorLocation::Direct(
+                            chain
+                                .next_descriptor()
+                                .ok_or(QueueError::InvalidDescriptorChain)?,
+                        ));
+                    }
+                    Descriptor {
+                        addr: chain.addr.0,
+                        len: chain.len,
+                        flags: chain.flags,
+                        next: chain.next,
+                    }
+                }
+                DescriptorLocation::Indirect {
+                    table,
+                    count,
+                    index,
+                } => {
+                    if u32::from(index) >= count {
+                        return Err(QueueError::InvalidDescriptorChain);
+                    }
+                    let addr = table
+                        .checked_add(u64::from(index) * u64::from(descriptor_size))
+                        .ok_or(QueueError::InvalidDescriptorChain)?;
+                    let desc: Descriptor = self.mem.read_obj(addr)?;
+                    if desc.flags & VIRTQ_DESC_F_INDIRECT != 0 {
+                        return Err(QueueError::InvalidDescriptorChain);
+                    }
+                    if desc.flags & VIRTQ_DESC_F_NEXT != 0 {
+                        self.next = Some(DescriptorLocation::Indirect {
+                            table,
+                            count,
+                            index: desc.next,
+                        });
+                    }
+                    desc
+                }
+            };
+            self.remaining -= 1;
+            return Ok(Some(desc));
+        }
+        Ok(None)
+    }
+}
+
+impl Iterator for DescriptorReader<'_> {
+    type Item = Result<Descriptor, QueueError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.read_next() {
+            Ok(desc) => desc.map(Ok),
+            Err(error) => {
+                self.next = None;
+                Some(Err(error))
+            }
         }
     }
 }
