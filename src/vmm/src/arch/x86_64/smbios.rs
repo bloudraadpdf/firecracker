@@ -7,17 +7,19 @@ use std::fs::File;
 use std::io;
 use std::os::unix::fs::FileExt;
 
-use vm_memory::{Bytes, GuestAddress, GuestMemoryBackend};
+#[cfg(test)]
+use vm_memory::{Bytes, GuestAddress};
+
+#[cfg(test)]
+use crate::arch::smbios::encode;
+use crate::arch::smbios::{PAGE_SIZE, publish};
 
 use crate::arch::BootProtocol;
-use crate::vmm_config::boot_source::{FirmwareConfig, SystemUuid};
+use crate::vmm_config::boot_source::FirmwareConfig;
 use crate::vstate::memory::GuestMemoryMmap;
 
 pub(super) const BASE: u64 = 0xf0000;
-const PAGE_SIZE: usize = 4096;
 pub(super) const SIZE: u64 = PAGE_SIZE as u64;
-const TABLE_OFFSET: usize = 32;
-const ENTRY_LENGTH: usize = 24;
 const MAX_PROGRAM_HEADERS: u16 = 128;
 
 fn invalid(message: &'static str) -> io::Error {
@@ -92,30 +94,6 @@ pub(crate) fn validate_image(file: &File) -> io::Result<()> {
     Ok(())
 }
 
-fn encode(uuid: SystemUuid) -> [u8; PAGE_SIZE] {
-    let mut page = [0; PAGE_SIZE];
-    let record = &mut page[TABLE_OFFSET..TABLE_OFFSET + 27];
-    record[..8].copy_from_slice(&[1, 27, 0, 1, 1, 2, 0, 0]);
-    record[8..24].copy_from_slice(&uuid.smbios_bytes());
-    record[24] = 2;
-    let strings = b"Firecracker\0Firecracker microVM\0\0";
-    let strings_start = TABLE_OFFSET + 27;
-    let end_marker = strings_start + strings.len();
-    page[strings_start..end_marker].copy_from_slice(strings);
-    page[end_marker..end_marker + 6].copy_from_slice(&[127, 4, 255, 127, 0, 0]);
-    let table_size = u32::try_from(end_marker + 6 - TABLE_OFFSET).unwrap();
-    page[..5].copy_from_slice(b"_SM3_");
-    page[6..12].copy_from_slice(&[24, 3, 0, 0, 1, 0]);
-    page[12..16].copy_from_slice(&table_size.to_le_bytes());
-    page[16..24].copy_from_slice(&(BASE + u64::try_from(TABLE_OFFSET).unwrap()).to_le_bytes());
-    page[5] = 0u8.wrapping_sub(
-        page[..ENTRY_LENGTH]
-            .iter()
-            .fold(0u8, |sum, byte| sum.wrapping_add(*byte)),
-    );
-    page
-}
-
 /// Publish only on a cold boot whose caller explicitly selected the CloudHv ABI.
 pub(crate) fn configure(
     memory: &GuestMemoryMmap,
@@ -128,13 +106,7 @@ pub(crate) fn configure(
     if protocol != BootProtocol::PvhBoot {
         return Err(invalid("CloudHv identity requires PVH boot"));
     }
-    let page = encode(uuid);
-    if !memory.check_range(GuestAddress(BASE), page.len()) {
-        return Err(invalid("SMBIOS reservation is outside guest RAM"));
-    }
-    memory
-        .write_slice(&page, GuestAddress(BASE))
-        .map_err(io::Error::other)
+    publish(memory, uuid, BASE)
 }
 
 #[cfg(test)]
@@ -149,35 +121,6 @@ mod tests {
                 .try_into()
                 .unwrap(),
         }
-    }
-
-    #[test]
-    fn identity_table_has_valid_checksum_uuid_strings_and_end_marker() {
-        let page = encode(firmware().cloud_hv_uuid().unwrap());
-        assert_eq!(&page[..5], b"_SM3_");
-        assert_eq!(page[6], 24);
-        assert_eq!(
-            page[..ENTRY_LENGTH]
-                .iter()
-                .fold(0u8, |sum, byte| sum.wrapping_add(*byte)),
-            0
-        );
-        assert_eq!(u64_at(&page, 16), BASE + 32);
-        let size = usize::try_from(u32_at(&page, 12)).unwrap();
-        assert!(size + TABLE_OFFSET <= PAGE_SIZE);
-        let table = &page[TABLE_OFFSET..TABLE_OFFSET + size];
-        assert_eq!(&table[..8], &[1, 27, 0, 1, 1, 2, 0, 0]);
-        assert_eq!(
-            &table[8..24],
-            &[
-                0x44, 0x33, 0x22, 0x11, 0x66, 0x55, 0x88, 0x77, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
-                0xff, 1
-            ]
-        );
-        let end = table.len() - 6;
-        assert_eq!(&table[27..end], b"Firecracker\0Firecracker microVM\0\0");
-        assert_eq!(&table[end..], &[127, 4, 255, 127, 0, 0]);
-        assert!(page[TABLE_OFFSET + size..].iter().all(|byte| *byte == 0));
     }
 
     #[test]
@@ -200,7 +143,7 @@ mod tests {
         assert_eq!(actual, sentinel);
         configure(&memory, Some(&firmware()), BootProtocol::PvhBoot).unwrap();
         memory.read_slice(&mut actual, GuestAddress(BASE)).unwrap();
-        assert_eq!(actual, encode(firmware().cloud_hv_uuid().unwrap()));
+        assert_eq!(actual, encode(firmware().cloud_hv_uuid().unwrap(), BASE));
         let short = crate::test_utils::single_region_mem_at(BASE, PAGE_SIZE - 1);
         configure(&short, Some(&firmware()), BootProtocol::PvhBoot).unwrap_err();
     }
