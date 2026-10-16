@@ -18,6 +18,8 @@ use std::sync::{Arc, Mutex};
 pub(crate) struct PlatformRegistration<'a> {
     events: &'a mut EventManager,
     subscriber: Option<SubscriberId>,
+    uefi_vars: Option<(SubscriberId, Arc<Mutex<super::uefi_vars::UefiVarsDevice>>)>,
+    tpm: Option<(SubscriberId, Arc<Mutex<super::tpm::TpmDevice>>)>,
     usb: Option<(SubscriberId, Arc<Mutex<UsbDevice>>)>,
     intx: Option<(SubscriberId, Arc<Mutex<PciIntxGroup>>)>,
     acpi_power: Option<(SubscriberId, Arc<Mutex<AcpiPower>>)>,
@@ -33,6 +35,8 @@ impl<'a> PlatformRegistration<'a> {
             subscriber: server.map(|server| events.add_subscriber(server.clone())),
             events,
             intx: None,
+            tpm: None,
+            uefi_vars: None,
             usb: None,
             acpi_power: None,
             rtc: None,
@@ -73,8 +77,34 @@ impl<'a> PlatformRegistration<'a> {
         Ok(self)
     }
 
+    pub(super) fn with_tpm(
+        mut self,
+        tpm: Option<&Arc<Mutex<super::tpm::TpmDevice>>>,
+    ) -> io::Result<Self> {
+        if let Some(tpm) = tpm {
+            let id = self.events.add_subscriber(tpm.clone());
+            self.tpm = Some((id, tpm.clone()));
+            tpm.lock().unwrap().check_registered()?;
+        }
+        Ok(self)
+    }
+
+    fn with_uefi_vars(
+        mut self,
+        variables: Option<&Arc<Mutex<super::uefi_vars::UefiVarsDevice>>>,
+    ) -> io::Result<Self> {
+        if let Some(variables) = variables {
+            let id = self.events.add_subscriber(variables.clone());
+            self.uefi_vars = Some((id, variables.clone()));
+            variables.lock().unwrap().check_registered()?;
+        }
+        Ok(self)
+    }
+
     pub(crate) fn commit(mut self) {
         self.subscriber = None;
+        self.tpm = None;
+        self.uefi_vars = None;
         self.usb = None;
         self.intx = None;
         self.acpi_power = None;
@@ -84,6 +114,14 @@ impl<'a> PlatformRegistration<'a> {
 
 impl Drop for PlatformRegistration<'_> {
     fn drop(&mut self) {
+        if let Some((id, variables)) = self.uefi_vars.take() {
+            self.events.remove_subscriber(id).unwrap();
+            variables.lock().unwrap().reset_registration();
+        }
+        if let Some((id, tpm)) = self.tpm.take() {
+            self.events.remove_subscriber(id).unwrap();
+            tpm.lock().unwrap().reset_registration();
+        }
         if let Some((id, usb)) = self.usb.take() {
             self.events.remove_subscriber(id).unwrap();
             usb.lock().unwrap().reset_registration();
@@ -121,7 +159,9 @@ impl DeviceManager {
         PlatformRegistration::new(events, self.console.as_ref().map(|console| &console.server))?
             .with_legacy(self.legacy_devices.as_ref())?
             .with_intx(intx)?
-            .with_usb(self.console.as_ref().map(|console| &console.usb))
+            .with_usb(self.console.as_ref().map(|console| &console.usb))?
+            .with_tpm(self.tpm.as_ref())?
+            .with_uefi_vars(self.uefi_vars.as_ref())
     }
 }
 
