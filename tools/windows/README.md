@@ -260,3 +260,23 @@ Never force offline writes to an NTFS volume reported as hibernated or unclean.
 The earlier QEMU-based preparation evidence remains historical. The revised
 single-DVD unattended procedures need fresh installation qualification for each
 selected edition; generating an answer file is not an installation result.
+
+## Evaluation activation
+
+Before long tests, connect the guest to the Internet and check its evaluation
+activation from an elevated command prompt:
+
+```bat
+cscript.exe //nologo C:\Windows\System32\slmgr.vbs /xpr
+```
+
+If activation is required, run
+`cscript.exe //nologo C:\Windows\System32\slmgr.vbs /ato`, then check `/xpr`
+again. These are
+[Microsoft's activation commands](https://learn.microsoft.com/en-us/windows-server/get-started/activation-slmgr-vbs-options).
+The preparation tool does not activate the installed guest.
+
+An unactivated or expired Windows 11 evaluation can
+[shut down every hour](https://www.microsoft.com/en-us/evalcenter/evaluate-windows-11-enterprise).
+A clean Firecracker exit alone does not establish workload success. Require all
+guest pass markers and a valid evaluation state for each run.

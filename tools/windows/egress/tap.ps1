@@ -6,7 +6,8 @@ param(
     [string]$Label = 'WINDOWS',
     [string]$MacAddress = '06:00:AC:1E:FE:07',
     [string]$GuestAddress = '172.30.254.2',
-    [string]$Gateway = '172.30.254.1'
+    [string]$Gateway = '172.30.254.1',
+    [switch]$SecureChecks
 )
 $ErrorActionPreference = 'Stop'
 $transcriptStarted = $false
@@ -38,6 +39,7 @@ try {
     Start-Sleep -Seconds 5
     (Get-Item "$env:windir\System32\winhttp.dll").VersionInfo | Format-List FileVersion, ProductVersion
     for ($iteration = 1; $iteration -le 3; $iteration++) {
+        if ($SecureChecks) { & "$PSScriptRoot\secure-check.ps1" -Iteration $iteration }
         "ITERATION $iteration $(Get-Date)"
         $data = New-Object byte[] 65536
         $storageRandom = New-Object Security.Cryptography.RNGCryptoServiceProvider
