@@ -65,6 +65,8 @@ use crate::{EventManager, Vmm, VmmError};
 /// Errors associated with starting the instance.
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum StartMicrovmError {
+    /// Unsupported build configuration: {0}
+    WindowsFeature(#[from] crate::vmm_config::WindowsFeatureDisabled),
     /// Unable to attach block device to Vmm: {0}
     AttachBlockDevice(io::Error),
     /// Could not attach device: {0}
@@ -149,6 +151,7 @@ pub fn build_microvm_for_boot(
     event_manager: &mut EventManager,
     seccomp_filters: &BpfThreadMap,
 ) -> Result<Arc<Mutex<Vmm>>, StartMicrovmError> {
+    vm_resources.validate_windows_support()?;
     // Timestamp for measuring microVM boot duration.
     let request_ts = TimestampUs::default();
 
@@ -398,6 +401,8 @@ pub fn build_and_boot_microvm(
 /// Error type for [`build_microvm_from_snapshot`].
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum BuildMicrovmFromSnapshotError {
+    /// Unsupported build configuration: {0}
+    WindowsFeature(#[from] crate::vmm_config::WindowsFeatureDisabled),
     /// Failed to create microVM and vCPUs: {0}
     CreateMicrovmAndVcpus(#[from] StartMicrovmError),
     /// Could not access KVM: {0}
@@ -448,11 +453,23 @@ pub fn build_microvm_from_snapshot(
     vmgenid_notification: crate::devices::acpi::vmgenid::VmGenIdRestoreNotification,
     vmclock_notification: crate::devices::acpi::vmclock::VmClockRestoreNotification,
 ) -> Result<Arc<Mutex<Vmm>>, BuildMicrovmFromSnapshotError> {
+    microvm_state.validate_windows_support()?;
     // Build Vmm.
     debug!("event_start: build microvm from snapshot");
 
     let kvm = Kvm::new(microvm_state.kvm_state.kvm_cap_modifiers.clone())
         .map_err(StartMicrovmError::Kvm)?;
+    #[cfg(target_arch = "x86_64")]
+    #[cfg(feature = "windows")]
+    if microvm_state
+        .vcpu_states
+        .iter()
+        .any(|state| crate::arch::x86_64::hyperv::enabled(&state.cpuid))
+    {
+        crate::arch::x86_64::hyperv::validate_host(&kvm.fd)
+            .map_err(ConfigurationError::Hyperv)
+            .map_err(StartMicrovmError::ConfigureSystem)?;
+    }
     // Set up KVM VM and register memory regions.
     // Build custom CPU config if a custom template is provided.
     let mut vm = KvmVm::new(kvm).map_err(StartMicrovmError::KvmVm)?;

@@ -1461,6 +1461,12 @@ definitions:
         type: boolean
         description: Flag for enabling/disabling simultaneous multithreading. Can be enabled only on x86.
         default: false
+      hyperv:
+        type: boolean
+        default: false
+        description: >-
+          Enable KVM Hyper-V enlightenments for Windows guests. Available only on
+          x86_64. Requires host Hyper-V CPUID and SynIC2 support.
       mem_size_mib:
         type: integer
         description: Memory size of VM

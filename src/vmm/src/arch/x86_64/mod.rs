@@ -12,6 +12,8 @@ pub mod cet;
 /// Logic for handling x86_64 CPU models.
 pub mod cpu_model;
 mod gdt;
+/// Hyper-V guest CPU support.
+pub mod hyperv;
 /// Contains logic for setting up Advanced Programmable Interrupt Controller (local version).
 pub mod interrupts;
 /// Architecture specific KVM-related code
@@ -109,6 +111,8 @@ pub enum ConfigurationError {
     VcpuConfigure(#[from] KvmVcpuConfigureError),
     /// Error configuring ACPI: {0}
     Acpi(#[from] crate::acpi::AcpiError),
+    /// Error configuring Hyper-V: {0}
+    Hyperv(#[from] hyperv::HypervError),
 }
 
 /// Returns a Vec of the valid memory addresses.
@@ -207,6 +211,18 @@ fn configure_vcpus_for_boot(
     // Phase 1: construct the shared, templated guest CPUID.
     let cpuid = Cpuid::try_from(kvm.supported_cpuid.clone()).map_err(GuestConfigError::from)?;
     let cpuid = apply_template_to_cpuid(cpuid, cpu_template)?;
+    #[cfg(not(feature = "windows"))]
+    if machine_config.hyperv {
+        return Err(hyperv::HypervError::Unavailable.into());
+    }
+    #[cfg(feature = "windows")]
+    let cpuid = {
+        let mut cpuid = cpuid;
+        if machine_config.hyperv {
+            hyperv::configure(&mut cpuid, &kvm.fd)?;
+        }
+        cpuid
+    };
 
     // Phase 2: set each normalized CPUID before reading CPUID-dependent MSRs.
     let configured_cpuids = vcpus

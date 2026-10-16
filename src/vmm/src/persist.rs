@@ -109,6 +109,22 @@ pub struct MicrovmState {
     pub device_states: DevicesState,
 }
 
+impl MicrovmState {
+    pub(crate) fn validate_windows_support(
+        &self,
+    ) -> Result<(), crate::vmm_config::WindowsFeatureDisabled> {
+        #[cfg(target_arch = "x86_64")]
+        if self
+            .vcpu_states
+            .iter()
+            .any(|state| crate::arch::x86_64::hyperv::enabled(&state.cpuid))
+        {
+            crate::vmm_config::require_windows_support()?;
+        }
+        Ok(())
+    }
+}
+
 /// This describes the mapping between Firecracker base virtual address and
 /// offset in the buffer or file backend for a guest memory region. It is used
 /// to tell an external process/thread where to populate the guest memory data
@@ -173,7 +189,7 @@ pub enum CreateSnapshotError {
 }
 
 /// Snapshot version
-pub const SNAPSHOT_VERSION: Version = Version::new(15, 0, 0);
+pub const SNAPSHOT_VERSION: Version = Version::new(13, 0, 0);
 
 /// Creates a Microvm snapshot.
 pub fn create_snapshot(
@@ -364,6 +380,8 @@ pub fn snapshot_state_sanity_check(
 /// Error type for [`restore_from_snapshot`].
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum RestoreFromSnapshotError {
+    /// Unsupported build configuration: {0}
+    WindowsFeature(#[from] crate::vmm_config::WindowsFeatureDisabled),
     /// Failed to get snapshot state from file: {0}
     File(#[from] SnapshotStateFromFileError),
     /// Invalid snapshot state: {0}
@@ -392,6 +410,7 @@ pub fn restore_from_snapshot(
     vm_resources: &mut VmResources,
 ) -> Result<Arc<Mutex<Vmm>>, RestoreFromSnapshotError> {
     let mut microvm_state = snapshot_state_from_file(&params.snapshot_path)?;
+    microvm_state.validate_windows_support()?;
     for entry in &params.network_overrides {
         // Only the active transport carries virtio device state, so we look at whichever
         // variant this snapshot was saved with. The MMIO and PCI transports wrap their net
@@ -447,6 +466,13 @@ pub fn restore_from_snapshot(
             vcpu_count: Some(vcpu_count),
             mem_size_mib: Some(u64_to_usize(microvm_state.vm_info.mem_size_mib)),
             smt: Some(microvm_state.vm_info.smt),
+            #[cfg(target_arch = "x86_64")]
+            hyperv: Some(
+                microvm_state
+                    .vcpu_states
+                    .first()
+                    .is_some_and(|state| crate::arch::x86_64::hyperv::enabled(&state.cpuid)),
+            ),
             #[cfg(target_arch = "x86_64")]
             pit: Some(microvm_state.vm_state.pit_enabled()),
             cpu_template: Some(microvm_state.vm_info.cpu_template),

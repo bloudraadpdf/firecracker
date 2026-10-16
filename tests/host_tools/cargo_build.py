@@ -165,3 +165,15 @@ def build_fuzzing(release=False):
     )
 
     return build_path / DEFAULT_TARGET / profile
+
+
+def build_windows():
+    """Build Firecracker with Windows support and return its binary directory."""
+    build_path = LOCAL_BUILD_PATH / "windows"
+    cargo(
+        "build",
+        f"--features windows --target {DEFAULT_TARGET} --all --release",
+        env={"CARGO_TARGET_DIR": build_path},
+    )
+
+    return build_path / DEFAULT_TARGET / "release"

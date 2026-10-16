@@ -260,7 +260,10 @@ impl Vcpu {
                     return VcpuRunState::Paused;
                 }
                 // Emulation errors lead to vCPU exit.
-                Err(_) => return self.exit(FcExitCode::GenericError),
+                Err(err) => {
+                    error!("vCPU emulation failed: {err}");
+                    return self.exit(FcExitCode::GenericError);
+                }
             }
         }
 
@@ -419,6 +422,22 @@ impl Vcpu {
         match self.kvm_vcpu.fd.run() {
             #[cfg(target_arch = "x86_64")]
             Ok(VcpuExit::IoIn(..) | VcpuExit::IoOut(..)) => self.kvm_vcpu.emulate_pio(),
+            #[cfg(target_arch = "x86_64")]
+            #[cfg(feature = "windows")]
+            Ok(VcpuExit::Hyperv) => {
+                // JUSTIFICATION: kvm-ioctls exposes no typed Hyper-V exit payload.
+                // SAFETY: KVM_EXIT_HYPERV selects this union member; KVM_RUN has
+                // returned and this thread exclusively owns the vCPU mapping.
+                let exit = unsafe { &mut self.kvm_vcpu.fd.get_kvm_run().__bindgen_anon_1.hyperv };
+                if crate::arch::x86_64::hyperv::handle_exit(exit) {
+                    Ok(VcpuEmulation::Handled)
+                } else {
+                    Err(VcpuError::UnhandledKvmExit(format!(
+                        "Hyper-V exit {}",
+                        exit.type_
+                    )))
+                }
+            }
             Err(ref err) if err.errno() == libc::EINTR => {
                 self.kvm_vcpu.fd.set_kvm_immediate_exit(0);
                 // Notify that this KVM_RUN was interrupted.
