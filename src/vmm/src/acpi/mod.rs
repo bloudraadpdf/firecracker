@@ -1,10 +1,18 @@
 // Copyright 2024 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use acpi_tables::aml;
+#[cfg(any(target_arch = "x86_64", feature = "windows"))]
 use acpi_tables::fadt::{FADT_F_HW_REDUCED_ACPI, FADT_F_PWR_BUTTON, FADT_F_SLP_BUTTON};
-use acpi_tables::{Dsdt, Fadt, Madt, Mcfg, RootTable, RootTableEntries, Rsdp, Sdt, aml};
+#[cfg(any(target_arch = "x86_64", feature = "windows"))]
+use acpi_tables::{Dsdt, Fadt, Madt, Mcfg, RootTable, RootTableEntries, Rsdp, Sdt};
+#[cfg(any(target_arch = "x86_64", feature = "windows"))]
 use vm_allocator::AllocPolicy;
 
+#[cfg(all(target_arch = "aarch64", feature = "windows"))]
+pub(crate) use self::aarch64::create_acpi_tables;
+#[cfg(all(target_arch = "aarch64", feature = "windows"))]
+use self::aarch64::{rsdp_addr, setup_arch_dsdt, setup_arch_fadt};
 #[cfg(target_arch = "x86_64")]
 use crate::Vcpu;
 #[cfg(target_arch = "x86_64")]
@@ -13,11 +21,17 @@ use crate::acpi::x86_64::{
 };
 #[cfg(target_arch = "x86_64")]
 use crate::arch::x86_64::layout;
+#[cfg(any(target_arch = "x86_64", feature = "windows"))]
 use crate::device_manager::DeviceManager;
+#[cfg(any(target_arch = "x86_64", feature = "windows"))]
 use crate::logger::{debug, error};
+#[cfg(any(target_arch = "x86_64", feature = "windows"))]
 use crate::vstate::memory::{GuestAddress, GuestMemoryMmap};
+#[cfg(any(target_arch = "x86_64", feature = "windows"))]
 use crate::vstate::resources::ResourceAllocator;
 
+#[cfg(all(target_arch = "aarch64", feature = "windows"))]
+mod aarch64;
 #[cfg(target_arch = "x86_64")]
 mod x86_64;
 
@@ -37,11 +51,13 @@ const OEM_REVISION: u32 = 0;
 #[cfg(any(target_arch = "x86_64", feature = "windows"))]
 const HYPERVISOR_VENDOR_ID: [u8; 8] = *b"FIRECKVM";
 
+#[cfg(target_arch = "x86_64")]
 #[derive(Clone, Copy)]
 pub(crate) enum DeviceScope {
     SystemBus,
 }
 
+#[cfg(target_arch = "x86_64")]
 impl DeviceScope {
     pub(crate) fn device_path(self, name: &str) -> Result<aml::Path, aml::AmlError> {
         let parent = match self {
@@ -54,6 +70,8 @@ impl DeviceScope {
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 /// Error type for ACPI related operations
 pub enum AcpiError {
+    /// Arm firmware requires PCI, a serial port and GICv3 with ITS
+    UnsupportedArmPlatform,
     /// Could not allocate resources: {0}
     VmAllocator(#[from] vm_allocator::Error),
     /// ACPI tables error: {0}
