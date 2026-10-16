@@ -807,6 +807,15 @@ RustCrypto for CMS/DER/X.509 parsing and the existing AWS-LC backend for RSA
 verification. Building it needs the existing AWS-LC C compiler and assembly
 toolchain. The normal standalone tool unit and Clippy gates include it.
 
+`functional/test_platform_devices.py` restricts Hyper-V and PVH device cases to
+AMD64. The PVH cases compile the Apache-licensed fixture in `data/platform/` and
+create their own ROM and media bytes. They check jailed boot, guest-written
+display pixels, console restore, protected-service checkpoint restore,
+generation rejection and backend failure. Helpers use private state and
+group-restricted sockets inside bind mounts. Teardown stops VMMs and helpers
+before removing those mounts. No Windows media is needed. These fixtures do not
+qualify production firmware, Secure Boot or Windows.
+
 ### Optional Windows capability
 
 The normal Rust unit, example and benchmark checks cover default and `windows`
