@@ -70,6 +70,11 @@ firmware and media paths when the supervisor changes directories. The ISO is
 immutable for the lifetime of a VM and its snapshots. Restore verifies its
 SHA-256 digest and the VGA ROM contents when a ROM is configured.
 
+Follow the [console bridge instructions](../tools/windows/console/README.md) for
+SSH, RFB, browser access, screenshots and keyboard input. The bridge runs
+outside the VMM. TCP listeners accept only loopback addresses; a remote
+deployment supplies authentication and TLS through its gateway or SSH.
+
 ## AMD64 installation and reboot
 
 The optical device is the primary IDE master. It supports read-only PIO ATAPI
