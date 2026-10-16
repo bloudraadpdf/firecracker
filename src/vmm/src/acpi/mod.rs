@@ -125,6 +125,17 @@ impl AcpiTableWriter<'_> {
         Ok(addr)
     }
 
+    #[cfg(all(target_arch = "x86_64", feature = "windows"))]
+    fn build_tpm2(&mut self, allocator: &mut ResourceAllocator) -> Result<u64, AcpiError> {
+        let mut table = acpi_tables::Tpm2::new(
+            OEM_ID,
+            *b"FCVMTPM2",
+            OEM_REVISION,
+            crate::devices::tpm::MMIO_BASE + 0x40,
+        );
+        self.write_acpi_table(allocator, &mut table)
+    }
+
     /// Build the DSDT table for the guest
     fn build_dsdt(
         &mut self,
@@ -257,6 +268,14 @@ pub(crate) fn create_acpi_tables(
     )?;
     let mcfg_addr = writer.build_mcfg(resource_allocator, layout::PCI_MMCONFIG_START)?;
     let tables = vec![fadt_addr, madt_addr, mcfg_addr];
+    #[cfg(feature = "windows")]
+    let tables = {
+        let mut tables = tables;
+        if device_manager.tpm.is_some() {
+            tables.push(writer.build_tpm2(resource_allocator)?);
+        }
+        tables
+    };
     let xsdt_addr = writer.build_xsdt(resource_allocator, tables.clone())?;
     if !device_manager.has_pc_devices() {
         return writer.build_rsdp(xsdt_addr, None);

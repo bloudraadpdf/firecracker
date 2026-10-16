@@ -60,3 +60,7 @@ pub enum DeviceError {
 /// TPM 2.0 CRB with private swtpm state.
 #[cfg(target_arch = "x86_64")]
 pub mod tpm;
+
+/// Protected firmware-variable transport.
+#[cfg(target_arch = "x86_64")]
+pub mod uefi_vars;

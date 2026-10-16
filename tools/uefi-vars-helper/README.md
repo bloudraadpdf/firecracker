@@ -15,6 +15,10 @@ PKCS#7 verification, authenticated timestamps, PK/KEK/db/dbx hierarchy and
 variable policy. Secure Boot is forced and custom mode is disabled after host
 provisioning. Host administrators and the VMM are trusted.
 
+The AMD64 transport occupies the reserved page at `0xfed50000`; registers follow
+`OvmfPkg/Include/IndustryStandard/QemuUefiVars.h`. The separate TPM CRB page is
+`0xfed40000`. See the [VMM service contract](../../docs/windows-secure-boot.md).
+
 ## IPC version 1
 
 One connected Unix stream carries serial requests. Each header is 16 bytes:
@@ -104,7 +108,8 @@ the VMM must stop rather than continue with uncommitted security state.
 
 An update that leaves the complete variable record unchanged still runs
 authentication and policy checks. It does not replace the checkpoint or advance
-its generation.
+its generation. The VMM's four-second transfer deadline includes durable writes;
+a timeout stops the VM.
 
 The helper appends `.lock` and `.pending` to the complete store filename. After
 restart, it acquires the lock and validates the committed store before removing

@@ -86,6 +86,9 @@ const MEMMAP_TYPE_RAM: u32 = 1;
 /// Fixed TPM CRB aperture.
 pub const TPM_MEM_START: u64 = 0xfed4_0000;
 
+/// Fixed protected-variable register page.
+pub const UEFI_VARS_MEM_START: u64 = 0xfed5_0000;
+
 /// Errors thrown while configuring x86_64 system.
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum ConfigurationError {

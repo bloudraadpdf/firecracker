@@ -924,7 +924,7 @@ mod tests {
             );
 
             vmm.device_manager.prepare_save().unwrap();
-            let device_state = vmm.device_manager.save();
+            let device_state = vmm.device_manager.save().unwrap();
             serialized_data = bitcode::serialize(&device_state).unwrap();
             saved_allocator = vmm.vm.as_kvm().unwrap().resource_allocator().save()
         }
