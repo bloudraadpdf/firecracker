@@ -5,30 +5,51 @@ use acpi_tables::fadt::{FADT_F_HW_REDUCED_ACPI, FADT_F_PWR_BUTTON, FADT_F_SLP_BU
 use acpi_tables::{Dsdt, Fadt, Madt, Mcfg, RootTable, RootTableEntries, Rsdp, Sdt, aml};
 use vm_allocator::AllocPolicy;
 
+#[cfg(target_arch = "x86_64")]
 use crate::Vcpu;
+#[cfg(target_arch = "x86_64")]
 use crate::acpi::x86_64::{
     apic_addr, rsdp_addr, setup_arch_dsdt, setup_arch_fadt, setup_interrupt_controllers,
 };
+#[cfg(target_arch = "x86_64")]
 use crate::arch::x86_64::layout;
 use crate::device_manager::DeviceManager;
 use crate::logger::{debug, error};
 use crate::vstate::memory::{GuestAddress, GuestMemoryMmap};
 use crate::vstate::resources::ResourceAllocator;
 
+#[cfg(target_arch = "x86_64")]
 mod x86_64;
 
 // Our (Original Equipment Manufacturer" (OEM) name. OEM is how ACPI names the manufacturer of the
 // hardware that is exposed to the OS, through ACPI tables. The OEM name is passed in every ACPI
 // table, to let the OS know that we are the owner of the table.
+#[cfg(any(target_arch = "x86_64", feature = "windows"))]
 const OEM_ID: [u8; 6] = *b"FIRECK";
 
 // In reality the OEM revision is per table and it defines the revision of the OEM's implementation
 // of the particular ACPI table. For our purpose, we can set it to a fixed value for all the tables
+#[cfg(any(target_arch = "x86_64", feature = "windows"))]
 const OEM_REVISION: u32 = 0;
 
 // This is needed for an entry in the FADT table. Populating this entry in FADT is a way to let the
 // guest know that it runs within a Firecracker microVM.
+#[cfg(any(target_arch = "x86_64", feature = "windows"))]
 const HYPERVISOR_VENDOR_ID: [u8; 8] = *b"FIRECKVM";
+
+#[derive(Clone, Copy)]
+pub(crate) enum DeviceScope {
+    SystemBus,
+}
+
+impl DeviceScope {
+    pub(crate) fn device_path(self, name: &str) -> Result<aml::Path, aml::AmlError> {
+        let parent = match self {
+            Self::SystemBus => "_SB_",
+        };
+        format!("{parent}.{name}").as_str().try_into()
+    }
+}
 
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 /// Error type for ACPI related operations
@@ -43,10 +64,12 @@ pub enum AcpiError {
 
 /// Helper type that holds the guest memory in which we write the tables in and a resource
 /// allocator for allocating space for the tables
+#[cfg(any(target_arch = "x86_64", feature = "windows"))]
 struct AcpiTableWriter<'a> {
     mem: &'a GuestMemoryMmap,
 }
 
+#[cfg(any(target_arch = "x86_64", feature = "windows"))]
 impl AcpiTableWriter<'_> {
     /// Write a table in guest memory
     ///
@@ -62,7 +85,11 @@ impl AcpiTableWriter<'_> {
     {
         let addr = resource_allocator
             .system_memory
-            .allocate(table.len().try_into().unwrap(), 1, AllocPolicy::FirstMatch)?
+            .allocate(
+                table.len().try_into().unwrap(),
+                table.alignment(),
+                AllocPolicy::FirstMatch,
+            )?
             .start();
 
         table
@@ -87,10 +114,11 @@ impl AcpiTableWriter<'_> {
         let mut dsdt_data = Vec::new();
 
         // Device DSDT data.
+        #[cfg(target_arch = "x86_64")]
         device_manager.append_aml_bytes(&mut dsdt_data)?;
 
         // Architecture specific DSDT data
-        setup_arch_dsdt(&mut dsdt_data)?;
+        setup_arch_dsdt(&mut dsdt_data, device_manager)?;
 
         let mut dsdt = Dsdt::new(OEM_ID, *b"FCVMDSDT", OEM_REVISION, dsdt_data);
         self.write_acpi_table(resource_allocator, &mut dsdt)
@@ -103,6 +131,7 @@ impl AcpiTableWriter<'_> {
         &mut self,
         resource_allocator: &mut ResourceAllocator,
         dsdt_addr: u64,
+        devices: &DeviceManager,
     ) -> Result<u64, AcpiError> {
         let mut fadt = Fadt::new(OEM_ID, *b"FCVMFADT", OEM_REVISION);
         fadt.set_hypervisor_vendor_id(HYPERVISOR_VENDOR_ID);
@@ -110,7 +139,12 @@ impl AcpiTableWriter<'_> {
         fadt.set_flags(
             (1 << FADT_F_HW_REDUCED_ACPI) | (1 << FADT_F_PWR_BUTTON) | (1 << FADT_F_SLP_BUTTON),
         );
-        setup_arch_fadt(&mut fadt);
+        setup_arch_fadt(&mut fadt, devices);
+        #[cfg(target_arch = "x86_64")]
+        if devices.has_pc_devices() {
+            let facs_addr = self.write_acpi_table(resource_allocator, &mut acpi_tables::Facs)?;
+            fadt.set_facs(facs_addr);
+        }
         self.write_acpi_table(resource_allocator, &mut fadt)
     }
 
@@ -120,34 +154,31 @@ impl AcpiTableWriter<'_> {
     fn build_madt(
         &mut self,
         resource_allocator: &mut ResourceAllocator,
-        nr_vcpus: u8,
+        interrupt_controllers: Vec<u8>,
+        apic_address: u32,
     ) -> Result<u64, AcpiError> {
         let mut madt = Madt::new(
             OEM_ID,
             *b"FCVMMADT",
             OEM_REVISION,
-            apic_addr(),
-            false,
-            setup_interrupt_controllers(nr_vcpus),
+            apic_address,
+            cfg!(target_arch = "x86_64"),
+            interrupt_controllers,
         );
         self.write_acpi_table(resource_allocator, &mut madt)
     }
 
     /// Build the XSDT table for the guest
-    ///
-    /// Currently, we pass to the guest just FADT and MADT tables.
     fn build_xsdt(
         &mut self,
         resource_allocator: &mut ResourceAllocator,
-        fadt_addr: u64,
-        madt_addr: u64,
-        mcfg_addr: u64,
+        tables: Vec<u64>,
     ) -> Result<u64, AcpiError> {
         let mut xsdt = RootTable::new(
             OEM_ID,
             *b"FCMVXSDT",
             OEM_REVISION,
-            RootTableEntries::Xsdt(vec![fadt_addr, madt_addr, mcfg_addr]),
+            RootTableEntries::Xsdt(tables),
         );
         self.write_acpi_table(resource_allocator, &mut xsdt)
     }
@@ -164,11 +195,11 @@ impl AcpiTableWriter<'_> {
 
     /// Build the RSDP pointer for the guest.
     ///
-    /// This will build the RSDP pointer which points to the XSDT table and write it in guest
+    /// This will build the RSDP pointer which points to the root tables and write it in guest
     /// memory. The address in which we write RSDP is pre-determined for every architecture.
     /// We will not allocate arbitrary memory for it
-    fn build_rsdp(&mut self, xsdt_addr: u64) -> Result<(), AcpiError> {
-        let mut rsdp = Rsdp::new(OEM_ID, xsdt_addr, None);
+    fn build_rsdp(&mut self, xsdt_addr: u64, rsdt_addr: Option<u32>) -> Result<(), AcpiError> {
+        let mut rsdp = Rsdp::new(OEM_ID, xsdt_addr, rsdt_addr);
         rsdp.write_to_guest(self.mem, rsdp_addr())
             .inspect_err(|err| error!("acpi: Could not write RSDP in guest memory: {err}"))?;
 
@@ -185,6 +216,7 @@ impl AcpiTableWriter<'_> {
 ///
 /// This will create the ACPI tables needed to describe to the guest OS the available hardware,
 /// such as interrupt controllers, vCPUs and VirtIO devices.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn create_acpi_tables(
     mem: &GuestMemoryMmap,
     device_manager: &mut DeviceManager,
@@ -194,14 +226,39 @@ pub(crate) fn create_acpi_tables(
     let mut writer = AcpiTableWriter { mem };
     let dsdt_addr = writer.build_dsdt(device_manager, resource_allocator)?;
 
-    let fadt_addr = writer.build_fadt(resource_allocator, dsdt_addr)?;
-    let madt_addr = writer.build_madt(resource_allocator, vcpus.len().try_into().unwrap())?;
+    let fadt_addr = writer.build_fadt(resource_allocator, dsdt_addr, device_manager)?;
+    let madt_addr = writer.build_madt(
+        resource_allocator,
+        setup_interrupt_controllers(
+            vcpus.len().try_into().unwrap(),
+            device_manager.has_pc_devices(),
+        ),
+        apic_addr(),
+    )?;
     let mcfg_addr = writer.build_mcfg(resource_allocator, layout::PCI_MMCONFIG_START)?;
-    let xsdt_addr = writer.build_xsdt(resource_allocator, fadt_addr, madt_addr, mcfg_addr)?;
-    writer.build_rsdp(xsdt_addr)
+    let tables = vec![fadt_addr, madt_addr, mcfg_addr];
+    let xsdt_addr = writer.build_xsdt(resource_allocator, tables.clone())?;
+    if !device_manager.has_pc_devices() {
+        return writer.build_rsdp(xsdt_addr, None);
+    }
+    let tables = tables
+        .into_iter()
+        .map(u32::try_from)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| acpi_tables::AcpiError::InvalidGuestAddress)?;
+    let mut rsdt = RootTable::new(
+        OEM_ID,
+        *b"FCVMRSDT",
+        OEM_REVISION,
+        RootTableEntries::Rsdt(tables),
+    );
+    let rsdt_addr = u32::try_from(writer.write_acpi_table(resource_allocator, &mut rsdt)?)
+        .map_err(|_| acpi_tables::AcpiError::InvalidGuestAddress)?;
+    writer.build_rsdp(xsdt_addr, Some(rsdt_addr))
 }
 
 #[cfg(test)]
+#[cfg(target_arch = "x86_64")]
 mod tests {
     use acpi_tables::Sdt;
     use vm_memory::Bytes;
@@ -214,6 +271,179 @@ mod tests {
     use crate::vstate::vm::tests::setup_vm_with_memory;
 
     struct MockSdt(Vec<u8>);
+
+    #[cfg(feature = "windows")]
+    fn pc_vmm() -> crate::Vmm {
+        let mut vmm = default_vmm();
+        vmm.device_manager.legacy_devices.as_mut().unwrap().pc = Some(
+            crate::device_manager::legacy::PcDevices::new(
+                vmm.vm.as_kvm().unwrap().vcpus_exit_evt(),
+            )
+            .unwrap(),
+        );
+        vmm
+    }
+
+    fn create_tables(vmm: &mut crate::Vmm) {
+        let vm = vmm.vm.as_kvm().unwrap();
+        super::create_acpi_tables(
+            vm.guest_memory(),
+            &mut vmm.device_manager,
+            &mut vm.resource_allocator(),
+            &[],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    #[cfg(feature = "windows")]
+    fn x86_root_tables_include_32_bit_addresses() {
+        let mut vmm = pc_vmm();
+        create_tables(&mut vmm);
+        let vm = vmm.vm.as_kvm().unwrap().clone();
+        let read = |address, length| {
+            let mut bytes = vec![0u8; length];
+            vm.guest_memory()
+                .read_slice(&mut bytes, vm_memory::GuestAddress(address))
+                .unwrap();
+            bytes
+        };
+        let rsdp = read(super::rsdp_addr().0, 36);
+        let rsdt_address = u32::from_le_bytes(rsdp[16..20].try_into().unwrap());
+        assert_ne!(rsdt_address, 0);
+        let xsdt_address = u64::from_le_bytes(rsdp[24..32].try_into().unwrap());
+        let rsdt = read(u64::from(rsdt_address), 48);
+        let xsdt = read(xsdt_address, 60);
+        assert_eq!(&rsdt[..4], b"RSDT");
+        assert_eq!(&xsdt[..4], b"XSDT");
+        for table in [&rsdt[..], &xsdt[..]] {
+            assert_eq!(
+                u32::from_le_bytes(table[4..8].try_into().unwrap()) as usize,
+                table.len()
+            );
+        }
+        for bytes in [&rsdp[..20], &rsdp[..], &rsdt[..], &xsdt[..]] {
+            assert_eq!(
+                bytes.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte)),
+                0
+            );
+        }
+        for (legacy, extended) in rsdt[36..]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(xsdt[36..].as_chunks::<8>().0)
+        {
+            assert_eq!(
+                u64::from(u32::from_le_bytes(*legacy)),
+                u64::from_le_bytes(*extended)
+            );
+        }
+    }
+
+    #[test]
+    fn minimal_linux_keeps_hardware_reduced_acpi() {
+        let mut vmm = default_vmm();
+        create_tables(&mut vmm);
+        let vm = vmm.vm.as_kvm().unwrap().clone();
+        let mut rsdp = [0; 36];
+        vm.guest_memory()
+            .read_slice(&mut rsdp, super::rsdp_addr())
+            .unwrap();
+        assert_eq!(u32::from_le_bytes(rsdp[16..20].try_into().unwrap()), 0);
+        let xsdt = u64::from_le_bytes(rsdp[24..32].try_into().unwrap());
+        let mut entry = [0; 8];
+        vm.guest_memory()
+            .read_slice(&mut entry, vm_memory::GuestAddress(xsdt + 36))
+            .unwrap();
+        let fadt = u64::from_le_bytes(entry);
+        let mut table = [0; 276];
+        vm.guest_memory()
+            .read_slice(&mut table, vm_memory::GuestAddress(fadt))
+            .unwrap();
+        assert_eq!(&table[..4], b"FACP");
+        assert_ne!(
+            u32::from_le_bytes(table[112..116].try_into().unwrap()) & (1 << 20),
+            0
+        );
+        assert_eq!(&table[36..40], &[0; 4]);
+        assert_eq!(&table[46..48], &[0; 2]);
+        assert_eq!(&table[56..80], &[0; 24]);
+        assert_eq!(&table[132..140], &[0; 8]);
+    }
+
+    #[test]
+    #[cfg(feature = "windows")]
+    fn test_conventional_fadt_and_aligned_facs() {
+        let vmm = pc_vmm();
+        let mut writer = AcpiTableWriter {
+            mem: vmm.vm.as_kvm().unwrap().guest_memory(),
+        };
+        let mut allocator = vmm.vm.as_kvm().unwrap().resource_allocator();
+        writer
+            .write_acpi_table(&mut allocator, &mut MockSdt(vec![0; 3]))
+            .unwrap();
+        let address = writer
+            .build_fadt(&mut allocator, 0xf1000, &vmm.device_manager)
+            .unwrap();
+        let mut table = [0u8; 276];
+        writer
+            .mem
+            .read_slice(&mut table, vm_memory::GuestAddress(address))
+            .unwrap();
+        assert_eq!(
+            table.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte)),
+            0
+        );
+        let flags = u32::from_le_bytes(table[112..116].try_into().unwrap());
+        assert_eq!(flags & (1 << 20), 0);
+        assert_ne!(flags & (1 << 8), 0);
+        assert_eq!(u16::from_le_bytes(table[46..48].try_into().unwrap()), 3);
+        assert_eq!(u32::from_le_bytes(table[56..60].try_into().unwrap()), 0x602);
+        assert_eq!(u32::from_le_bytes(table[64..68].try_into().unwrap()), 0x606);
+        assert_eq!(u32::from_le_bytes(table[76..80].try_into().unwrap()), 0x608);
+        assert_eq!(&table[88..92], &[4, 2, 0, 4]);
+        let facs_address = u64::from(u32::from_le_bytes(table[36..40].try_into().unwrap()));
+        assert_ne!(facs_address, 0);
+        assert_eq!(facs_address % 64, 0);
+        assert_eq!(u64::from_le_bytes(table[132..140].try_into().unwrap()), 0);
+        let mut facs = [0u8; 64];
+        writer
+            .mem
+            .read_slice(&mut facs, vm_memory::GuestAddress(facs_address))
+            .unwrap();
+        assert_eq!(&facs[..8], b"FACS\x40\0\0\0");
+        assert_eq!(facs[32], 2);
+    }
+
+    #[test]
+    #[cfg(feature = "windows")]
+    fn test_madt_declares_legacy_pic() {
+        let vmm = default_vmm();
+        let mut writer = AcpiTableWriter {
+            mem: vmm.vm.as_kvm().unwrap().guest_memory(),
+        };
+        let address = writer
+            .build_madt(
+                &mut vmm.vm.as_kvm().unwrap().resource_allocator(),
+                super::setup_interrupt_controllers(1, true),
+                super::apic_addr(),
+            )
+            .unwrap();
+        let mut table = [0u8; 74];
+        writer
+            .mem
+            .read_slice(&mut table, vm_memory::GuestAddress(address))
+            .unwrap();
+        assert_eq!(&table[..4], b"APIC");
+        assert_eq!(u32::from_le_bytes(table[4..8].try_into().unwrap()), 74);
+        assert_eq!(u32::from_le_bytes(table[40..44].try_into().unwrap()), 1);
+        assert_eq!(&table[64..], &[2, 10, 0, 3, 3, 0, 0, 0, 15, 0]);
+        assert_eq!(
+            table.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte)),
+            0
+        );
+    }
 
     impl Sdt for MockSdt {
         fn len(&self) -> usize {

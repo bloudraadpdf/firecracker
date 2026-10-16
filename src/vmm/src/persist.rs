@@ -113,6 +113,10 @@ impl MicrovmState {
     pub(crate) fn validate_windows_support(
         &self,
     ) -> Result<(), crate::vmm_config::WindowsFeatureDisabled> {
+        self.device_states.validate_windows_support()?;
+        if self.vm_info.boot_source.firmware.is_some() {
+            crate::vmm_config::require_windows_support()?;
+        }
         #[cfg(target_arch = "x86_64")]
         if self
             .vcpu_states
@@ -189,7 +193,7 @@ pub enum CreateSnapshotError {
 }
 
 /// Snapshot version
-pub const SNAPSHOT_VERSION: Version = Version::new(13, 0, 0);
+pub const SNAPSHOT_VERSION: Version = Version::new(14, 0, 0);
 
 /// Creates a Microvm snapshot.
 pub fn create_snapshot(

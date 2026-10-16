@@ -157,6 +157,9 @@ impl VmResources {
     pub(crate) fn validate_windows_support(
         &self,
     ) -> Result<(), crate::vmm_config::WindowsFeatureDisabled> {
+        if self.boot_source.config.firmware.is_some() {
+            crate::vmm_config::require_windows_support()?;
+        }
         #[cfg(target_arch = "x86_64")]
         if self.machine_config.hyperv {
             crate::vmm_config::require_windows_support()?;
@@ -183,6 +186,7 @@ impl VmResources {
         metadata_json: Option<&str>,
     ) -> Result<Self, ResourcesError> {
         let vmm_config = serde_json::from_str::<VmmConfig>(config_json)?;
+        vmm_config.boot_source.validate()?;
 
         #[cfg(target_arch = "x86_64")]
         if vmm_config
@@ -619,24 +623,44 @@ mod tests {
     use crate::vmm_config::net::{NetBuilder, NetworkInterfaceConfig};
     use crate::vmm_config::vsock::tests::default_config;
 
-    #[cfg(all(target_arch = "x86_64", not(feature = "windows")))]
+    #[cfg(not(feature = "windows"))]
     #[test]
     fn windows_configuration_is_rejected_before_file_access() {
-        let config = serde_json::json!({
-            "boot-source":{"kernel_image_path":"/nonexistent/windows-feature/kernel"},
-            "cpu-config":"/nonexistent/windows-feature/cpu-template",
-            "logger":{"log_path":"/nonexistent/windows-feature/log"},
-            "metrics":{"metrics_path":"/nonexistent/windows-feature/metrics"},
-            "machine-config":{"vcpu_count":1,"mem_size_mib":128,"hyperv":true},
-            "drives":[]
-        });
-        let error = VmResources::from_json(&config.to_string(), &InstanceInfo::default(), 0, None)
-            .unwrap_err();
-        assert!(
-            matches!(error, ResourcesError::WindowsFeature(_)),
-            "{error}"
-        );
-        assert!(error.to_string().contains("windows build feature"));
+        let requests = [serde_json::json!({"boot-source":{
+            "kernel_image_path":"/nonexistent/windows-feature/kernel",
+            "firmware":{"type":"seabios"}
+        }})];
+        #[cfg(target_arch = "x86_64")]
+        let requests = requests
+            .into_iter()
+            .chain([serde_json::json!({"machine-config":{
+                "vcpu_count":1,"mem_size_mib":128,"hyperv":true
+            }})]);
+        for request in requests {
+            let mut config = serde_json::json!({
+                "boot-source":{"kernel_image_path":"/nonexistent/windows-feature/kernel"},
+                "cpu-config":"/nonexistent/windows-feature/cpu-template",
+                "logger":{"log_path":"/nonexistent/windows-feature/log"},
+                "metrics":{"metrics_path":"/nonexistent/windows-feature/metrics"},
+                "drives":[]
+            });
+            for (key, value) in request.as_object().unwrap() {
+                config[key] = value.clone();
+            }
+            let error =
+                VmResources::from_json(&config.to_string(), &InstanceInfo::default(), 0, None)
+                    .unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    ResourcesError::WindowsFeature(_)
+                        | ResourcesError::BootSource(BootSourceConfigError::WindowsFeature(_))
+                        | ResourcesError::MachineConfig(MachineConfigError::WindowsFeature(_))
+                ),
+                "{error}"
+            );
+            assert!(error.to_string().contains("windows build feature"));
+        }
     }
 
     fn default_net_cfg() -> NetworkInterfaceConfig {
@@ -1672,6 +1696,7 @@ mod tests {
         let tmp_file = TempFile::new().unwrap();
         let cmdline = "reboot=k panic=1 pci=off nomodule 8250.nr_uarts=0";
         let expected_boot_cfg = BootSourceConfig {
+            firmware: None,
             kernel_image_path: String::from(tmp_file.as_path().to_str().unwrap()),
             initrd_path: Some(String::from(tmp_file.as_path().to_str().unwrap())),
             boot_args: Some(cmdline.to_string()),
