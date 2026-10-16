@@ -179,7 +179,7 @@ pub fn build_microvm_for_boot(
     // Set up KVM VM and register memory regions.
     // Build custom CPU config if a custom template is provided.
     let mut vm = KvmVm::new(kvm)?;
-    let mut vcpus = vm.create_vcpus(&vm_resources.machine_config)?;
+    let vcpus = vm.create_vcpus(&vm_resources.machine_config)?;
     vm.register_dram_memory_regions(guest_memory)?;
 
     // Allocate memory as soon as possible to make hotpluggable memory available to all consumers,
@@ -201,7 +201,7 @@ pub fn build_microvm_for_boot(
         None
     };
 
-    let kvm_vm = Arc::new(vm);
+    let (kvm_vm, mut vcpus) = (Arc::new(vm), vcpus);
     let vm = Vm::Kvm(kvm_vm.clone());
 
     let mut device_manager = DeviceManager::new(
@@ -522,7 +522,7 @@ pub fn build_microvm_from_snapshot(
 
     vm.set_uffd(uffd);
 
-    let kvm_vm = Arc::new(vm);
+    let (kvm_vm, vcpus) = (Arc::new(vm), vcpus);
     let vm = Vm::Kvm(kvm_vm.clone());
     // Restore devices states.
     // Restoring VMGenID injects an interrupt in the guest to notify it about the new generation
