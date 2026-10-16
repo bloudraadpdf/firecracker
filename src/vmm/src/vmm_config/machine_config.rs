@@ -348,7 +348,7 @@ mod tests {
     #[cfg(target_arch = "aarch64")]
     #[test]
     fn pit_option_is_rejected_on_aarch64() {
-        assert!(serde_json::from_str::<super::MachineConfigUpdate>(r#"{"pit":false}"#).is_err());
+        serde_json::from_str::<super::MachineConfigUpdate>(r#"{"pit":false}"#).unwrap_err();
     }
 
     // Ensure the special (de)serialization logic for the cpu_template field works:
