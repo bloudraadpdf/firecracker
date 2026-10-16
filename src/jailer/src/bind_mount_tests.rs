@@ -49,7 +49,7 @@ fn rejects_invalid_bind_paths_and_duplicate_destinations() {
             .map(str::to_owned),
         )
         .unwrap();
-    assert!(BindMount::from_arguments(&arguments).is_err());
+    BindMount::from_arguments(&arguments).unwrap_err();
 }
 
 #[test]
@@ -104,13 +104,15 @@ fn private_bind_mounts_preserve_restrictions_and_host_unlink() {
         let namespace = fs::read_link(format!("/proc/{tid}/ns/mnt")).unwrap();
         assert_ne!(namespace, fs::read_link("/proc/self/ns/mnt").unwrap());
         assert_eq!(fs::read_dir(jail.join("restore")).unwrap().count(), 0);
-        children.push((child, namespace));
+        children.push((child, namespace, output));
     }
     assert_ne!(children[0].1, children[1].1);
     fs::remove_file(source.join("snapshot")).unwrap();
-    for (mut child, _) in children {
+    for (mut child, _, mut output) in children {
         child.stdin.take().unwrap().write_all(b"x").unwrap();
-        assert!(child.wait().unwrap().success());
+        let mut report = String::new();
+        output.read_to_string(&mut report).unwrap();
+        assert!(child.wait().unwrap().success(), "{report}");
     }
     assert_eq!(fs::read(source.join("captured")).unwrap(), b"captured");
     let target = root.join("0/restore");
@@ -144,8 +146,8 @@ fn bound_child() {
     fs::write("/warm/captured", b"captured").unwrap();
     for path in [c"/restore", c"/warm"] {
         let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-        // SAFETY: path is a valid C string and stat is writable for the syscall.
         assert_eq!(
+            // SAFETY: path is a valid C string and stat is writable for the syscall.
             unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) },
             0
         );
@@ -161,5 +163,4 @@ fn bound_child() {
     std::io::stdout().flush().unwrap();
     std::io::stdin().read_exact(&mut [0]).unwrap();
     assert!(!Path::new("/restore/snapshot").exists());
-    std::process::exit(0);
 }
