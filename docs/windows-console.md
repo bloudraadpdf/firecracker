@@ -198,7 +198,7 @@ would otherwise select installation media again.
 AMD64 console snapshots contain display memory and registers, keyboard/mouse
 queues, held input, pending releases, keyboard LEDs and pending lock updates,
 USB controller/HID state, PCI state, optical transfer state and media identity.
-The current snapshot format is 23.0.0. Display state adds about 16 MiB; the
+The current snapshot format is 25.0.0. Display state adds about 16 MiB; the
 bounded snapshot reader accepts at most 32 MiB. The guest disk remains a
 separate artifact, as with ordinary Firecracker snapshots.
 

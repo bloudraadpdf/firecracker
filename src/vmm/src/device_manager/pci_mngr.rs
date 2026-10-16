@@ -927,7 +927,7 @@ mod tests {
             );
 
             vmm.device_manager.prepare_save().unwrap();
-            let device_state = vmm.device_manager.save();
+            let device_state = vmm.device_manager.save().unwrap();
             serialized_data = bitcode::serialize(&device_state).unwrap();
             saved_allocator = vmm.vm.as_kvm().unwrap().resource_allocator().save()
         }
@@ -1052,6 +1052,11 @@ mod tests {
             _pmem_files.last().unwrap().as_path().to_str().unwrap(),
             hyperv = if cfg!(target_arch = "x86_64") {
                 "    \"hyperv\": false,\n"
+            } else {
+                ""
+            },
+            pit = if cfg!(target_arch = "x86_64") {
+                "    \"pit\": true,\n"
             } else {
                 ""
             },

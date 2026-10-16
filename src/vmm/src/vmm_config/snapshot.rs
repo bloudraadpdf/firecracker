@@ -122,6 +122,12 @@ pub struct LoadSnapshotParams {
     pub network_overrides: Vec<NetworkOverride>,
     /// When set, the vsock backend UDS path will be overridden
     pub vsock_override: Option<VsockOverride>,
+    /// Dedicated destination TPM backend; required exactly when the snapshot has a TPM.
+    #[cfg(target_arch = "x86_64")]
+    pub tpm: Option<super::tpm::TpmConfig>,
+    /// Destination variable-service store and its explicit current generation.
+    #[cfg(target_arch = "x86_64")]
+    pub uefi_vars: Option<super::uefi_vars::UefiVarsRestoreConfig>,
     /// [x86_64 only] When set to true, passes `KVM_CLOCK_REALTIME` to `KVM_SET_CLOCK` on restore,
     /// advancing kvmclock by the wall-clock time elapsed since the snapshot was taken. When false
     /// (default), kvmclock resumes from where it was at snapshot time.
@@ -164,6 +170,12 @@ pub struct LoadSnapshotConfig {
     /// Whether or not to override the vsock backend UDS path.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vsock_override: Option<VsockOverride>,
+    /// Dedicated destination TPM backend; required exactly when the snapshot has a TPM.
+    #[cfg(target_arch = "x86_64")]
+    pub tpm: Option<super::tpm::TpmConfig>,
+    /// Destination variable-service store and its explicit current generation.
+    #[cfg(target_arch = "x86_64")]
+    pub uefi_vars: Option<super::uefi_vars::UefiVarsRestoreConfig>,
     /// [x86_64 only] When set to true, passes `KVM_CLOCK_REALTIME` to `KVM_SET_CLOCK` on restore.
     #[serde(default)]
     pub clock_realtime: bool,

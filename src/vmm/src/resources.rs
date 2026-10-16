@@ -87,6 +87,12 @@ pub enum CustomCpuTemplateOrPath {
 pub struct VmmConfig {
     #[cfg(target_arch = "x86_64")]
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub uefi_vars: Option<crate::vmm_config::uefi_vars::UefiVarsConfig>,
+    #[cfg(target_arch = "x86_64")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tpm: Option<crate::vmm_config::tpm::TpmConfig>,
+    #[cfg(target_arch = "x86_64")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub console: Option<crate::vmm_config::console::ConsoleConfig>,
     pub balloon: Option<BalloonDeviceConfig>,
     pub drives: Vec<BlockDeviceConfig>,
@@ -120,6 +126,15 @@ pub struct LaunchIo {
 /// held in the Vmm.
 #[derive(Debug, Default)]
 pub struct VmResources {
+    /// Optional protected firmware variable service.
+    #[cfg(target_arch = "x86_64")]
+    pub uefi_vars: Option<crate::vmm_config::uefi_vars::UefiVarsConfig>,
+    /// Explicit destination store generation, used only during snapshot loading.
+    #[cfg(target_arch = "x86_64")]
+    pub uefi_vars_restore: Option<crate::vmm_config::uefi_vars::UefiVarsRestoreConfig>,
+    /// Optional private TPM backend.
+    #[cfg(target_arch = "x86_64")]
+    pub tpm: Option<crate::vmm_config::tpm::TpmConfig>,
     /// Optional graphical console and optical media.
     #[cfg(target_arch = "x86_64")]
     pub console: Option<crate::vmm_config::console::ConsoleConfig>,
@@ -162,7 +177,7 @@ impl VmResources {
         &self,
     ) -> Result<(), crate::vmm_config::WindowsFeatureDisabled> {
         #[cfg(target_arch = "x86_64")]
-        if self.console.is_some() {
+        if self.console.is_some() || self.tpm.is_some() || self.uefi_vars.is_some() {
             crate::vmm_config::require_windows_support()?;
         }
         if self.boot_source.config.firmware.is_some() {
@@ -195,7 +210,10 @@ impl VmResources {
     ) -> Result<Self, ResourcesError> {
         let vmm_config = serde_json::from_str::<VmmConfig>(config_json)?;
         #[cfg(target_arch = "x86_64")]
-        if vmm_config.console.is_some() {
+        if vmm_config.console.is_some()
+            || vmm_config.tpm.is_some()
+            || vmm_config.uefi_vars.is_some()
+        {
             crate::vmm_config::require_windows_support()?;
         }
         vmm_config.boot_source.validate()?;
@@ -246,6 +264,17 @@ impl VmResources {
             resources.console = Some(console);
         }
 
+        #[cfg(target_arch = "x86_64")]
+        if let Some(tpm) = vmm_config.tpm {
+            tpm.validate()?;
+            resources.tpm = Some(tpm);
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        if let Some(uefi_vars) = vmm_config.uefi_vars {
+            uefi_vars.validate()?;
+            resources.uefi_vars = Some(uefi_vars);
+        }
         resources.build_boot_source(vmm_config.boot_source)?;
 
         for drive_config in vmm_config.drives.into_iter() {
@@ -603,6 +632,10 @@ impl From<&VmResources> for VmmConfig {
         VmmConfig {
             #[cfg(target_arch = "x86_64")]
             console: resources.console.clone(),
+            #[cfg(target_arch = "x86_64")]
+            tpm: resources.tpm.clone(),
+            #[cfg(target_arch = "x86_64")]
+            uefi_vars: resources.uefi_vars.clone(),
             balloon: resources.balloon.get_config().ok(),
             drives: resources.block.configs(),
             boot_source: resources.boot_source.config.clone(),
@@ -660,6 +693,8 @@ mod tests {
         #[cfg(target_arch = "x86_64")]
         let requests = requests.into_iter().chain([
             serde_json::json!({"console":{"socket_path":"console.sock"}}),
+            serde_json::json!({"tpm":{"socket_path":"tpm.sock"}}),
+            serde_json::json!({"uefi-vars":{"socket_path":"variables.sock"}}),
             serde_json::json!({"machine-config":{
                 "vcpu_count":1,"mem_size_mib":128,"hyperv":true
             }}),
@@ -796,6 +831,12 @@ mod tests {
         VmResources {
             #[cfg(target_arch = "x86_64")]
             console: None,
+            #[cfg(target_arch = "x86_64")]
+            tpm: None,
+            #[cfg(target_arch = "x86_64")]
+            uefi_vars: None,
+            #[cfg(target_arch = "x86_64")]
+            uefi_vars_restore: None,
             machine_config: MachineConfig::default(),
             boot_source: default_boot_cfg(),
             block: default_blocks(),

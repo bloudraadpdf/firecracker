@@ -1350,6 +1350,40 @@ definitions:
         description: A description of the error condition
         readOnly: true
 
+  UefiVarsConfig:
+    type: object
+    additionalProperties: false
+    required:
+      - socket_path
+    properties:
+      socket_path:
+        type: string
+        description: Private authenticated-variable service socket (AMD64 only).
+
+  UefiVarsRestoreConfig:
+    type: object
+    additionalProperties: false
+    required:
+      - socket_path
+      - expected_generation
+    properties:
+      socket_path:
+        type: string
+      expected_generation:
+        type: integer
+        minimum: 0
+        description: Explicit current generation of the destination store before complete checkpoint replacement.
+
+  TpmConfig:
+    type: object
+    additionalProperties: false
+    required:
+      - socket_path
+    properties:
+      socket_path:
+        type: string
+        description: Private control socket of a dedicated swtpm TPM 2.0 process (AMD64 only).
+
   ConsoleConfig:
     type: object
     additionalProperties: false
@@ -1389,6 +1423,10 @@ definitions:
         $ref: "#/definitions/CpuConfig"
       console:
         $ref: "#/definitions/ConsoleConfig"
+      tpm:
+        $ref: "#/definitions/TpmConfig"
+      uefi-vars:
+        $ref: "#/definitions/UefiVarsConfig"
       logger:
         $ref: "#/definitions/Logger"
       machine-config:
@@ -1834,6 +1872,12 @@ definitions:
           for restoring a snapshot with a different socket path than the one used
           when the snapshot was created. For example, when the original socket path
           is no longer available or when deploying to a different environment.
+      tpm:
+        $ref: "#/definitions/TpmConfig"
+        description: Dedicated destination backend, required exactly when the snapshot contains TPM state.
+      uefi_vars:
+        $ref: "#/definitions/UefiVarsRestoreConfig"
+        description: Required exactly when the snapshot contains protected firmware variables.
       clock_realtime:
         type: boolean
         description:
