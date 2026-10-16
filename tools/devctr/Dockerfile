@@ -4,6 +4,8 @@
 #
 #                                   +--- qemu-builder -------+
 #                                   |                        |
+#                                   +--- swtpm-builder ------+
+#                                   |                        |
 #                                   +--- libseccomp-builder -+
 #                                   |                        |
 #   base-image +--------------------+--- iperf3-builder -----+--- devctr
@@ -18,7 +20,7 @@
 #                 rust-toolchain ---+------------------------+
 #
 # Parallel builders (from base-image):
-#   qemu-builder, libseccomp-builder, iperf3-builder, git-secrets-builder
+#   qemu-builder, swtpm-builder, libseccomp-builder, iperf3-builder, git-secrets-builder
 #
 # Sequential base chain:
 #   base-image -> apt-base -> python-deps -> rust-toolchain
@@ -66,6 +68,36 @@ RUN apt-get update \
     && ./configure && make -j $(nproc) contrib/vhost-user-blk/vhost-user-blk \
     && strip ./build/contrib/vhost-user-blk/vhost-user-blk \
     && cp -a ./build/contrib/vhost-user-blk/vhost-user-blk /usr/local/bin
+
+# ============================================================
+# Builder: swtpm with checkpoint storage locking
+# ============================================================
+FROM base-image AS swtpm-builder
+ENV LIBTPMS_VER="0.10.2"
+ENV SWTPM_VER="0.10.2"
+
+RUN apt-get update \
+    && apt-get -y install --no-install-recommends \
+        autoconf automake libtool pkg-config python3 curl libssl-dev \
+        libglib2.0-dev libjson-glib-dev libtasn1-6-dev libgmp-dev libseccomp-dev \
+    && mkdir /tmp/swtpm_build && cd /tmp/swtpm_build \
+    && curl -fLsS https://github.com/stefanberger/libtpms/archive/refs/tags/v${LIBTPMS_VER}.tar.gz -o libtpms.tar.gz \
+    && echo "edac03680f8a4a1c5c1d609a10e3f41e1a129e38ff5158f0c8deaedc719fb127  libtpms.tar.gz" | sha256sum -c - \
+    && tar xf libtpms.tar.gz && cd libtpms-${LIBTPMS_VER} \
+    && install -Dm644 LICENSE /usr/local/share/licenses/libtpms/LICENSE \
+    && ./autogen.sh --prefix=/usr/local --libdir=/usr/local/lib \
+        --with-openssl --with-tpm2 --without-tpm1 --disable-shared --enable-static \
+    && make -j $(nproc) && make install \
+    && cd /tmp/swtpm_build \
+    && curl -fLsS https://github.com/stefanberger/swtpm/archive/refs/tags/v${SWTPM_VER}.tar.gz -o swtpm.tar.gz \
+    && echo "f61cf6f1e9bbcb4cefb30b70cafaf1c4df54c6961e65cfa63830e8ad0e220134  swtpm.tar.gz" | sha256sum -c - \
+    && tar xf swtpm.tar.gz && cd swtpm-${SWTPM_VER} \
+    && install -Dm644 LICENSE /usr/local/share/licenses/swtpm/LICENSE \
+    && ./autogen.sh --prefix=/usr/local --libdir=/usr/local/lib \
+        --with-openssl --without-cuse --without-gnutls --without-selinux \
+        --disable-tests --disable-shared --enable-static \
+    && make -j $(nproc) && make install \
+    && strip /usr/local/bin/swtpm
 
 # ============================================================
 # Builder: static libseccomp (musl)
@@ -136,6 +168,7 @@ RUN apt-get update \
         musl-tools \
         # needed for integration tests
         net-tools iproute2 iperf3 socat fdisk \
+        acpica-tools libjson-glib-1.0-0 libseccomp2 \
         numactl \
         iptables \
         openssh-client \
@@ -262,6 +295,8 @@ RUN cargo install --locked grcov cargo-sort cargo-afl \
 
 # Copy pre-built artifacts LAST — builder changes don't invalidate Rust layer
 COPY --from=qemu-builder /usr/local/bin/vhost-user-blk /usr/local/bin/
+COPY --from=swtpm-builder /usr/local/bin/swtpm /usr/local/bin/
+COPY --from=swtpm-builder /usr/local/share/licenses/ /usr/local/share/licenses/
 COPY --from=libseccomp-builder /staging /
 COPY --from=iperf3-builder /usr/local/bin/iperf3-vsock /usr/local/bin/
 COPY --from=git-secrets-builder /staging /
