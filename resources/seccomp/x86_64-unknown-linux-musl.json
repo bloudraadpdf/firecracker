@@ -789,6 +789,18 @@
                         "comment": "Ensure PROT_EXEC is not set"
                     }
                 ]
+            },
+            {
+                "syscall": "lstat",
+                "comment": "Remove only the graphical console Unix socket owned by this process"
+            },
+            {
+                "syscall": "newfstatat",
+                "comment": "Remove only the graphical console Unix socket owned by this process"
+            },
+            {
+                "syscall": "unlink",
+                "comment": "Remove only the graphical console Unix socket owned by this process"
             }
         ]
     },
@@ -1595,6 +1607,22 @@
                         "op": "eq",
                         "val": 1075883638,
                         "comment": "KVM_IRQFD"
+                    }
+                ]
+            },
+            {
+                "syscall": "pread64",
+                "comment": "Read-only PIO optical media reads on the vCPU thread"
+            },
+            {
+                "syscall": "ioctl",
+                "args": [
+                    {
+                        "index": 1,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 1075883590,
+                        "comment": "KVM_SET_USER_MEMORY_REGION for framebuffer BAR relocation and decode"
                     }
                 ]
             }

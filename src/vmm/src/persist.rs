@@ -193,7 +193,7 @@ pub enum CreateSnapshotError {
 }
 
 /// Snapshot version
-pub const SNAPSHOT_VERSION: Version = Version::new(20, 0, 0);
+pub const SNAPSHOT_VERSION: Version = Version::new(23, 0, 0);
 
 /// Creates a Microvm snapshot.
 pub fn create_snapshot(
@@ -786,6 +786,85 @@ mod tests {
         insert_vmclock_device(&mut vmm);
 
         vmm
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    #[cfg(feature = "windows")]
+    fn maximum_optional_buffers_fit_snapshot_reader() {
+        use crate::device_manager::DeviceManager;
+        use crate::vmm_config::console::ConsoleConfig;
+        use crate::vmm_config::machine_config::MAX_SUPPORTED_VCPUS;
+        use crate::vstate::vm::tests::setup_vm_with_memory;
+        use std::io::Write;
+        use vmm_sys_util::tempdir::TempDir;
+
+        let directory = TempDir::new().unwrap();
+        let rom = TempFile::new().unwrap();
+        let mut bytes: Vec<u8> = (0..=255).cycle().take(65536).collect();
+        bytes[..3].copy_from_slice(&[0x55, 0xaa, 128]);
+        let checksum = bytes.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte));
+        bytes[65535] = bytes[65535].wrapping_sub(checksum);
+        rom.as_file().write_all(&bytes).unwrap();
+        let mut vm = setup_vm_with_memory(0x1000);
+        vm.setup_irqchip(true).unwrap();
+        let vm = Arc::new(vm);
+        let mut events = EventManager::new().unwrap();
+        let mut manager = DeviceManager::new(
+            &mut events,
+            vm.vcpus_exit_evt(),
+            &vm,
+            None,
+            None,
+            true,
+            true,
+        )
+        .unwrap();
+        manager
+            .attach_console(
+                &vm,
+                &ConsoleConfig {
+                    socket_path: directory.as_path().join("console.sock"),
+                    vga_rom_path: Some(rom.as_path().to_owned()),
+                    optical_image_path: None,
+                },
+                None,
+            )
+            .unwrap();
+        manager.console.as_ref().unwrap().fill_test_framebuffer();
+        let mut state = MicrovmState {
+            device_states: crate::device_manager::DevicesState {
+                console: manager.save_console(),
+                ..Default::default()
+            },
+            // Maximum supported count, without running guest instructions. Hardware
+            // register payload sizes remain host-dependent and are not a universal bound.
+            vcpu_states: (0..MAX_SUPPORTED_VCPUS)
+                .map(|_| VcpuState::default())
+                .collect(),
+            ..Default::default()
+        };
+        state.vm_info.boot_source.firmware =
+            Some(crate::vmm_config::boot_source::FirmwareConfig::CloudHv {
+                system_uuid: "11223344-5566-7788-99aa-bbccddeeff01"
+                    .to_string()
+                    .try_into()
+                    .unwrap(),
+            });
+        let mut encoded = Vec::new();
+        Snapshot::new(&state).save(&mut encoded).unwrap();
+        // Ensure the high-entropy large buffers actually reached the encoder.
+        assert!(encoded.len() > 16 * 1024 * 1024);
+        eprintln!("console optional-buffer snapshot bytes: {}", encoded.len());
+        let restored = Snapshot::<MicrovmState>::load(&mut encoded.as_slice()).unwrap();
+        assert_eq!(
+            restored.data.vcpu_states.len(),
+            usize::from(MAX_SUPPORTED_VCPUS)
+        );
+        assert_eq!(
+            bitcode::serialize(&restored.data).unwrap(),
+            bitcode::serialize(&state).unwrap()
+        );
     }
 
     #[test]

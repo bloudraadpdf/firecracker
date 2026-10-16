@@ -74,3 +74,9 @@ For a cross-build, set `GCC_AARCH64_PREFIX` to the AArch64 GCC tool prefix. The
 raw firmware is `Build/ArmVirtCloudHv-AARCH64/RELEASE_GCC/FV/CLOUDHV_EFI.fd`.
 Pass it as Firecracker's kernel image and enable PCI. See the
 [ARM64 guest guide](../../docs/windows-arm64.md) for host requirements.
+
+## Graphical AMD64 firmware
+
+The [console profile](cloudhv-console/README.md) adds GOP, keyboard and absolute
+pointer drivers. Its [external firmware probes](cloudhv-console/tests/README.md)
+check the memory map and pointer protocol before an OS starts.
