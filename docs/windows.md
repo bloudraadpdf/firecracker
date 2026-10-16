@@ -296,6 +296,127 @@ receive, reset and DMA fixes. These packages are test-signed. Build and
 installation instructions are in
 [legacy-vsock](../tools/windows/legacy-vsock/README.md).
 
+### Windows 7 signed drivers
+
+A stock Windows 7 SP1 x64 image can lack both SHA-2 signing support and the
+Microsoft root needed by a signed driver. Check the selected package's actual
+catalogue; an installer exit alone does not prove trust or binding. The checked
+NetKVM 61.77.104.17200 package uses Microsoft Root Certificate Authority 2010.
+This driver root is separate from the HTTPS root below.
+
+For this profile, obtain the unchanged official inputs on the host:
+
+- Save
+  [Microsoft Root CA 2010](https://www.microsoft.com/pki/certs/MicRooCerAut_2010-06-23.crt)
+  as `root.der`. SHA-256:
+  `df545bf919a2439c36983b54cdfc903dfa4f37d3996d8d84b4c31eec6f3c163e`.
+- Save the
+  [x64 servicing-stack update](https://catalog.s.download.windowsupdate.com/c/msdownload/update/software/secu/2019/03/windows6.1-kb4490628-x64_d3de52d6987f7c8bdc2c015dca69eac96047c76e.msu)
+  as `KB4490628.msu`. SHA-256:
+  `8075f6d889bcb27be6f52ed47081675e5bb8a5390f2f5bfe4ec27a2bb70cbf5e`.
+- Save the
+  [x64 SHA-2 update, version 3](https://catalog.s.download.windowsupdate.com/c/msdownload/update/software/secu/2019/09/windows6.1-kb4474419-v3-x64_b5614c6cea5cb4e198717789633dca16308ef79c.msu)
+  as `KB4474419.msu`. SHA-256:
+  `99312df792b376f02e25607d2eb3355725c47d124d8da253193195515fe90213`.
+
+Verify these hashes before staging them in `C:\Users\Public\win7-prerequisites`
+on a private test image. Verify them again inside Windows with
+`certutil -hashfile <file> SHA256`. Use a normal clean Windows shutdown before
+offline writes; do not recover dirty NTFS from Linux.
+
+In elevated Windows PowerShell, add only the exact root if it is missing, then
+verify its stored bytes. Do not import a driver leaf or intermediate certificate
+into Root:
+
+```powershell
+$ErrorActionPreference = 'Stop'
+$path = 'C:\Users\Public\win7-prerequisites\root.der'
+$thumbprint = '3B1EFD3A66EA28B16697394703A72CA340A05BD5'
+if (-not (Test-Path "Cert:\LocalMachine\Root\$thumbprint")) {
+    & certutil.exe -addstore -f Root $path
+    if ($LASTEXITCODE -ne 0) { throw 'Microsoft root import failed' }
+}
+$root = Get-Item "Cert:\LocalMachine\Root\$thumbprint"
+if ([Convert]::ToBase64String($root.RawData) -cne [Convert]::ToBase64String([IO.File]::ReadAllBytes($path))) {
+    throw 'Stored root differs from the verified official DER'
+}
+```
+
+Record the installed updates and package states before servicing:
+
+```bat
+dism.exe /English /Online /Get-Packages /Format:Table
+```
+
+In elevated PowerShell, also record `Get-HotFix`. Complete pending Windows
+servicing and restart before continuing. The following commands target these
+exact missing packages; do not force a package that is inapplicable or replace a
+newer installed update. First, in an elevated native command prompt, extract
+only the SSU update CAB:
+
+```bat
+mkdir C:\Users\Public\win7-prerequisites\ssu
+expand.exe -f:Windows6.1-KB4490628-x64.cab C:\Users\Public\win7-prerequisites\KB4490628.msu C:\Users\Public\win7-prerequisites\ssu
+certutil -hashfile C:\Users\Public\win7-prerequisites\ssu\Windows6.1-KB4490628-x64.cab SHA256
+dism.exe /English /Online /Get-PackageInfo /PackagePath:C:\Users\Public\win7-prerequisites\ssu\Windows6.1-KB4490628-x64.cab
+```
+
+The extracted CAB must have SHA-256
+`448866dcd989242459cba6a047eb4b28f24aea341c009b763fa8615941c83bcc`. Require
+applicability `Yes` and the matching hash before installing:
+
+```bat
+dism.exe /English /Online /Add-Package /PackagePath:C:\Users\Public\win7-prerequisites\ssu\Windows6.1-KB4490628-x64.cab /NoRestart /LogPath:C:\Users\Public\win7-ssu.log
+echo %ERRORLEVEL%
+```
+
+Preserve the actual exit and log; accept only 0 or 3010. Restart normally and
+inspect `dism.exe /English /Online /Get-Packages /Format:Table`; the exact SSU
+package `Package_for_KB4490628~31bf3856ad364e35~amd64~~6.1.1.2` must be
+`Installed` before continuing.
+
+Then extract and install only the SHA-2 update CAB:
+
+```bat
+mkdir C:\Users\Public\win7-prerequisites\sha2
+expand.exe -f:Windows6.1-KB4474419-v3-x64.cab C:\Users\Public\win7-prerequisites\KB4474419.msu C:\Users\Public\win7-prerequisites\sha2
+certutil -hashfile C:\Users\Public\win7-prerequisites\sha2\Windows6.1-KB4474419-v3-x64.cab SHA256
+dism.exe /English /Online /Get-PackageInfo /PackagePath:C:\Users\Public\win7-prerequisites\sha2\Windows6.1-KB4474419-v3-x64.cab
+```
+
+Require SHA-256
+`806c8e31d55fa5861b772a42bec7a1880513b5239b516f9914422e3fd512e78f`, and
+applicability `Yes` before installing:
+
+```bat
+dism.exe /English /Online /Add-Package /PackagePath:C:\Users\Public\win7-prerequisites\sha2\Windows6.1-KB4474419-v3-x64.cab /NoRestart /LogPath:C:\Users\Public\win7-sha2.log
+echo %ERRORLEVEL%
+```
+
+Preserve the actual exit and log; accept only 0 or 3010. Complete a normal
+restart and require package
+`Package_for_KB4474419~31bf3856ad364e35~amd64~~6.1.3.2` to be `Installed`, with
+no pending servicing, before a driver attempt. `Install Pending` and exit 3010
+are not cold activation or binding passes.
+
+Microsoft documents the
+[SSU](https://support.microsoft.com/en-us/topic/servicing-stack-update-for-windows-7-sp1-and-windows-server-2008-r2-sp1-march-12-2019-b4dc0cff-d4f2-a408-0cb1-cb8e918feeba),
+[SHA-2 prerequisites and required restart](https://support.microsoft.com/en-us/servicing/os/windows/2020/09/2019-sha-2-code-signing-support-requirement-for-windows-and-wsus)
+and
+[extracted-CAB servicing](https://support.microsoft.com/en-us/servicing/os/windows-7/2017/06/june-13-2017-kb4022722-security-only-update).
+Keep package validation enabled; do not use `/IgnoreCheck`, stop update services
+or change kernel-signing policy to make installation pass.
+
+Before installing the selected NetKVM package, require
+`Get-AuthenticodeSignature C:\Drivers\NetKVM\netkvm.cat` to report `Valid` on
+the restarted guest. After installation, verify the actual device Code 0,
+selected signed INF/SYS, driver version and running service. Reboot-required
+installation results defer that binding check. See the
+[generation-counter guide](../tools/windows/generation/README.md#win7-driver-servicing)
+for the separate intact integration CAB and cold-query/restore requirements.
+
+### Windows 7 HTTPS
+
 Windows 7's TLS test requires a current trusted root. The tested
 `www.microsoft.com` chain terminates at DigiCert Global Root G2. Download the
 [official DER certificate](https://cacerts.digicert.com/DigiCertGlobalRootG2.crt)
