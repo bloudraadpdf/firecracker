@@ -66,6 +66,8 @@ pub const SYSTEM_MEM_SIZE: u64 = 0x20_0000;
 
 /// Fixed handoff addresses used by the Firecracker EDK II build.
 pub const FIRMWARE_FDT_ADDR: u64 = DRAM_MEM_START;
+/// Firmware SMBIOS handoff page, outside dynamically allocated tables.
+pub const FIRMWARE_SMBIOS_ADDR: u64 = DRAM_MEM_START + 0x1e_0000;
 /// Firmware ACPI root pointer, outside the dynamically allocated tables.
 pub const FIRMWARE_RSDP_ADDR: u64 = DRAM_MEM_START + 0x1f_0000;
 /// Firmware entry point after the platform handoff region.

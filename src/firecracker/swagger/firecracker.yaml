@@ -1080,9 +1080,10 @@ definitions:
     required:
       - type
     description: |
-      Explicit AMD64 firmware ABI declaration. Both profiles require a PVH ELF
-      image without an initrd and select conventional PC timers and ACPI power
-      registers. CloudHv requires a stable system UUID, retained on restore.
+      Explicit firmware ABI declaration without an initrd. AMD64 profiles require
+      a PVH ELF image and select conventional PC timers and ACPI power registers.
+      ARM64 accepts only CloudHv with a raw firmware image. CloudHv requires a
+      stable system UUID, retained on restore.
       SeaBIOS accepts only an absent or null system UUID and has no CloudHv
       SMBIOS handoff. Omit the firmware object for direct Linux kernel boot.
     properties:

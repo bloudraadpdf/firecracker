@@ -39,7 +39,7 @@ pub struct BootSourceConfig {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(try_from = "FirmwareConfigData", into = "FirmwareConfigData")]
 pub enum FirmwareConfig {
-    /// AMD64 CloudHv PVH firmware with stable SMBIOS identity.
+    /// CloudHv firmware with stable SMBIOS identity.
     CloudHv {
         /// Caller-owned identity, stable across cold boots and restores.
         system_uuid: SystemUuid,
@@ -95,7 +95,7 @@ impl From<FirmwareConfig> for FirmwareConfigData {
 }
 
 impl FirmwareConfig {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", feature = "windows"))]
     pub(crate) fn cloud_hv_uuid(&self) -> Option<SystemUuid> {
         match self {
             Self::CloudHv { system_uuid } => Some(*system_uuid),
@@ -140,9 +140,9 @@ impl BootSourceConfig {
     pub fn validate(&self) -> Result<(), BootSourceConfigError> {
         if self.firmware.is_some() {
             super::require_windows_support()?;
-            if !cfg!(target_arch = "x86_64") {
+            if cfg!(target_arch = "aarch64") && self.firmware == Some(FirmwareConfig::SeaBios) {
                 return Err(BootSourceConfigError::InvalidFirmware(
-                    "Firmware profiles require AMD64",
+                    "SeaBIOS requires AMD64",
                 ));
             }
             if self.initrd_path.is_some() {
@@ -364,7 +364,7 @@ pub(crate) mod tests {
 
     #[test]
     #[cfg(feature = "windows")]
-    fn firmware_profiles_reject_initrd_and_other_architectures_before_open() {
+    fn firmware_profiles_reject_initrd_and_unsupported_architectures_before_open() {
         let mut config: BootSourceConfig = serde_json::from_value(cloudhv_json()).unwrap();
         for firmware in [config.firmware.unwrap(), FirmwareConfig::SeaBios] {
             config.firmware = Some(firmware);
@@ -372,7 +372,10 @@ pub(crate) mod tests {
             #[cfg(target_arch = "x86_64")]
             config.validate().unwrap();
             #[cfg(target_arch = "aarch64")]
-            config.validate().unwrap_err();
+            assert_eq!(
+                config.validate().is_err(),
+                firmware == FirmwareConfig::SeaBios
+            );
             config.initrd_path = Some("unused".into());
             assert!(matches!(
                 BootConfig::new(&config),

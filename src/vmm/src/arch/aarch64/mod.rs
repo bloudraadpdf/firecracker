@@ -58,6 +58,8 @@ pub enum ConfigurationError {
     CacheInfo(#[from] cache_info::CacheInfoError),
     /// Failed to read firmware: {0}
     FirmwareIo(#[from] std::io::Error),
+    /// Invalid firmware identity handoff: {0}
+    FirmwareIdentity(std::io::Error),
     /// Invalid firmware image size
     FirmwareSize,
     /// Invalid firmware volume header or checksum
@@ -369,9 +371,30 @@ fn load_firmware(
     })
 }
 
+/// Publish the selected identity before attaching backends on a cold boot.
+#[cfg(feature = "windows")]
+pub(crate) fn configure_firmware_identity(
+    memory: &GuestMemoryMmap,
+    firmware: Option<&crate::vmm_config::boot_source::FirmwareConfig>,
+    protocol: BootProtocol,
+) -> std::io::Result<()> {
+    use crate::vmm_config::boot_source::FirmwareConfig;
+    match firmware {
+        None => Ok(()),
+        Some(FirmwareConfig::CloudHv { system_uuid }) if protocol == BootProtocol::FirmwareBoot => {
+            crate::arch::smbios::publish(memory, *system_uuid, layout::FIRMWARE_SMBIOS_ADDR)
+        }
+        Some(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "ARM CloudHv identity requires firmware boot",
+        )),
+    }
+}
+
 #[cfg(feature = "windows")]
 fn reserve_firmware_handoff(
     allocator: &mut vm_allocator::AddressAllocator,
+    firmware: Option<&crate::vmm_config::boot_source::FirmwareConfig>,
 ) -> Result<(), vm_allocator::Error> {
     use vm_allocator::AllocPolicy;
     let mut next = allocator.clone();
@@ -381,41 +404,107 @@ fn reserve_firmware_handoff(
     ] {
         next.allocate(size, 1, AllocPolicy::ExactMatch(address))?;
     }
+    if firmware
+        .and_then(crate::vmm_config::boot_source::FirmwareConfig::cloud_hv_uuid)
+        .is_some()
+    {
+        next.allocate(
+            crate::arch::smbios::PAGE_SIZE as u64,
+            1,
+            AllocPolicy::ExactMatch(layout::FIRMWARE_SMBIOS_ADDR),
+        )?;
+    }
     *allocator = next;
     Ok(())
 }
 
 /// Keep firmware handoff pages separate from allocated ACPI data.
 #[cfg(feature = "windows")]
-pub fn reserve_firmware_memory(vm: &KvmVm) -> Result<(), ConfigurationError> {
-    reserve_firmware_handoff(&mut vm.resource_allocator().system_memory)?;
+pub fn reserve_firmware_memory(
+    vm: &KvmVm,
+    firmware: Option<&crate::vmm_config::boot_source::FirmwareConfig>,
+) -> Result<(), ConfigurationError> {
+    reserve_firmware_handoff(&mut vm.resource_allocator().system_memory, firmware)?;
     Ok(())
 }
 
 #[cfg(test)]
 #[cfg(feature = "windows")]
-mod handoff_tests {
+mod identity_tests {
     use super::*;
+    use crate::vmm_config::boot_source::FirmwareConfig;
     use vm_allocator::{AddressAllocator, AllocPolicy};
 
+    fn profile() -> FirmwareConfig {
+        FirmwareConfig::CloudHv {
+            system_uuid: "11223344-5566-7788-99aa-bbccddeeff01"
+                .to_string()
+                .try_into()
+                .unwrap(),
+        }
+    }
+
     #[test]
-    fn failed_handoff_reservations_are_atomic() {
-        let mut allocator = AddressAllocator::new(layout::DRAM_MEM_START, 0x20_0000).unwrap();
-        let collision = layout::FIRMWARE_RSDP_ADDR;
-        allocator
-            .allocate(4096, 1, AllocPolicy::ExactMatch(collision))
+    fn only_explicit_cloudhv_firmware_publishes_identity() {
+        let memory = crate::test_utils::single_region_mem_at(layout::FIRMWARE_SMBIOS_ADDR, 4096);
+        let sentinel = [0xa5; 4096];
+        memory
+            .write_slice(&sentinel, GuestAddress(layout::FIRMWARE_SMBIOS_ADDR))
             .unwrap();
-        reserve_firmware_handoff(&mut allocator).unwrap_err();
-        allocator
-            .allocate(
-                0x10_0000,
-                1,
-                AllocPolicy::ExactMatch(layout::DRAM_MEM_START),
-            )
-            .unwrap();
-        allocator
-            .allocate(4096, 1, AllocPolicy::ExactMatch(collision))
+        for protocol in [BootProtocol::LinuxBoot, BootProtocol::FirmwareBoot] {
+            configure_firmware_identity(&memory, None, protocol).unwrap();
+            configure_firmware_identity(&memory, Some(&FirmwareConfig::SeaBios), protocol)
+                .unwrap_err();
+        }
+        configure_firmware_identity(&memory, Some(&profile()), BootProtocol::LinuxBoot)
             .unwrap_err();
+        let mut actual = [0; 4096];
+        memory
+            .read_slice(&mut actual, GuestAddress(layout::FIRMWARE_SMBIOS_ADDR))
+            .unwrap();
+        assert_eq!(actual, sentinel);
+        configure_firmware_identity(&memory, Some(&profile()), BootProtocol::FirmwareBoot).unwrap();
+        memory
+            .read_slice(&mut actual, GuestAddress(layout::FIRMWARE_SMBIOS_ADDR))
+            .unwrap();
+        assert_eq!(
+            actual,
+            crate::arch::smbios::encode(
+                profile().cloud_hv_uuid().unwrap(),
+                layout::FIRMWARE_SMBIOS_ADDR
+            )
+        );
+    }
+
+    #[test]
+    fn identity_reservation_is_optional_and_failed_handoffs_are_atomic() {
+        for firmware in [None, Some(profile())] {
+            let mut allocator = AddressAllocator::new(layout::DRAM_MEM_START, 0x20_0000).unwrap();
+            reserve_firmware_handoff(&mut allocator, firmware.as_ref()).unwrap();
+            let allocate_identity = allocator.allocate(
+                4096,
+                1,
+                AllocPolicy::ExactMatch(layout::FIRMWARE_SMBIOS_ADDR),
+            );
+            assert_eq!(allocate_identity.is_err(), firmware.is_some());
+        }
+        for collision in [layout::FIRMWARE_RSDP_ADDR, layout::FIRMWARE_SMBIOS_ADDR] {
+            let mut allocator = AddressAllocator::new(layout::DRAM_MEM_START, 0x20_0000).unwrap();
+            allocator
+                .allocate(4096, 1, AllocPolicy::ExactMatch(collision))
+                .unwrap();
+            reserve_firmware_handoff(&mut allocator, Some(&profile())).unwrap_err();
+            allocator
+                .allocate(
+                    0x10_0000,
+                    1,
+                    AllocPolicy::ExactMatch(layout::DRAM_MEM_START),
+                )
+                .unwrap();
+            allocator
+                .allocate(4096, 1, AllocPolicy::ExactMatch(collision))
+                .unwrap_err();
+        }
     }
 }
 

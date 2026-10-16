@@ -9,6 +9,9 @@ use vm_memory::GuestAddress;
 
 use crate::logger::warn;
 
+#[cfg(feature = "windows")]
+pub(crate) mod smbios;
+
 /// Module for aarch64 related functionality.
 #[cfg(target_arch = "aarch64")]
 pub mod aarch64;
