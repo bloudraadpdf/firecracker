@@ -100,5 +100,6 @@ aperture. Default configurations retain modern PCI.
 
 The transport supplies legacy PCI IDs, I/O registers, queue page-frame addresses
 and INTx, alongside modern capabilities. It preserves those states across
-snapshots. Selecting this option alone does not supply BIOS firmware or install
-guest drivers.
+snapshots. The XP test uses the
+[SeaBIOS PVH handoff](../resources/firmware/seabios/README.md); selecting this
+option alone does not supply BIOS firmware or install guest drivers.
