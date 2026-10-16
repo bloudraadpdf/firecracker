@@ -169,3 +169,13 @@ copying it into the isolated guest. In an elevated command prompt, run
 identifies this root. Certificate validation remains enabled. A changed server
 chain can require a different trusted root; this guest trust-store prerequisite
 is separate from Firecracker support.
+
+## Legacy Windows
+
+XP SP3 x86 uses SeaBIOS, transitional PCI and one vCPU with its uniprocessor
+HAL. These device choices do not establish SMP or HTTPS support. Windows 7 SP1
+x64 uses GPT/EFI with matching signed storage and network drivers. Contemporary
+virtio-win media has no compatible Viosock package for these guests. The
+[test-driver procedure](../tools/windows/legacy-vsock/README.md) retains the
+required receive, reset and DMA fixes and uses test signing. A test-driver build
+does not qualify an installed guest. No production-signed package is supplied.
