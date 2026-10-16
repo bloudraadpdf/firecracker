@@ -65,7 +65,7 @@ impl Backend {
     fn input_state(&self) -> io::Result<InputState> {
         let (_, response) = self.request(5, &[])?;
         if &response[..4] != b"FCA1"
-            || (response[9] & !7 != 0 || response[10] & !6 != 0 || response[11..] != [0; 5])
+            || (response[9] & !7 != 0 || response[10] & !7 != 0 || response[11..] != [0; 5])
         {
             return Err(invalid("invalid pointer capability response"));
         }
@@ -322,6 +322,32 @@ mod tests {
     use super::*;
     use std::os::unix::net::UnixListener;
 
+    fn read_backend_request(listener: &UnixListener) -> (UnixStream, [u8; 12]) {
+        listener.set_nonblocking(true).unwrap();
+        let deadline = std::time::Instant::now() + TIMEOUT;
+        loop {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for a console request"
+            );
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    stream.set_read_timeout(Some(TIMEOUT)).unwrap();
+                    stream.set_write_timeout(Some(TIMEOUT)).unwrap();
+                    let mut request = [0; 12];
+                    stream.read_exact(&mut request).unwrap();
+                    assert_eq!(&request[..4], b"FCC1");
+                    return (stream, request);
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(error) => panic!("console request failed: {error}"),
+            }
+        }
+    }
+
     #[test]
     fn full_backend_backlog_does_not_hold_session() {
         const CHILD: &str = "FIRECRACKER_CONSOLE_BACKLOG_TEST_SOCKET";
@@ -384,17 +410,15 @@ mod tests {
 
     #[test]
     fn rfb_drives_frame_keyboard_and_mouse_over_unix_protocol() {
-        for ready in [false, true] {
+        for (ready, pending) in [(false, 0), (true, 0), (false, 1), (true, 1), (true, 7)] {
+            let acknowledgement = usize::from(pending & 6 != 0);
             let path = PathBuf::from(format!("console-test-{}.sock", std::process::id()));
             let listener = UnixListener::bind(&path).unwrap();
             let backend = Backend(path.clone());
             let host = std::thread::spawn(move || {
                 let mut requests = Vec::new();
-                for _ in 0..if ready { 8 } else { 6 } {
-                    let (mut stream, _) = listener.accept().unwrap();
-                    let mut request = [0; 12];
-                    stream.read_exact(&mut request).unwrap();
-                    assert_eq!(&request[..4], b"FCC1");
+                for _ in 0..(if ready { 8 } else { 6 }) + acknowledgement {
+                    let (mut stream, request) = read_backend_request(&listener);
                     requests.push(request);
                     if request[4] == 0 {
                         let mut response = b"FCF1".to_vec();
@@ -408,6 +432,11 @@ mod tests {
                         response[..4].copy_from_slice(b"FCA1");
                         if request[4] == 5 {
                             response[8] = u8::from(ready);
+                            response[10] = if requests.len() == 3 {
+                                pending
+                            } else {
+                                pending & 1
+                            };
                         }
                         stream.write_all(&response).unwrap();
                     }
@@ -447,11 +476,19 @@ mod tests {
             client.write_all(&[4, 1, 0, 0, 0, 0, 0, 0x61]).unwrap();
             client.write_all(&[5, 1, 0, 10, 0, 20]).unwrap();
             client.write_all(&[5, 4, 0, 15, 0, 18]).unwrap();
-            let requests = host.join().unwrap();
-            assert_eq!(&requests[3][4..8], &[1, 0x1c, 0, 1]);
+            let requests = host.join();
+            std::fs::remove_file(&path).unwrap();
+            let requests = requests.unwrap();
+            assert_eq!(&requests[3 + acknowledgement][4..8], &[1, 0x1c, 0, 1]);
             if ready {
-                assert_eq!(&requests[5][4..11], &[6, 1, 255, 127, 0, 0, 0]);
-                assert_eq!(&requests[7][4..11], &[6, 2, 255, 127, 0, 0, 0]);
+                assert_eq!(
+                    &requests[5 + acknowledgement][4..11],
+                    &[6, 1, 255, 127, 0, 0, 0]
+                );
+                assert_eq!(
+                    &requests[7 + acknowledgement][4..11],
+                    &[6, 2, 255, 127, 0, 0, 0]
+                );
             } else {
                 assert!(
                     requests
@@ -461,9 +498,29 @@ mod tests {
             }
             drop(client);
             assert!(session.join().unwrap().is_err());
-            std::fs::remove_file(path).unwrap();
         }
     }
+
+    #[test]
+    fn input_state_rejects_undefined_pending_led_bits() {
+        let path = PathBuf::from(format!("console-input-flags-{}.sock", std::process::id()));
+        let listener = UnixListener::bind(&path).unwrap();
+        let backend = Backend(path.clone());
+        let host = std::thread::spawn(move || {
+            let (mut stream, request) = read_backend_request(&listener);
+            assert_eq!(request[4], 5);
+            let mut response = [0; 16];
+            response[..4].copy_from_slice(b"FCA1");
+            response[10] = 8;
+            stream.write_all(&response).unwrap();
+        });
+        let state = backend.input_state();
+        let host = host.join();
+        std::fs::remove_file(path).unwrap();
+        host.unwrap();
+        assert_eq!(state.err().unwrap().kind(), io::ErrorKind::InvalidData);
+    }
+
     #[test]
     fn disconnect_releases_keys_before_another_client_can_connect() {
         let path = PathBuf::from(format!("console-release-{}.sock", std::process::id()));
@@ -476,10 +533,8 @@ mod tests {
         };
         let host_busy = busy.clone();
         let host = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0; 12];
-            stream.read_exact(&mut request).unwrap();
-            assert_eq!(&request[..5], b"FCC1\x03");
+            let (mut stream, request) = read_backend_request(&listener);
+            assert_eq!(request[4], 3);
             assert!(host_busy.load(Ordering::Acquire));
             let mut response = [0; 16];
             response[..4].copy_from_slice(b"FCA1");

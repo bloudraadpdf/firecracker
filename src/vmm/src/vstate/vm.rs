@@ -84,7 +84,6 @@ pub struct VmCommon {
     /// Event fd written to by vCPUs on exit.
     pub vcpus_exit_evt: EventFd,
     // Last: failed slot removals must outlive the VM and vCPU descriptors.
-    #[cfg(target_arch = "x86_64")]
     #[cfg(feature = "windows")]
     retained_mappings: Mutex<Vec<Arc<vm_memory::MmapRegion>>>,
 }
@@ -195,7 +194,6 @@ impl KvmVm {
             uffd: None,
             vcpus_handles: Mutex::new(Vec::new()),
             vcpus_exit_evt,
-            #[cfg(target_arch = "x86_64")]
             #[cfg(feature = "windows")]
             retained_mappings: Mutex::new(Vec::new()),
         })
@@ -422,7 +420,6 @@ impl KvmVm {
     }
 
     /// Retains a mapping after failed KVM slot removal, until all VM descriptors close.
-    #[cfg(target_arch = "x86_64")]
     #[cfg(feature = "windows")]
     pub(crate) fn retain_failed_memory_mapping(&self, mapping: Arc<vm_memory::MmapRegion>) {
         self.common.retained_mappings.lock().unwrap().push(mapping);

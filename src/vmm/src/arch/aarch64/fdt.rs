@@ -108,6 +108,8 @@ pub fn create_fdt(
     create_clock_node(&mut fdt_writer)?;
     create_psci_node(&mut fdt_writer)?;
     create_devices_node(&mut fdt_writer, device_manager)?;
+    #[cfg(feature = "windows")]
+    create_uefi_vars_node(&mut fdt_writer, device_manager.uefi_vars.is_some())?;
     create_vmgenid_node(&mut fdt_writer, device_manager.acpi_devices.vmgenid())?;
     create_vmclock_node(&mut fdt_writer, device_manager.acpi_devices.vmclock())?;
     if let Some(pci_devices) = device_manager.pci_devices() {
@@ -302,6 +304,29 @@ fn create_chosen_node(
 
     fdt.end_node(chosen)?;
 
+    Ok(())
+}
+
+#[cfg(feature = "windows")]
+fn create_uefi_vars_node(fdt: &mut FdtWriter, enabled: bool) -> Result<(), FdtError> {
+    if !enabled {
+        return Ok(());
+    }
+    let base = crate::devices::uefi_vars::MMIO_BASE;
+    let size = u32::try_from(crate::devices::uefi_vars::MMIO_SIZE).unwrap();
+    let bus = fdt.begin_node(&format!("platform-bus@{base:x}"))?;
+    fdt.property_string_list(
+        "compatible",
+        vec!["qemu,platform".into(), "simple-bus".into()],
+    )?;
+    fdt.property_u32("#address-cells", 1)?;
+    fdt.property_u32("#size-cells", 1)?;
+    fdt.property_array_u32("ranges", &[0, 0, u32::try_from(base).unwrap(), size])?;
+    let device = fdt.begin_node("qemu-uefi-vars@0")?;
+    fdt.property_string("compatible", "qemu,uefi-vars")?;
+    fdt.property_array_u32("reg", &[0, size])?;
+    fdt.end_node(device)?;
+    fdt.end_node(bus)?;
     Ok(())
 }
 
@@ -583,6 +608,50 @@ mod tests {
     use crate::test_utils::arch_mem;
     use crate::vstate::memory::GuestAddress;
     use crate::{EventManager, Kvm};
+
+    #[test]
+    #[cfg(feature = "windows")]
+    fn protected_variables_use_firmware_platform_bus_cells_only_when_attached() {
+        for enabled in [false, true] {
+            let mut writer = FdtWriter::new().unwrap();
+            let root = writer.begin_node("").unwrap();
+            writer.property_u32("#address-cells", 2).unwrap();
+            writer.property_u32("#size-cells", 2).unwrap();
+            create_uefi_vars_node(&mut writer, enabled).unwrap();
+            writer.end_node(root).unwrap();
+            let tree = device_tree::DeviceTree::load(&writer.finish().unwrap()).unwrap();
+            let bus = tree.find("/platform-bus@10001000");
+            assert_eq!(bus.is_some(), enabled);
+            if let Some(bus) = bus {
+                assert_eq!(
+                    bus.prop_raw("compatible").unwrap(),
+                    b"qemu,platform\0simple-bus\0"
+                );
+                assert_eq!(
+                    bus.prop_raw("#address-cells").unwrap().as_slice(),
+                    1u32.to_be_bytes().as_slice()
+                );
+                assert_eq!(
+                    bus.prop_raw("#size-cells").unwrap().as_slice(),
+                    1u32.to_be_bytes().as_slice()
+                );
+                let cells: Vec<u8> = [0u32, 0, 0x10001000, 0x1000]
+                    .into_iter()
+                    .flat_map(u32::to_be_bytes)
+                    .collect();
+                assert_eq!(bus.prop_raw("ranges").unwrap(), &cells);
+                let device = tree
+                    .find("/platform-bus@10001000/qemu-uefi-vars@0")
+                    .unwrap();
+                assert_eq!(device.prop_raw("compatible").unwrap(), b"qemu,uefi-vars\0");
+                let cells: Vec<u8> = [0u32, 0x1000]
+                    .into_iter()
+                    .flat_map(u32::to_be_bytes)
+                    .collect();
+                assert_eq!(device.prop_raw("reg").unwrap(), &cells);
+            }
+        }
+    }
 
     #[test]
     fn test_firmware_and_linux_memory_handoff() {

@@ -16,6 +16,7 @@ pub mod balloon;
 pub mod block;
 pub mod device;
 pub mod generated;
+pub mod input;
 mod iov_deque;
 pub mod iovec;
 pub mod mem;
