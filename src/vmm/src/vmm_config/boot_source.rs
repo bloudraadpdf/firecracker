@@ -31,11 +31,137 @@ pub struct BootSourceConfig {
     /// The boot arguments to pass to the kernel. If this field is uninitialized,
     /// DEFAULT_KERNEL_CMDLINE is used.
     pub boot_args: Option<String>,
+    /// Optional firmware ABI, with stable identity for CloudHv.
+    pub firmware: Option<FirmwareConfig>,
+}
+
+/// Explicit firmware ABI declaration; never inferred from the image filename.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(try_from = "FirmwareConfigData", into = "FirmwareConfigData")]
+pub enum FirmwareConfig {
+    /// AMD64 CloudHv PVH firmware with stable SMBIOS identity.
+    CloudHv {
+        /// Caller-owned identity, stable across cold boots and restores.
+        system_uuid: SystemUuid,
+    },
+    /// AMD64 SeaBIOS PVH firmware without the CloudHv identity handoff.
+    SeaBios,
+}
+
+#[derive(Deserialize, Serialize)]
+enum FirmwareType {
+    #[serde(rename = "cloud-hv")]
+    CloudHv,
+    #[serde(rename = "seabios")]
+    SeaBios,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct FirmwareConfigData {
+    #[serde(rename = "type")]
+    profile: FirmwareType,
+    system_uuid: Option<SystemUuid>,
+}
+
+impl TryFrom<FirmwareConfigData> for FirmwareConfig {
+    type Error = &'static str;
+
+    fn try_from(value: FirmwareConfigData) -> Result<Self, Self::Error> {
+        match (value.profile, value.system_uuid) {
+            (FirmwareType::CloudHv, Some(system_uuid)) => Ok(Self::CloudHv { system_uuid }),
+            (FirmwareType::SeaBios, None) => Ok(Self::SeaBios),
+            (FirmwareType::CloudHv, None) => Err("CloudHv requires a system UUID"),
+            (FirmwareType::SeaBios, Some(_)) => {
+                Err("SeaBIOS does not accept a CloudHv system UUID")
+            }
+        }
+    }
+}
+
+impl From<FirmwareConfig> for FirmwareConfigData {
+    fn from(value: FirmwareConfig) -> Self {
+        match value {
+            FirmwareConfig::CloudHv { system_uuid } => Self {
+                profile: FirmwareType::CloudHv,
+                system_uuid: Some(system_uuid),
+            },
+            FirmwareConfig::SeaBios => Self {
+                profile: FirmwareType::SeaBios,
+                system_uuid: None,
+            },
+        }
+    }
+}
+
+impl FirmwareConfig {
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) fn cloud_hv_uuid(&self) -> Option<SystemUuid> {
+        match self {
+            Self::CloudHv { system_uuid } => Some(*system_uuid),
+            Self::SeaBios => None,
+        }
+    }
+}
+
+/// A system UUID that excludes SMBIOS's absent and unset identity sentinels.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct SystemUuid([u8; 16]);
+
+impl TryFrom<String> for SystemUuid {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        let uuid = uuid::Uuid::parse_str(&value).map_err(|error| error.to_string())?;
+        let bytes = uuid.into_bytes();
+        if bytes == [0; 16] || bytes == [255; 16] {
+            return Err("system UUID must not be nil or all ones".into());
+        }
+        Ok(Self(bytes))
+    }
+}
+
+impl From<SystemUuid> for String {
+    fn from(value: SystemUuid) -> Self {
+        uuid::Uuid::from_bytes(value.0).to_string()
+    }
+}
+
+impl SystemUuid {
+    /// SMBIOS 2.6 and later encode the first three UUID fields little-endian.
+    pub fn smbios_bytes(self) -> [u8; 16] {
+        uuid::Uuid::from_bytes(self.0).to_bytes_le()
+    }
+}
+
+impl BootSourceConfig {
+    /// Check profile constraints without opening boot files during snapshot restore.
+    pub fn validate(&self) -> Result<(), BootSourceConfigError> {
+        if self.firmware.is_some() {
+            super::require_windows_support()?;
+            if !cfg!(target_arch = "x86_64") {
+                return Err(BootSourceConfigError::InvalidFirmware(
+                    "Firmware profiles require AMD64",
+                ));
+            }
+            if self.initrd_path.is_some() {
+                return Err(BootSourceConfigError::InvalidFirmware(
+                    "Firmware profiles do not accept an initrd",
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Errors associated with actions on `BootSourceConfig`.
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum BootSourceConfigError {
+    /// Unsupported build configuration: {0}
+    WindowsFeature(#[from] super::WindowsFeatureDisabled),
+    /// Invalid firmware configuration: {0}
+    InvalidFirmware(&'static str),
     /// The kernel file cannot be opened: {0}
     InvalidKernelPath(io::Error),
     /// The initrd file cannot be opened due to invalid path or invalid permissions. {0}
@@ -94,6 +220,8 @@ impl BootConfig {
             InvalidInitrdPath, InvalidKernelCommandLine, InvalidKernelPath,
         };
 
+        cfg.validate()?;
+
         // Validate boot source config.
         let kernel_file = File::open(&cfg.kernel_image_path).map_err(InvalidKernelPath)?;
         let initrd_file: Option<File> = match &cfg.initrd_path {
@@ -129,6 +257,7 @@ pub(crate) mod tests {
         let kernel_path = kernel_file.as_path().to_str().unwrap().to_string();
 
         let boot_src_cfg = BootSourceConfig {
+            firmware: None,
             boot_args: None,
             initrd_path: None,
             kernel_image_path: kernel_path,
@@ -142,6 +271,7 @@ pub(crate) mod tests {
     #[test]
     fn test_serde() {
         let boot_src_cfg = BootSourceConfig {
+            firmware: None,
             boot_args: Some(DEFAULT_KERNEL_CMDLINE.to_string()),
             initrd_path: Some("/tmp/initrd".to_string()),
             kernel_image_path: "./vmlinux.bin".to_string(),
@@ -156,5 +286,98 @@ pub(crate) mod tests {
         let snapshot_data = bitcode::serialize(&Snapshot::new(boot_src_cfg.clone())).unwrap();
         let restored_snapshot = Snapshot::load_without_crc_check(&snapshot_data).unwrap();
         assert_eq!(boot_src_cfg, restored_snapshot.data);
+    }
+    fn cloudhv_json() -> serde_json::Value {
+        serde_json::json!({
+            "kernel_image_path": "firmware.fd",
+            "firmware": {"type": "cloud-hv", "system_uuid": "11223344-5566-7788-99aa-bbccddeeff01"}
+        })
+    }
+
+    #[test]
+    fn cloudhv_profile_round_trips_json_and_snapshot_identity() {
+        let config: BootSourceConfig = serde_json::from_value(cloudhv_json()).unwrap();
+        let encoded = bitcode::serialize(&config).unwrap();
+        let restored: BootSourceConfig = bitcode::deserialize(&encoded).unwrap();
+        assert_eq!(config, restored);
+        let value = serde_json::to_value(&restored).unwrap();
+        assert_eq!(value["firmware"], cloudhv_json()["firmware"]);
+        let legacy: BootSourceConfig =
+            serde_json::from_str(r#"{"kernel_image_path":"seabios.elf"}"#).unwrap();
+        assert_eq!(legacy.firmware, None);
+        legacy.validate().unwrap();
+    }
+
+    #[test]
+    fn seabios_profile_has_no_cloudhv_identity() {
+        for firmware in [
+            serde_json::json!({"type": "seabios"}),
+            serde_json::json!({"type": "seabios", "system_uuid": null}),
+        ] {
+            let config: BootSourceConfig = serde_json::from_value(serde_json::json!({
+                "kernel_image_path": "firmware.elf",
+                "firmware": firmware,
+            }))
+            .unwrap();
+            assert_eq!(config.firmware, Some(FirmwareConfig::SeaBios));
+            let restored: BootSourceConfig =
+                bitcode::deserialize(&bitcode::serialize(&config).unwrap()).unwrap();
+            assert_eq!(restored, config);
+            let snapshot = Snapshot::new(config);
+            let restored: Snapshot<BootSourceConfig> =
+                Snapshot::load_without_crc_check(&bitcode::serialize(&snapshot).unwrap()).unwrap();
+            assert_eq!(restored.data.firmware, Some(FirmwareConfig::SeaBios));
+            assert_eq!(
+                serde_json::to_value(restored.data).unwrap()["firmware"]["system_uuid"],
+                serde_json::Value::Null
+            );
+        }
+    }
+
+    #[test]
+    fn cloudhv_profile_requires_supported_type_and_real_uuid() {
+        for value in [
+            "",
+            "invalid",
+            "00000000-0000-0000-0000-000000000000",
+            "ffffffff-ffff-ffff-ffff-ffffffffffff",
+        ] {
+            let mut json = cloudhv_json();
+            json["firmware"]["system_uuid"] = value.into();
+            serde_json::from_value::<BootSourceConfig>(json).unwrap_err();
+        }
+        for field in ["type", "system_uuid"] {
+            let mut json = cloudhv_json();
+            json["firmware"].as_object_mut().unwrap().remove(field);
+            serde_json::from_value::<BootSourceConfig>(json).unwrap_err();
+        }
+        let mut json = cloudhv_json();
+        json["firmware"]["type"] = "seabios".into();
+        serde_json::from_value::<BootSourceConfig>(json).unwrap_err();
+        let mut json = cloudhv_json();
+        json["firmware"]["type"] = "unknown".into();
+        serde_json::from_value::<BootSourceConfig>(json).unwrap_err();
+        let mut json = cloudhv_json();
+        json["firmware"]["extra"] = true.into();
+        serde_json::from_value::<BootSourceConfig>(json).unwrap_err();
+    }
+
+    #[test]
+    #[cfg(feature = "windows")]
+    fn firmware_profiles_reject_initrd_and_other_architectures_before_open() {
+        let mut config: BootSourceConfig = serde_json::from_value(cloudhv_json()).unwrap();
+        for firmware in [config.firmware.unwrap(), FirmwareConfig::SeaBios] {
+            config.firmware = Some(firmware);
+            config.initrd_path = None;
+            #[cfg(target_arch = "x86_64")]
+            config.validate().unwrap();
+            #[cfg(target_arch = "aarch64")]
+            config.validate().unwrap_err();
+            config.initrd_path = Some("unused".into());
+            assert!(matches!(
+                BootConfig::new(&config),
+                Err(BootSourceConfigError::InvalidFirmware(_))
+            ));
+        }
     }
 }

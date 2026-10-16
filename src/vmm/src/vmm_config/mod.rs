@@ -48,7 +48,6 @@ impl From<WindowsFeatureDisabled> for std::io::Error {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn require_windows_support() -> Result<(), WindowsFeatureDisabled> {
     if cfg!(feature = "windows") {
         Ok(())
