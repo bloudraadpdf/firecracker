@@ -56,3 +56,7 @@ pub enum DeviceError {
     /// Vsock device error: {0}
     VsockError(#[from] VsockError),
 }
+
+/// TPM 2.0 CRB with private swtpm state.
+#[cfg(target_arch = "x86_64")]
+pub mod tpm;
