@@ -9,8 +9,6 @@ use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
 
 use acpi::ACPIDeviceManager;
-#[cfg(target_arch = "x86_64")]
-use acpi_tables::Aml;
 use event_manager::{MutEventSubscriber, SubscriberOps};
 #[cfg(all(target_arch = "x86_64", feature = "windows"))]
 use legacy::PcDevices;
@@ -339,7 +337,18 @@ impl DeviceManager {
             VirtioDevices::Pci(devices) => devices.append_aml_bytes(dsdt_data)?,
         }
 
-        self.acpi_devices.append_aml_bytes(dsdt_data)
+        self.acpi_devices
+            .append_aml_bytes_in_scope(self.acpi_device_scope(), dsdt_data)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) fn acpi_device_scope(&self) -> crate::acpi::DeviceScope {
+        match &self.virtio_devices {
+            VirtioDevices::Pci(devices) if !devices.pci_segment.pci_transport.is_modern() => {
+                crate::acpi::DeviceScope::PciRoot
+            }
+            _ => crate::acpi::DeviceScope::SystemBus,
+        }
     }
 
     #[cfg(target_arch = "aarch64")]

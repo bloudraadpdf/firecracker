@@ -1485,6 +1485,13 @@ definitions:
         type: boolean
         description: Flag for enabling/disabling simultaneous multithreading. Can be enabled only on x86.
         default: false
+      pci_transport:
+        type: string
+        enum: [modern, transitional]
+        default: modern
+        description: >-
+          Experimental virtio PCI platform. Transitional is x86_64-only and
+          requires --enable-pci. Legacy transport implementation is incomplete.
       hyperv:
         type: boolean
         default: false

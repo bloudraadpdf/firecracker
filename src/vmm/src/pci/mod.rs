@@ -9,6 +9,8 @@
 pub mod bus;
 /// PCI configuration space handling
 pub mod configuration;
+/// Shared PCI INTx interrupt delivery.
+pub mod intx;
 /// MSI-X logic
 pub mod msix;
 
@@ -16,6 +18,25 @@ use std::fmt::{Debug, Display};
 use std::sync::{Arc, Barrier};
 
 use serde::{Deserialize, Serialize};
+
+/// Virtio PCI platform selected for a VM.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PciTransportMode {
+    /// Modern virtio PCI with a 64-bit memory aperture.
+    #[default]
+    Modern,
+    /// Transitional virtio PCI with I/O ports and a 32-bit memory aperture.
+    #[cfg(target_arch = "x86_64")]
+    Transitional,
+}
+
+impl PciTransportMode {
+    /// Whether the VM uses the default PCI platform.
+    pub fn is_modern(&self) -> bool {
+        matches!(self, Self::Modern)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// Parameters for performing a BAR reprogramming operation

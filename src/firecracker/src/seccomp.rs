@@ -167,6 +167,51 @@ mod tests {
         }
     }
 
+    #[cfg(all(target_arch = "x86_64", target_env = "musl", not(debug_assertions)))]
+    #[test]
+    fn vcpu_filter_allows_only_eventfd_sized_reads() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::process::ExitStatusExt;
+        use std::process::Command;
+
+        use vmm_sys_util::eventfd::EventFd;
+
+        const READ_SIZE: &str = "FIRECRACKER_TEST_EVENTFD_READ_SIZE";
+        if let Ok(size) = std::env::var(READ_SIZE) {
+            let size: usize = size.parse().unwrap();
+            assert!(size <= 16);
+            let event = EventFd::new(libc::EFD_NONBLOCK).unwrap();
+            event.write(1).unwrap();
+            let mut data = [0u8; 16];
+            apply_vcpu_filter();
+            // SAFETY: event is open, size fits data, and _exit ends this test subprocess.
+            unsafe {
+                let count = libc::read(event.as_raw_fd(), data.as_mut_ptr().cast(), size);
+                libc::_exit(i32::from(count != 8 || data[..8] != 1u64.to_ne_bytes()));
+            }
+        }
+
+        for size in [8, 7, 9] {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "seccomp::tests::vcpu_filter_allows_only_eventfd_sized_reads",
+                ])
+                .env(READ_SIZE, size.to_string())
+                .output()
+                .unwrap();
+            if size == 8 {
+                assert!(
+                    output.status.success(),
+                    "eventfd read failed: {:?}",
+                    output.status
+                );
+            } else {
+                assert_eq!(output.status.signal(), Some(libc::SIGSYS));
+            }
+        }
+    }
+
     #[test]
     fn test_get_filters() {
         let mut filters = get_empty_filters();
