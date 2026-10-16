@@ -59,28 +59,39 @@ const fn frame_hdr_len() -> usize {
     vnet_hdr_len() + FRAME_HEADER_MAX_LEN
 }
 
-// Frames being sent/received through the network device model have a VNET header. This
-// function returns a slice which holds the L2 frame bytes without this header.
-fn frame_bytes_from_buf(buf: &[u8]) -> Result<&[u8], NetError> {
-    if buf.len() < vnet_hdr_len() {
-        Err(NetError::VnetHeaderMissing)
-    } else {
-        Ok(&buf[vnet_hdr_len()..])
-    }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VnetHeader {
+    Legacy,
+    Extended,
 }
 
-fn frame_bytes_from_buf_mut(buf: &mut [u8]) -> Result<&mut [u8], NetError> {
-    if buf.len() < vnet_hdr_len() {
-        Err(NetError::VnetHeaderMissing)
-    } else {
-        Ok(&mut buf[vnet_hdr_len()..])
+impl VnetHeader {
+    fn from_features(features: u64) -> Self {
+        if features & ((1 << VIRTIO_F_VERSION_1) | (1 << VIRTIO_NET_F_MRG_RXBUF)) == 0 {
+            Self::Legacy
+        } else {
+            Self::Extended
+        }
     }
-}
 
-// This initializes to all 0 the VNET hdr part of a buf.
-fn init_vnet_hdr(buf: &mut [u8]) {
-    // The buffer should be larger than vnet_hdr_len.
-    buf[0..vnet_hdr_len()].fill(0);
+    fn len(self) -> usize {
+        match self {
+            Self::Legacy => std::mem::offset_of!(virtio_net_hdr_v1, num_buffers),
+            Self::Extended => vnet_hdr_len(),
+        }
+    }
+
+    fn payload(self, buf: &[u8]) -> Result<&[u8], NetError> {
+        buf.get(self.len()..).ok_or(NetError::VnetHeaderMissing)
+    }
+
+    fn payload_mut(self, buf: &mut [u8]) -> Result<&mut [u8], NetError> {
+        buf.get_mut(self.len()..).ok_or(NetError::VnetHeaderMissing)
+    }
+
+    fn clear(self, buf: &mut [u8]) {
+        buf[..self.len()].fill(0);
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -176,7 +187,12 @@ impl RxBuffers {
     /// * The `RxBuffers` should include at least one parsed `DescriptorChain`.
     /// * `size` needs to be smaller or equal to total length of the first `DescriptorChain` stored
     ///   in the `RxBuffers`.
-    unsafe fn mark_used(&mut self, mut bytes_written: u32, rx_queue: &mut Queue) {
+    unsafe fn mark_used(
+        &mut self,
+        mut bytes_written: u32,
+        rx_queue: &mut Queue,
+        header: VnetHeader,
+    ) {
         self.used_bytes = bytes_written;
 
         let mut used_heads: u16 = 0;
@@ -198,7 +214,9 @@ impl RxBuffers {
         // We need to set num_buffers before dropping chains from `self.iovec`. Otherwise
         // when we set headers, we will iterate over new, yet unused chains instead of the ones
         // we need.
-        self.header_set_num_buffers(used_heads);
+        if header == VnetHeader::Extended {
+            self.header_set_num_buffers(used_heads);
+        }
         for _ in 0..used_heads {
             let parsed_dc = self
                 .parsed_descriptors
@@ -359,10 +377,6 @@ impl Net {
     ) -> Result<Self, NetError> {
         let tap = Tap::open_named(tap_if_name).map_err(NetError::TapOpen)?;
 
-        let vnet_hdr_size = i32::try_from(vnet_hdr_len()).unwrap();
-        tap.set_vnet_hdr_size(vnet_hdr_size)
-            .map_err(NetError::TapSetVnetHdrSize)?;
-
         Self::new_with_tap(id, tap, guest_mac, rx_rate_limiter, tx_rate_limiter, mtu)
     }
 
@@ -475,14 +489,17 @@ impl Net {
     /// Returns the minimum size of buffer we expect the guest to provide us depending on the
     /// features we have negotiated with it
     fn minimum_rx_buffer_size(&self) -> u32 {
+        let header = VnetHeader::from_features(self.acked_features);
         if !self.has_feature(VIRTIO_NET_F_MRG_RXBUF as u64) {
             if self.has_feature(VIRTIO_NET_F_GUEST_TSO4 as u64)
                 || self.has_feature(VIRTIO_NET_F_GUEST_TSO6 as u64)
                 || self.has_feature(VIRTIO_NET_F_GUEST_UFO as u64)
             {
-                MAX_BUFFER_SIZE.try_into().unwrap()
+                (MAX_BUFFER_SIZE - vnet_hdr_len() + header.len())
+                    .try_into()
+                    .unwrap()
             } else {
-                1526
+                u32::try_from(1514 + header.len()).unwrap()
             }
         } else {
             vnet_hdr_len().try_into().unwrap()
@@ -527,15 +544,10 @@ impl Net {
     // Tries to detour the frame to MMDS and if MMDS doesn't accept it, sends it on the host TAP.
     //
     // Returns whether MMDS consumed the frame.
-    fn write_to_mmds_or_tap(
-        mmds_ns: Option<&mut MmdsNetworkStack>,
-        rate_limiter: &mut RateLimiter,
-        headers: &mut [u8],
-        frame_iovec: &IoVecBuffer,
-        tap: &mut Tap,
-        guest_mac: Option<MacAddr>,
-        net_metrics: &NetDeviceMetrics,
-    ) -> Result<bool, NetError> {
+    fn write_to_mmds_or_tap(&mut self) -> Result<bool, NetError> {
+        let header = VnetHeader::from_features(self.acked_features);
+        let frame_iovec = &self.tx_buffer;
+        let headers = &mut self.tx_frame_headers[..];
         // There is a potential for a TOCTOU race condition here where,
         // when MMDS is enabled, the guest can rewrite packet headers between
         // the time that we check that a packet should be detoured to MMDS,
@@ -566,29 +578,32 @@ impl Net {
             .read_volatile_at(&mut &mut *headers, 0, max_header_len)
             .map_err(|err| {
                 error!("Received malformed TX buffer: {:?}", err);
-                net_metrics.tx_malformed_frames.inc();
+                self.metrics.tx_malformed_frames.inc();
                 NetError::VnetHeaderMissing
             })?;
 
-        let headers = frame_bytes_from_buf(&headers[..header_len]).inspect_err(|_| {
+        let headers = header.payload(&headers[..header_len]).inspect_err(|_| {
             error!("VNET headers missing in TX frame");
-            net_metrics.tx_malformed_frames.inc();
+            self.metrics.tx_malformed_frames.inc();
         })?;
 
-        if let Some(ns) = mmds_ns
+        if let Some(ns) = self.mmds_ns.as_mut()
             && ns.is_mmds_frame(headers)
         {
-            let mut frame = vec![0u8; frame_iovec.len() as usize - vnet_hdr_len()];
+            let mut frame = vec![0u8; frame_iovec.len() as usize - header.len()];
             // Ok to unwrap here, because we are passing a buffer that has the exact size
             // of the `IoVecBuffer` minus the VNET headers.
             frame_iovec
-                .read_exact_volatile_at(&mut frame, vnet_hdr_len())
+                .read_exact_volatile_at(&mut frame, header.len())
                 .unwrap();
             let _ = ns.detour_frame(&frame);
             METRICS.mmds.rx_accepted.inc();
 
             // MMDS frames are not accounted by the rate limiter.
-            Self::rate_limiter_replenish_op(rate_limiter, u64::from(frame_iovec.len()));
+            Self::rate_limiter_replenish_op(
+                &mut self.tx_rate_limiter,
+                u64::from(frame_iovec.len()),
+            );
 
             // MMDS consumed the frame.
             return Ok(true);
@@ -597,25 +612,25 @@ impl Net {
         // This frame goes to the TAP.
 
         // Check for guest MAC spoofing.
-        if let Some(guest_mac) = guest_mac {
+        if let Some(guest_mac) = self.guest_mac {
             let _ = EthernetFrame::from_bytes(headers).map(|eth_frame| {
                 if guest_mac != eth_frame.src_mac() {
-                    net_metrics.tx_spoofed_mac_count.inc();
+                    self.metrics.tx_spoofed_mac_count.inc();
                 }
             });
         }
 
-        let _metric = net_metrics.tap_write_agg.record_latency_metrics();
-        match Self::write_tap(tap, frame_iovec) {
+        let _metric = self.metrics.tap_write_agg.record_latency_metrics();
+        match Self::write_tap(&mut self.tap, frame_iovec) {
             Ok(_) => {
                 let len = u64::from(frame_iovec.len());
-                net_metrics.tx_bytes_count.add(len);
-                net_metrics.tx_packets_count.inc();
-                net_metrics.tx_count.inc();
+                self.metrics.tx_bytes_count.add(len);
+                self.metrics.tx_packets_count.inc();
+                self.metrics.tx_count.inc();
             }
             Err(err) => {
                 error!("Failed to write to tap: {:?}", err);
-                net_metrics.tap_write_fails.inc();
+                self.metrics.tap_write_fails.inc();
             }
         };
         Ok(false)
@@ -623,43 +638,41 @@ impl Net {
 
     // We currently prioritize packets from the MMDS over regular network packets.
     fn read_from_mmds_or_tap(&mut self) -> Result<Option<u32>, NetError> {
-        // We only want to read from TAP (or mmds) if we have at least 64K of available capacity as
-        // this is the max size of 1 packet.
-        // SAFETY:
-        // * MAX_BUFFER_SIZE is constant and fits into u32
-        #[allow(clippy::cast_possible_truncation)]
-        if self.rx_buffer.capacity() < MAX_BUFFER_SIZE as u32 {
+        let header = VnetHeader::from_features(self.acked_features);
+        let max_frame_size =
+            u32::try_from(MAX_BUFFER_SIZE - vnet_hdr_len() + header.len()).unwrap();
+        if self.rx_buffer.capacity() < max_frame_size {
             self.parse_rx_descriptors()?;
 
             // If after parsing the RX queue we still don't have enough capacity, stop processing RX
             // frames.
-            if self.rx_buffer.capacity() < MAX_BUFFER_SIZE as u32 {
+            if self.rx_buffer.capacity() < max_frame_size {
                 return Ok(None);
             }
         }
 
         if let Some(ns) = self.mmds_ns.as_mut()
-            && let Some(len) =
-                ns.write_next_frame(frame_bytes_from_buf_mut(&mut self.rx_frame_buf)?)
+            && let Some(len) = ns.write_next_frame(header.payload_mut(&mut self.rx_frame_buf)?)
         {
             let len = len.get();
             METRICS.mmds.tx_frames.inc();
             METRICS.mmds.tx_bytes.add(len as u64);
-            init_vnet_hdr(&mut self.rx_frame_buf);
+            header.clear(&mut self.rx_frame_buf);
             self.rx_buffer
                 .iovec
-                .write_all_volatile_at(&self.rx_frame_buf[..vnet_hdr_len() + len], 0)?;
+                .write_all_volatile_at(&self.rx_frame_buf[..header.len() + len], 0)?;
             // SAFETY:
             // * len will never be bigger that u32::MAX because mmds is bound
             // by the size of `self.rx_frame_buf` which is MAX_BUFFER_SIZE size.
-            let len: u32 = (vnet_hdr_len() + len).try_into().unwrap();
+            let len: u32 = (header.len() + len).try_into().unwrap();
 
             // SAFETY:
             // * We checked that `rx_buffer` includes at least one `DescriptorChain`
             // * `rx_frame_buf` has size of `MAX_BUFFER_SIZE` and all `DescriptorChain` objects are
             //   at least that big.
             unsafe {
-                self.rx_buffer.mark_used(len, &mut self.queues[RX_INDEX]);
+                self.rx_buffer
+                    .mark_used(len, &mut self.queues[RX_INDEX], header);
             }
             return Ok(Some(len));
         }
@@ -676,7 +689,8 @@ impl Net {
         // * `read_tap` passes the first `DescriptorChain` to `readv` so we can't have read more
         //   bytes than its capacity.
         unsafe {
-            self.rx_buffer.mark_used(len, &mut self.queues[RX_INDEX]);
+            self.rx_buffer
+                .mark_used(len, &mut self.queues[RX_INDEX], header);
         }
         Ok(Some(len))
     }
@@ -737,7 +751,6 @@ impl Net {
 
     fn process_tx(&mut self) -> Result<(), DeviceError> {
         // This is safe since we checked in the event handler that the device is activated.
-        let mem = &self.device_state.active_state().unwrap().mem;
 
         // The MMDS network stack works like a state machine, based on synchronous calls, and
         // without being added to any event loop. If any frame is accepted by the MMDS, we also
@@ -745,20 +758,23 @@ impl Net {
         // with the MMDS network stack.
         let mut process_rx_for_mmds = false;
         let mut used_any = false;
-        let tx_queue = &mut self.queues[TX_INDEX];
 
-        while let Some(head) = tx_queue.pop_or_enable_notification()? {
+        while let Some(head) = self.queues[TX_INDEX].pop_or_enable_notification()? {
             self.metrics
                 .tx_remaining_reqs_count
-                .add(tx_queue.len().into());
+                .add(self.queues[TX_INDEX].len().into());
             let head_index = head.index;
             // Parse IoVecBuffer from descriptor head
             // SAFETY: This descriptor chain is only loaded once
             // virtio requests are handled sequentially so no two IoVecBuffers
             // are live at the same time, meaning this has exclusive ownership over the memory
-            if unsafe { self.tx_buffer.load_descriptor_chain(mem, head).is_err() } {
+            if unsafe {
+                self.tx_buffer
+                    .load_descriptor_chain(&self.device_state.active_state().unwrap().mem, head)
+                    .is_err()
+            } {
                 self.metrics.tx_fails.inc();
-                tx_queue.add_used(head_index, 0)?;
+                self.queues[TX_INDEX].add_used(head_index, 0)?;
                 continue;
             };
 
@@ -766,7 +782,7 @@ impl Net {
             if self.tx_buffer.len() as usize > MAX_BUFFER_SIZE {
                 error!("net: received too big frame from driver");
                 self.metrics.tx_malformed_frames.inc();
-                tx_queue.add_used(head_index, 0)?;
+                self.queues[TX_INDEX].add_used(head_index, 0)?;
                 continue;
             }
 
@@ -774,27 +790,18 @@ impl Net {
                 &mut self.tx_rate_limiter,
                 u64::from(self.tx_buffer.len()),
             ) {
-                tx_queue.undo_pop();
+                self.queues[TX_INDEX].undo_pop();
                 self.metrics.tx_rate_limiter_throttled.inc();
                 break;
             }
 
-            let frame_consumed_by_mmds = Self::write_to_mmds_or_tap(
-                self.mmds_ns.as_mut(),
-                &mut self.tx_rate_limiter,
-                &mut self.tx_frame_headers,
-                &self.tx_buffer,
-                &mut self.tap,
-                self.guest_mac,
-                &self.metrics,
-            )
-            .unwrap_or(false);
+            let frame_consumed_by_mmds = self.write_to_mmds_or_tap().unwrap_or(false);
             if frame_consumed_by_mmds && self.rx_buffer.used_bytes == 0 {
                 // MMDS consumed this frame/request, let's also try to process the response.
                 process_rx_for_mmds = true;
             }
 
-            tx_queue.add_used(head_index, 0)?;
+            self.queues[TX_INDEX].add_used(head_index, 0)?;
             used_any = true;
         }
 
@@ -1061,6 +1068,10 @@ impl VirtioDevice for Net {
             }
         }
 
+        let header = VnetHeader::from_features(self.acked_features);
+        self.tap
+            .set_vnet_hdr_size(i32::try_from(header.len()).unwrap())
+            .map_err(ActivateError::TapSetVnetHdrSize)?;
         let supported_flags: u32 = Net::build_tap_offload_features(self.acked_features);
         self.tap
             .set_offload(supported_flags)
@@ -1129,9 +1140,7 @@ pub mod tests {
     use crate::devices::virtio::generated::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
     use crate::devices::virtio::iovec::IoVecBuffer;
     use crate::devices::virtio::net::NET_QUEUE_SIZES;
-    use crate::devices::virtio::net::device::{
-        frame_bytes_from_buf, frame_bytes_from_buf_mut, frame_hdr_len, init_vnet_hdr, vnet_hdr_len,
-    };
+    use crate::devices::virtio::net::device::vnet_hdr_len;
     use crate::devices::virtio::net::test_utils::test::TestHelper;
     use crate::devices::virtio::net::test_utils::{
         NetEvent, NetQueue, TapTrafficSimulator, default_net, enable, if_index,
@@ -1167,7 +1176,7 @@ pub mod tests {
     fn test_vnet_helpers() {
         let mut frame_buf = vec![42u8; vnet_hdr_len() - 1];
         assert_eq!(
-            format!("{:?}", frame_bytes_from_buf_mut(&mut frame_buf)),
+            format!("{:?}", VnetHeader::Extended.payload_mut(&mut frame_buf)),
             "Err(VnetHeaderMissing)"
         );
 
@@ -1176,15 +1185,15 @@ pub mod tests {
         let vnet_hdr_len_ = mem::size_of::<virtio_net_hdr_v1>();
         assert_eq!(vnet_hdr_len_, vnet_hdr_len());
 
-        init_vnet_hdr(&mut frame_buf);
+        VnetHeader::Extended.clear(&mut frame_buf);
         let zero_vnet_hdr = vec![0u8; vnet_hdr_len_];
         assert_eq!(zero_vnet_hdr, &frame_buf[..vnet_hdr_len_]);
 
         let payload = vec![42u8; MAX_BUFFER_SIZE - vnet_hdr_len_];
-        assert_eq!(payload, frame_bytes_from_buf(&frame_buf).unwrap());
+        assert_eq!(payload, VnetHeader::Extended.payload(&frame_buf).unwrap());
 
         {
-            let payload = frame_bytes_from_buf_mut(&mut frame_buf).unwrap();
+            let payload = VnetHeader::Extended.payload_mut(&mut frame_buf).unwrap();
             payload[0] = 15;
         }
         assert_eq!(frame_buf[vnet_hdr_len_], 15);
@@ -1338,6 +1347,87 @@ pub mod tests {
         assert_eq!(config_read, initial_bytes);
         assert_eq!(net.guest_mac.unwrap(), initial_mac);
         assert_eq!(net.metrics.cfg_fails.count(), cfg_fails_before + 2);
+    }
+
+    #[test]
+    fn test_negotiated_rx_header_preserves_payload() {
+        use crate::devices::virtio::net::persist::NetConstructorArgs;
+        use crate::devices::virtio::net::test_utils::default_net_no_mmds;
+        use crate::devices::virtio::test_utils::default_interrupt;
+        use crate::snapshot::Persist;
+        use crate::vstate::memory::Bytes;
+
+        enum Start {
+            Cold,
+            Restore,
+            Reset,
+        }
+
+        for (features, header_len) in [
+            (0, 10usize),
+            (1 << VIRTIO_F_VERSION_1, 12),
+            (1 << VIRTIO_NET_F_MRG_RXBUF, 12),
+        ] {
+            for start in [Start::Cold, Start::Restore, Start::Reset] {
+                let mem = single_region_mem(2 * MAX_BUFFER_SIZE);
+                let mut net = default_net_no_mmds();
+                net.acked_features = if matches!(start, Start::Reset) {
+                    features ^ (1 << VIRTIO_F_VERSION_1)
+                } else {
+                    features
+                };
+                let rxq = VirtQueue::new(GuestAddress(0), &mem, NET_QUEUE_MAX_SIZE);
+                let txq = VirtQueue::new(GuestAddress(8192), &mem, NET_QUEUE_MAX_SIZE);
+                net.queues = vec![rxq.create_queue(), txq.create_queue()];
+                let rx_addr = GuestAddress(16384);
+                rxq.dtable[0].set(rx_addr.0, MAX_BUFFER_SIZE as u32, VIRTQ_DESC_F_WRITE, 0);
+                rxq.avail.ring[0].set(0);
+                rxq.avail.idx.set(1);
+                let payload = [0x42; 64];
+                let mut frame = vec![0; header_len];
+                frame.extend(payload);
+                let tx_addr = GuestAddress(rx_addr.0 + MAX_BUFFER_SIZE as u64);
+                mem.write_slice(&frame, tx_addr).unwrap();
+                txq.dtable[0].set(tx_addr.0, frame.len() as u32, 0, 0);
+                txq.avail.ring[0].set(0);
+                txq.avail.idx.set(1);
+                net.activate(mem.clone(), default_interrupt()).unwrap();
+                if matches!(start, Start::Reset) {
+                    assert!(net.reset());
+                    net.queues = vec![rxq.create_queue(), txq.create_queue()];
+                    net.acked_features = features;
+                    net.activate(mem.clone(), default_interrupt()).unwrap();
+                }
+                if matches!(start, Start::Restore) {
+                    let state = net.save();
+                    drop(net);
+                    net = Net::restore(
+                        NetConstructorArgs {
+                            mem: mem.clone(),
+                            mmds: None,
+                        },
+                        &state,
+                    )
+                    .unwrap();
+                    enable(&net.tap);
+                    net.activate(mem.clone(), default_interrupt()).unwrap();
+                }
+                let simulator = TapTrafficSimulator::new(if_index(&net.tap));
+                simulator.push_tx_packet(&payload);
+                net.process_rx().unwrap();
+                rxq.check_used_elem(0, 0, frame.len() as u32);
+                if header_len == 12 {
+                    header_set_num_buffers(&mut frame, 1);
+                }
+                rxq.dtable[0].check_data(&frame);
+                net.process_tx().unwrap();
+                txq.check_used_elem(0, 0, 0);
+                let mut received = [0; 64];
+                assert!(simulator.pop_rx_packet(&mut received));
+                assert_eq!(received, payload);
+                assert!(!simulator.pop_rx_packet(&mut []));
+            }
+        }
     }
 
     #[test]
@@ -2020,7 +2110,7 @@ pub mod tests {
 
         // Create an ethernet frame.
         let incomplete_frame = EthernetFrame::write_incomplete(
-            frame_bytes_from_buf_mut(&mut frame_buf).unwrap(),
+            VnetHeader::Extended.payload_mut(&mut frame_buf).unwrap(),
             dst_mac,
             src_mac,
             ETHERTYPE_ARP,
@@ -2044,6 +2134,12 @@ pub mod tests {
 
     #[test]
     fn test_mmds_detour_and_injection() {
+        for features in [0, 1 << VIRTIO_F_VERSION_1, 1 << VIRTIO_NET_F_MRG_RXBUF] {
+            mmds_detour_and_injection(features);
+        }
+    }
+
+    fn mmds_detour_and_injection(features: u64) {
         let mut net = default_net();
 
         let mem = single_region_mem(2 * MAX_BUFFER_SIZE);
@@ -2068,37 +2164,39 @@ pub mod tests {
         let dst_mac = MacAddr::from_str("22:22:22:22:22:22").unwrap();
         let dst_ip = Ipv4Addr::new(169, 254, 169, 254);
 
-        let (frame_buf, frame_len) = create_arp_request(src_mac, src_ip, dst_mac, dst_ip);
+        let (mut frame_buf, mut frame_len) = create_arp_request(src_mac, src_ip, dst_mac, dst_ip);
+        let header = VnetHeader::from_features(features);
+        if header == VnetHeader::Legacy {
+            frame_buf.copy_within(12..frame_len, 10);
+            frame_len -= 2;
+        }
         let buffer = IoVecBuffer::from(&frame_buf[..frame_len]);
 
-        let mut headers = vec![0; frame_hdr_len()];
-        buffer.read_exact_volatile_at(&mut headers, 0).unwrap();
+        net.tx_buffer = buffer;
+        net.acked_features = features;
+        net.guest_mac = Some(src_mac);
 
         // Call the code which sends the packet to the host or MMDS.
         // Validate the frame was consumed by MMDS and that the metrics reflect that.
         check_metric_after_block!(
             &METRICS.mmds.rx_accepted,
             1,
-            assert!(
-                Net::write_to_mmds_or_tap(
-                    net.mmds_ns.as_mut(),
-                    &mut net.tx_rate_limiter,
-                    &mut headers,
-                    &buffer,
-                    &mut net.tap,
-                    Some(src_mac),
-                    &net.metrics,
-                )
-                .unwrap()
-            )
+            assert!(net.write_to_mmds_or_tap().unwrap())
         );
 
         // Validate that MMDS has a response and we can retrieve it.
         check_metric_after_block!(
             &METRICS.mmds.tx_frames,
             1,
-            net.read_from_mmds_or_tap().unwrap()
+            assert_eq!(net.read_from_mmds_or_tap().unwrap(), Some(frame_len as u32))
         );
+        assert_eq!(
+            &fake_buffer[header.len()..header.len() + 6],
+            src_mac.get_bytes()
+        );
+        if header == VnetHeader::Extended {
+            assert_eq!(&fake_buffer[10..12], &1u16.to_le_bytes());
+        }
     }
 
     #[test]
@@ -2113,36 +2211,23 @@ pub mod tests {
 
         let (frame_buf, frame_len) = create_arp_request(guest_mac, guest_ip, dst_mac, dst_ip);
         let buffer = IoVecBuffer::from(&frame_buf[..frame_len]);
-        let mut headers = vec![0; frame_hdr_len()];
+        net.tx_buffer = buffer;
+        net.acked_features = 1 << VIRTIO_F_VERSION_1;
+        net.guest_mac = Some(guest_mac);
 
         // Check that a legit MAC doesn't affect the spoofed MAC metric.
         check_metric_after_block!(
             net.metrics.tx_spoofed_mac_count,
             0,
-            Net::write_to_mmds_or_tap(
-                net.mmds_ns.as_mut(),
-                &mut net.tx_rate_limiter,
-                &mut headers,
-                &buffer,
-                &mut net.tap,
-                Some(guest_mac),
-                &net.metrics,
-            )
+            net.write_to_mmds_or_tap()
         );
 
+        net.guest_mac = Some(not_guest_mac);
         // Check that a spoofed MAC increases our spoofed MAC metric.
         check_metric_after_block!(
             net.metrics.tx_spoofed_mac_count,
             1,
-            Net::write_to_mmds_or_tap(
-                net.mmds_ns.as_mut(),
-                &mut net.tx_rate_limiter,
-                &mut headers,
-                &buffer,
-                &mut net.tap,
-                Some(not_guest_mac),
-                &net.metrics,
-            )
+            net.write_to_mmds_or_tap()
         );
     }
 

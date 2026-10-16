@@ -63,6 +63,8 @@ pub enum ActivateError {
     VhostUser(vhost_user::VhostUserError),
     /// Setting tap interface offload flags failed: {0}
     TapSetOffload(TapError),
+    /// Setting tap interface header size failed: {0}
+    TapSetVnetHdrSize(TapError),
     /// Error setting pointers in the queue: (0)
     QueueMemoryError(QueueError),
     /// The driver didn't acknowledge a required feature: {0}
