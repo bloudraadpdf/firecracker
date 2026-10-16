@@ -21,7 +21,7 @@ use crate::arch::EntryPoint;
 use crate::arch::x86_64::generated::msr_index::{MSR_IA32_TSC, MSR_IA32_TSC_DEADLINE};
 use crate::arch::x86_64::msr::{MsrError, create_boot_msr_entries};
 use crate::arch::x86_64::regs::{SetupFpuError, SetupRegistersError, SetupSpecialRegistersError};
-use crate::arch::x86_64::{hyperv, interrupts};
+use crate::arch::x86_64::{cet, hyperv, interrupts};
 use crate::cpu_config::x86_64::{CpuConfiguration, cpuid};
 use crate::logger::{IncMetric, METRICS, error, warn};
 use crate::vstate::bus::Bus;
@@ -49,10 +49,16 @@ const DEFERRED_MSRS: [u32; 1] = [
 /// Errors associated with the wrappers over KVM ioctls.
 #[derive(Debug, PartialEq, Eq, thiserror::Error, displaydoc::Display)]
 pub enum KvmVcpuError {
-    /// Invalid PIT-free timer configuration: {0}
-    PitlessTimers(#[from] cpuid::PitlessTimerError),
+    /// Failed to read the guest shadow-stack pointer: {0}
+    GetGuestSsp(kvm_ioctls::Error),
+    /// Failed to restore the guest shadow-stack pointer: {0}
+    SetGuestSsp(kvm_ioctls::Error),
+    /// Snapshot shadow-stack state does not match its CPUID features.
+    InvalidGuestSsp,
     /// Failed to restore Hyper-V state: {0}
     Hyperv(#[from] hyperv::HypervError),
+    /// Invalid PIT-free timer configuration: {0}
+    PitlessTimers(#[from] cpuid::PitlessTimerError),
     /// Failed to convert `kvm_bindings::CpuId` to `Cpuid`: {0}
     ConvertCpuidType(#[from] cpuid::CpuidTryFromKvmCpuid),
     /// Failed FamStructWrapper operation: {0}
@@ -124,10 +130,10 @@ pub struct SetTscError(#[from] kvm_ioctls::Error);
 /// Errors associated with configuring an x86_64 vCPU.
 #[derive(Debug, thiserror::Error, displaydoc::Display, Eq, PartialEq)]
 pub enum KvmVcpuConfigureError {
-    /// Invalid PIT-free timer configuration: {0}
-    PitlessTimers(#[from] cpuid::PitlessTimerError),
     /// Failed to configure Hyper-V: {0}
     Hyperv(#[from] hyperv::HypervError),
+    /// Invalid PIT-free timer configuration: {0}
+    PitlessTimers(#[from] cpuid::PitlessTimerError),
     /// Failed to convert `Cpuid` to `kvm_bindings::CpuId`: {0}
     ConvertCpuidType(#[from] vmm_sys_util::fam::Error),
     /// Failed to apply modifications to CPUID: {0}
@@ -648,9 +654,12 @@ impl KvmVcpu {
             None
         });
         let cpuid = self.get_cpuid()?;
-        let msrs_to_save = self.msrs_to_save.clone();
-        #[cfg(feature = "windows")]
-        let mut msrs_to_save = msrs_to_save;
+        let mut msrs_to_save = self.msrs_to_save.clone();
+        for index in cet::msrs_to_save(&cpuid) {
+            if !msrs_to_save.contains(&index) {
+                msrs_to_save.push(index);
+            }
+        }
         #[cfg(not(feature = "windows"))]
         if hyperv::enabled(&cpuid) {
             return Err(hyperv::HypervError::Unavailable.into());
@@ -664,6 +673,10 @@ impl KvmVcpu {
             }
         }
         let saved_msrs = self.get_msr_chunks(msrs_to_save.into_iter())?;
+        let guest_ssp = cet::shadow_stack_enabled(&cpuid)
+            .then(|| cet::get_guest_ssp(&self.fd))
+            .transpose()
+            .map_err(KvmVcpuError::GetGuestSsp)?;
         let vcpu_events = self
             .fd
             .get_vcpu_events()
@@ -671,6 +684,7 @@ impl KvmVcpu {
 
         Ok(VcpuState {
             cpuid,
+            guest_ssp,
             saved_msrs,
             debug_regs,
             lapic,
@@ -723,6 +737,9 @@ impl KvmVcpu {
         #[cfg(not(feature = "windows"))]
         if hyperv::enabled(&state.cpuid) {
             return Err(hyperv::HypervError::Unavailable.into());
+        }
+        if cet::shadow_stack_enabled(&state.cpuid) != state.guest_ssp.is_some() {
+            return Err(KvmVcpuError::InvalidGuestSsp);
         }
         if !self.pit_enabled {
             cpuid::validate_pitless_timers(&state.cpuid)?;
@@ -789,6 +806,9 @@ impl KvmVcpu {
             if nmsrs < msrs.as_fam_struct_ref().nmsrs as usize {
                 return Err(KvmVcpuError::VcpuSetMsrsIncomplete);
             }
+        }
+        if let Some(guest_ssp) = state.guest_ssp {
+            cet::set_guest_ssp(&self.fd, guest_ssp).map_err(KvmVcpuError::SetGuestSsp)?;
         }
         self.fd
             .set_vcpu_events(&state.vcpu_events)
@@ -908,6 +928,8 @@ impl Peripherals {
 /// Structure holding VCPU kvm state.
 #[derive(Serialize, Deserialize)]
 pub struct VcpuState {
+    /// Current CET shadow-stack pointer when shadow stacks are exposed.
+    pub guest_ssp: Option<u64>,
     /// CpuId.
     pub cpuid: CpuId,
     /// Saved msrs.
@@ -940,6 +962,7 @@ impl Debug for VcpuState {
             debug_kvm_regs.sort_by_key(|msr| (msr.nmsrs, msr.pad));
         }
         f.debug_struct("VcpuState")
+            .field("guest_ssp", &self.guest_ssp)
             .field("cpuid", &self.cpuid)
             .field("saved_msrs", &debug_kvm_regs)
             .field("debug_regs", &self.debug_regs)
@@ -978,6 +1001,7 @@ mod tests {
     impl Default for VcpuState {
         fn default() -> Self {
             VcpuState {
+                guest_ssp: None,
                 cpuid: CpuId::new(1).unwrap(),
                 saved_msrs: vec![Msrs::new(1).unwrap()],
                 debug_regs: Default::default(),
@@ -1359,6 +1383,75 @@ mod tests {
         );
         assert_eq!(vcpu.get_cpuid().unwrap(), original_cpuid);
         assert_eq!(vcpu.fd.get_regs().unwrap(), original_regs);
+    }
+
+    #[test]
+    fn snapshot_without_cet_has_no_shadow_stack_state() {
+        let (vm, vcpu) = setup_vcpu(0x10000);
+        let mut cpuid = vm.kvm().supported_cpuid.clone();
+        for entry in cpuid.as_mut_slice() {
+            if entry.function == 7 && entry.index == 0 {
+                entry.ecx &= !(1 << 7);
+                entry.edx &= !(1 << 20);
+            }
+        }
+        vcpu.fd.set_cpuid2(&cpuid).unwrap();
+        let mut state = vcpu.save_state().unwrap();
+        assert_eq!(state.guest_ssp, None);
+        assert!(cet::msrs_to_save(&state.cpuid).is_empty());
+        let (_restored_vm, restored) = setup_vcpu(0x10000);
+        restored.restore_state(&state).unwrap();
+        state.guest_ssp = Some(0);
+        assert_eq!(
+            restored.restore_state(&state),
+            Err(KvmVcpuError::InvalidGuestSsp)
+        );
+    }
+
+    #[test]
+    fn cet_snapshot_restores_shadow_stack_msrs() {
+        use crate::arch::x86_64::generated::msr_index::{
+            MSR_IA32_INT_SSP_TAB, MSR_IA32_PL0_SSP, MSR_IA32_PL1_SSP, MSR_IA32_PL2_SSP,
+            MSR_IA32_PL3_SSP, MSR_IA32_S_CET, MSR_IA32_U_CET,
+        };
+
+        let (vm, mut vcpu) = setup_vcpu(0x10000);
+        let cpuid = Cpuid::try_from(vm.kvm().supported_cpuid.clone()).unwrap();
+        let cpuid = vcpu.configure_cpuid(&cpuid, 1, false).unwrap();
+        if !cpuid
+            .as_slice()
+            .iter()
+            .any(|entry| entry.function == 7 && entry.index == 0 && entry.ecx & (1 << 7) != 0)
+        {
+            eprintln!("CET shadow stacks are not supported by this KVM host");
+            return;
+        }
+        vcpu.configure_msrs_for_boot(&BTreeMap::new(), &cpuid)
+            .unwrap();
+        let values = [
+            (MSR_IA32_U_CET, 1),
+            (MSR_IA32_S_CET, 1),
+            (MSR_IA32_PL0_SSP, 0x2000),
+            (MSR_IA32_PL1_SSP, 0x3000),
+            (MSR_IA32_PL2_SSP, 0x4000),
+            (MSR_IA32_PL3_SSP, 0x5000),
+            (MSR_IA32_INT_SSP_TAB, 0x6000),
+        ];
+        let msrs = msrs_from_entries(&values);
+        assert_eq!(vcpu.fd.set_msrs(&msrs).unwrap(), values.len());
+        cet::set_guest_ssp(&vcpu.fd, 0x7000).unwrap();
+        assert_eq!(cet::get_guest_ssp(&vcpu.fd).unwrap(), 0x7000);
+        let mut state = vcpu.save_state().unwrap();
+        for _ in 0..2 {
+            let (_restored_vm, restored) = setup_vcpu(0x10000);
+            restored.restore_state(&state).unwrap();
+            for (index, expected) in values {
+                let value = restored.get_msrs([index].into_iter()).unwrap();
+                assert_eq!(value[&index], expected, "MSR {index:#x}");
+            }
+            assert_eq!(cet::get_guest_ssp(&restored.fd).unwrap(), 0x7000);
+            state = restored.save_state().unwrap();
+        }
     }
 
     #[test]
