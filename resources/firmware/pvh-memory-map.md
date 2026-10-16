@@ -2,7 +2,7 @@
 
 Apply `cloudhv-pvh-memory-map.patch` after the other Firecracker patches to
 Cloud Hypervisor EDK II revision `97eeb7b0901da9f7b5d98a2e6a5e8694978298e9`. It
-is required by the headless and graphical CloudHv profiles.
+is required by the headless, graphical and Secure Boot CloudHv profiles.
 
 The pinned firmware discarded non-RAM PVH entries and published one flat RAM
 resource below 4 GiB. Windows could consequently allocate page tables inside
@@ -52,8 +52,12 @@ RAM and the explicit `cloud-hv` firmware profile with a fixed UUID. The probe
 calls the real UEFI `GetMemoryMap`, checks all descriptors for overlap and
 overflow, rejects allocatable memory in platform/legacy holes, and requires
 complete reserved coverage of 32–33 MiB and the SMBIOS page. Serial output must
-include both `PASS-reservations` and `PASS-ram-below-above-4G`. ## Historical
-firmware validation
+include both `PASS-reservations` and `PASS-ram-below-above-4G`. For Secure Boot,
+sign this same application with a disposable test key enrolled in a separate
+test variable store, following the Secure Boot probe instructions. Never change
+installed guest keys or TPM state.
+
+## Recorded validation
 
 The old ordinary USB v4 image fails the same probe with
 `FAIL-reserved-allocatable 88000 A0000`. Corrected ordinary and signed Secure

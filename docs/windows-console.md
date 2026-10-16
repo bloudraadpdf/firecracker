@@ -29,6 +29,9 @@ external console client
 
 ## Configure
 
+Build Firecracker with the [Windows capability](windows.md#build). The console
+is unavailable in ordinary builds.
+
 ### AMD64
 
 For SeaBIOS, build
@@ -149,6 +152,11 @@ The accepted source digests are in
 [`profile_config`](../tools/windows/prepare-nt6.rs); the tool rejects other
 images. Preparing installation media does not establish a successful
 installation or Windows hardware-requirement qualification.
+
+For standard Windows 11 Enterprise Evaluation and its 2023-signed boot files,
+use `win11-enterprise-26h2` with the
+[secure firmware and media procedure](../resources/firmware/cloudhv-secureboot/README.md#current-windows-installation-media).
+This is separate from the `win11` IoT Enterprise LTSC media profile.
 
 For unattended installation, the
 [preparation tool](../tools/windows/README.md#prepare-an-unattended-installation)
