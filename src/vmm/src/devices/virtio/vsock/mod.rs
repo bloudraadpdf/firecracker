@@ -95,6 +95,8 @@ mod defs {
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 #[rustfmt::skip]
 pub enum VsockError {
+    /// Invalid descriptor chain: {0}
+    DescriptorChain(crate::devices::virtio::queue::QueueError),
     /** The total length of the descriptor chain ({0}) is too short to hold a packet of length {1} + header */
     DescChainTooShortForPacket(u32, u32),
     /// Empty queue
@@ -133,6 +135,7 @@ pub enum VsockError {
 impl From<IoVecError> for VsockError {
     fn from(value: IoVecError) -> Self {
         match value {
+            IoVecError::DescriptorChain(err) => VsockError::DescriptorChain(err),
             IoVecError::WriteOnlyDescriptor => VsockError::UnreadableDescriptor,
             IoVecError::ReadOnlyDescriptor => VsockError::UnwritableDescriptor,
             IoVecError::GuestMemory(err) => VsockError::GuestMemoryMmap(err),
