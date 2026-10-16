@@ -81,6 +81,7 @@ mod tests {
 
     fn expected_put_config() -> MachineConfigUpdate {
         MachineConfigUpdate {
+            pci_transport: Some(vmm::pci::PciTransportMode::Modern),
             vcpu_count: Some(8),
             mem_size_mib: Some(1024),
             smt: Some(false),
