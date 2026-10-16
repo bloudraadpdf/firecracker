@@ -16,14 +16,15 @@ use uuid::Uuid;
 
 use crate::arch::{PCI_MMCONFIG_START, PCI_MMIO_CONFIG_SIZE_PER_SEGMENT};
 use crate::logger::info;
-use crate::pci::PciSBDF;
 #[cfg(target_arch = "x86_64")]
 use crate::pci::bus::{PCI_CONFIG_IO_PORT, PCI_CONFIG_IO_PORT_SIZE, PciConfigIo};
 use crate::pci::bus::{PciBus, PciConfigMmio, PciRoot, PciRootError};
+use crate::pci::{PciSBDF, PciTransportMode};
 use crate::vstate::bus::BusError;
 use crate::vstate::vm::KvmVm;
 
 pub struct PciSegment {
+    pub(crate) pci_transport: PciTransportMode,
     pub(crate) id: u16,
     pub(crate) pci_bus: Arc<Mutex<PciBus>>,
     // The MMIO bus only holds a weak reference to the device, so we need to keep
@@ -84,6 +85,7 @@ impl PciSegment {
         let end_of_mem64_area = resource_allocator.mmio64_memory.end();
 
         let segment = PciSegment {
+            pci_transport: resource_allocator.pci_transport,
             id,
             pci_bus,
             _pci_config_mmio: pci_config_mmio,
@@ -255,48 +257,43 @@ impl Aml for PciSegment {
         let pci_dsm = PciDsmMethod {};
         pci_dsdt_inner_data.push(&pci_dsm);
 
-        #[allow(clippy::if_same_then_else)]
-        let crs = if cfg!(target_arch = "x86_64") && self.id == 0 {
-            aml::Name::new(
-                "_CRS".try_into()?,
-                &aml::ResourceTemplate::new(vec![
-                    &aml::AddressSpace::new_bus_number(0x0u16, 0x0u16)?,
-                    &aml::Io::new(0xcf8, 0xcf8, 1, 0x8),
-                    &aml::AddressSpace::new_memory(
-                        aml::AddressSpaceCacheable::NotCacheable,
-                        true,
-                        self.start_of_mem32_area,
-                        self.end_of_mem32_area,
-                    )?,
-                    &aml::AddressSpace::new_memory(
-                        aml::AddressSpaceCacheable::NotCacheable,
-                        true,
-                        self.start_of_mem64_area,
-                        self.end_of_mem64_area,
-                    )?,
-                    &aml::AddressSpace::new_io(0x1000u16, 0xffffu16)?,
-                ]),
-            )?
+        let bus_range = aml::AddressSpace::new_bus_number(0x0u16, 0x0u16)?;
+        let config_ports = aml::Io::new(0xcf8, 0xcf8, 1, 0x8);
+        let legacy_io_window = aml::AddressSpace::new_io(0u16, 0x0cf7u16)?;
+        let io_start = if self.pci_transport.is_modern() {
+            0x1000u16
         } else {
-            aml::Name::new(
-                "_CRS".try_into()?,
-                &aml::ResourceTemplate::new(vec![
-                    &aml::AddressSpace::new_bus_number(0x0u16, 0x0u16)?,
-                    &aml::AddressSpace::new_memory(
-                        aml::AddressSpaceCacheable::NotCacheable,
-                        true,
-                        self.start_of_mem32_area,
-                        self.end_of_mem32_area,
-                    )?,
-                    &aml::AddressSpace::new_memory(
-                        aml::AddressSpaceCacheable::NotCacheable,
-                        true,
-                        self.start_of_mem64_area,
-                        self.end_of_mem64_area,
-                    )?,
-                ]),
-            )?
+            0x0d00u16
         };
+        let io_window = aml::AddressSpace::new_io(io_start, 0xffffu16)?;
+        let mem32 = aml::AddressSpace::new_memory(
+            aml::AddressSpaceCacheable::NotCacheable,
+            true,
+            self.start_of_mem32_area,
+            self.end_of_mem32_area,
+        )?;
+        let mem64 = aml::AddressSpace::new_memory(
+            aml::AddressSpaceCacheable::NotCacheable,
+            true,
+            self.start_of_mem64_area,
+            self.end_of_mem64_area,
+        )?;
+        let mut resources: Vec<&dyn Aml> = vec![&bus_range];
+        let has_ports = cfg!(target_arch = "x86_64") && self.id == 0;
+        if has_ports {
+            resources.push(&config_ports);
+        }
+        resources.push(&mem32);
+        if self.pci_transport.is_modern() {
+            resources.push(&mem64);
+        }
+        if has_ports {
+            if !self.pci_transport.is_modern() {
+                resources.push(&legacy_io_window);
+            }
+            resources.push(&io_window);
+        }
+        let crs = aml::Name::new("_CRS".try_into()?, &aml::ResourceTemplate::new(resources))?;
         pci_dsdt_inner_data.push(&crs);
 
         // Build PCI routing table, listing IRQs assigned to PCI devices.
@@ -365,6 +362,52 @@ mod tests {
         let mut bytes = Vec::new();
         segment.append_aml_bytes(&mut bytes).unwrap();
         bytes
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_transitional_aperture_is_representable() {
+        let vmm = default_vmm();
+        let vm = vmm.vm.as_kvm().unwrap().clone();
+        vm.resource_allocator().pci_transport = PciTransportMode::Transitional;
+        let segment = PciSegment::new(0, &vm, &[0; 32]).unwrap();
+        let mut bytes = Vec::new();
+        segment.append_aml_bytes(&mut bytes).unwrap();
+        for (start, end) in [(0u16, 0x0cf7u16), (0x0d00, 0xffff)] {
+            let mut resource = Vec::new();
+            aml::AddressSpace::new_io(start, end)
+                .unwrap()
+                .append_aml_bytes(&mut resource)
+                .unwrap();
+            assert!(bytes.windows(resource.len()).any(|w| w == resource));
+        }
+        for (start, end, present) in [
+            (segment.start_of_mem32_area, segment.end_of_mem32_area, true),
+            (
+                segment.start_of_mem64_area,
+                segment.end_of_mem64_area,
+                false,
+            ),
+        ] {
+            let mut resource = Vec::new();
+            aml::AddressSpace::new_memory(
+                aml::AddressSpaceCacheable::NotCacheable,
+                true,
+                start,
+                end,
+            )
+            .unwrap()
+            .append_aml_bytes(&mut resource)
+            .unwrap();
+            assert_eq!(
+                bytes.windows(resource.len()).any(|w| w == resource),
+                present
+            );
+            if present {
+                u32::try_from(end).unwrap();
+                u32::try_from(end - start + 1).unwrap();
+            }
+        }
     }
 
     #[test]

@@ -886,6 +886,35 @@ impl Balloon {
     }
 }
 
+impl Balloon {
+    fn activate_configured(
+        &mut self,
+        mem: GuestMemoryMmap,
+        interrupt: Arc<dyn VirtioInterrupt>,
+        legacy: bool,
+    ) -> Result<(), ActivateError> {
+        assert!(!self.is_activated());
+
+        for q in self.queues.iter_mut().filter(|q| !legacy || q.ready) {
+            q.initialize(&mem)
+                .map_err(ActivateError::QueueMemoryError)?;
+        }
+
+        self.device_state = DeviceState::Activated(ActiveState { mem, interrupt });
+        if self.activate_evt.write(1).is_err() {
+            METRICS.activate_fails.inc();
+            self.device_state = DeviceState::Inactive;
+            return Err(ActivateError::EventFd);
+        }
+
+        if self.stats_enabled() {
+            self.update_timer_state();
+        }
+
+        Ok(())
+    }
+}
+
 impl VirtioDevice for Balloon {
     impl_device_type!(VirtioDeviceType::Balloon);
 
@@ -954,25 +983,15 @@ impl VirtioDevice for Balloon {
         mem: GuestMemoryMmap,
         interrupt: Arc<dyn VirtioInterrupt>,
     ) -> Result<(), ActivateError> {
-        assert!(!self.is_activated());
+        self.activate_configured(mem, interrupt, false)
+    }
 
-        for q in self.queues.iter_mut() {
-            q.initialize(&mem)
-                .map_err(ActivateError::QueueMemoryError)?;
-        }
-
-        self.device_state = DeviceState::Activated(ActiveState { mem, interrupt });
-        if self.activate_evt.write(1).is_err() {
-            METRICS.activate_fails.inc();
-            self.device_state = DeviceState::Inactive;
-            return Err(ActivateError::EventFd);
-        }
-
-        if self.stats_enabled() {
-            self.update_timer_state();
-        }
-
-        Ok(())
+    fn activate_legacy(
+        &mut self,
+        mem: GuestMemoryMmap,
+        interrupt: Arc<dyn VirtioInterrupt>,
+    ) -> Result<(), ActivateError> {
+        self.activate_configured(mem, interrupt, true)
     }
 
     fn is_activated(&self) -> bool {

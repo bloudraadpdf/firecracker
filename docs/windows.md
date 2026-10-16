@@ -89,3 +89,16 @@ Hyper-V settings do not select PC timers.
 Use a prepared GPT disk with an EFI system partition and matching signed virtio
 storage drivers. This headless profile does not provide an installer display or
 installation media.
+
+### Transitional PCI platform
+
+On x86, `"pci_transport": "transitional"` in `machine-config` selects the 32-bit
+PCI memory aperture. It requires `--enable-pci`; ARM64 rejects this selection.
+The allocator persists the selection and uses the same window for BAR
+allocation, relocation and release. The ACPI PCI root omits the unused 64-bit
+aperture. Default configurations retain modern PCI.
+
+The transport supplies legacy PCI IDs, I/O registers, queue page-frame addresses
+and INTx, alongside modern capabilities. It preserves those states across
+snapshots. Selecting this option alone does not supply BIOS firmware or install
+guest drivers.
