@@ -80,3 +80,10 @@ Pass it as Firecracker's kernel image and enable PCI. See the
 The [console profile](cloudhv-console/README.md) adds GOP, keyboard and absolute
 pointer drivers. Its [external firmware probes](cloudhv-console/tests/README.md)
 check the memory map and pointer protocol before an OS starts.
+
+## ARM64 graphical and secure firmware
+
+The [external ARM64 profiles](cloudhv-secureboot/arm64/README.md) build
+headless, graphical and secure firmware separately. Their GOP, combined virtio
+input and optional security devices require the matching VMM platform. Source
+tests and cross-builds do not qualify an ARM Windows installer or runtime.
