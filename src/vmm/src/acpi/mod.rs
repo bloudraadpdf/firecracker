@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use acpi_tables::fadt::{FADT_F_HW_REDUCED_ACPI, FADT_F_PWR_BUTTON, FADT_F_SLP_BUTTON};
-use acpi_tables::{Dsdt, Fadt, Madt, Mcfg, Rsdp, Sdt, Xsdt, aml};
+use acpi_tables::{Dsdt, Fadt, Madt, Mcfg, RootTable, RootTableEntries, Rsdp, Sdt, aml};
 use vm_allocator::AllocPolicy;
 
 use crate::Vcpu;
@@ -127,6 +127,7 @@ impl AcpiTableWriter<'_> {
             *b"FCVMMADT",
             OEM_REVISION,
             apic_addr(),
+            false,
             setup_interrupt_controllers(nr_vcpus),
         );
         self.write_acpi_table(resource_allocator, &mut madt)
@@ -142,11 +143,11 @@ impl AcpiTableWriter<'_> {
         madt_addr: u64,
         mcfg_addr: u64,
     ) -> Result<u64, AcpiError> {
-        let mut xsdt = Xsdt::new(
+        let mut xsdt = RootTable::new(
             OEM_ID,
             *b"FCMVXSDT",
             OEM_REVISION,
-            vec![fadt_addr, madt_addr, mcfg_addr],
+            RootTableEntries::Xsdt(vec![fadt_addr, madt_addr, mcfg_addr]),
         );
         self.write_acpi_table(resource_allocator, &mut xsdt)
     }
@@ -167,7 +168,7 @@ impl AcpiTableWriter<'_> {
     /// memory. The address in which we write RSDP is pre-determined for every architecture.
     /// We will not allocate arbitrary memory for it
     fn build_rsdp(&mut self, xsdt_addr: u64) -> Result<(), AcpiError> {
-        let mut rsdp = Rsdp::new(OEM_ID, xsdt_addr);
+        let mut rsdp = Rsdp::new(OEM_ID, xsdt_addr, None);
         rsdp.write_to_guest(self.mem, rsdp_addr())
             .inspect_err(|err| error!("acpi: Could not write RSDP in guest memory: {err}"))?;
 
