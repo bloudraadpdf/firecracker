@@ -48,7 +48,6 @@ use crate::vstate::vm::KvmVm;
 #[derive(Debug)]
 pub struct PciDevices {
     intx: Option<Arc<Mutex<PciIntxGroup>>>,
-    intx_sub_id: Option<event_manager::SubscriberId>,
     /// PCIe segment of the VMM. We currently support a single PCIe segment.
     pub pci_segment: PciSegment,
     /// All VirtIO PCI devices of the system
@@ -90,10 +89,34 @@ impl PciDevices {
 
         Ok(Self {
             intx,
-            intx_sub_id: None,
             pci_segment,
             virtio_devices: HashMap::new(),
         })
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[cfg(feature = "windows")]
+    pub(crate) fn ensure_console_intx(
+        &mut self,
+        vm: &Arc<KvmVm>,
+    ) -> std::io::Result<Arc<Mutex<PciIntxGroup>>> {
+        if self.intx.is_none() {
+            let group = Arc::new(Mutex::new(
+                PciIntxGroup::new(vm.clone()).map_err(std::io::Error::other)?,
+            ));
+            vm.set_gsi_routes().map_err(std::io::Error::other)?;
+            self.intx = Some(group);
+        }
+        Ok(self.intx.as_ref().unwrap().clone())
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[cfg(feature = "windows")]
+    pub(crate) fn unregistered_intx(&self) -> Option<Arc<Mutex<PciIntxGroup>>> {
+        self.intx
+            .as_ref()
+            .filter(|group| !group.lock().unwrap().is_registered())
+            .cloned()
     }
 
     fn attach_common(
@@ -105,9 +128,16 @@ impl PciDevices {
         virtio_device: Arc<Mutex<VirtioPciDevice>>,
         event_manager: &mut EventManager,
     ) -> Result<(), PciManagerError> {
-        if let Some(group) = &self.intx {
-            if self.intx_sub_id.is_none() {
-                self.intx_sub_id = Some(event_manager.add_subscriber(group.clone()));
+        if !vm.resource_allocator().pci_transport.is_modern()
+            && let Some(group) = &self.intx
+        {
+            if !group.lock().unwrap().is_registered() {
+                event_manager.add_subscriber(group.clone());
+                group
+                    .lock()
+                    .unwrap()
+                    .check_registered()
+                    .map_err(InterruptError::from)?;
             }
             virtio_device.lock().unwrap().attach_intx(group.clone())?;
             if let Some(forwarder) = PciInterruptForwarder::new(&virtio_device) {
@@ -762,6 +792,24 @@ impl<'a> Persist<'a> for PciDevices {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    #[cfg(feature = "windows")]
+    fn modern_optical_intx_is_optional_and_shared() {
+        let mut vm = crate::vstate::vm::tests::setup_vm_with_memory(1 << 20);
+        vm.setup_irqchip(true).unwrap();
+        let vm = Arc::new(vm);
+        let mut pci = PciDevices::new(&vm).unwrap();
+        assert!(pci.intx.is_none());
+        assert_eq!(pci.pci_segment.pci_irq_slots, [0; 32]);
+        let first = pci.ensure_console_intx(&vm).unwrap();
+        let second = pci.ensure_console_intx(&vm).unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(pci.unregistered_intx().is_some());
+        assert_eq!(pci.pci_segment.pci_irq_slots, [0; 32]);
+        assert!(pci.virtio_devices.is_empty());
+    }
+
     use vmm_sys_util::tempfile::TempFile;
 
     use super::*;

@@ -85,6 +85,9 @@ pub enum CustomCpuTemplateOrPath {
 #[serde(rename_all = "kebab-case")]
 #[allow(missing_docs)]
 pub struct VmmConfig {
+    #[cfg(target_arch = "x86_64")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub console: Option<crate::vmm_config::console::ConsoleConfig>,
     pub balloon: Option<BalloonDeviceConfig>,
     pub drives: Vec<BlockDeviceConfig>,
     pub boot_source: BootSourceConfig,
@@ -117,6 +120,9 @@ pub struct LaunchIo {
 /// held in the Vmm.
 #[derive(Debug, Default)]
 pub struct VmResources {
+    /// Optional graphical console and optical media.
+    #[cfg(target_arch = "x86_64")]
+    pub console: Option<crate::vmm_config::console::ConsoleConfig>,
     /// The vCpu and memory configuration for this microVM.
     pub machine_config: MachineConfig,
     /// The boot source spec (contains both config and builder) for this microVM.
@@ -155,6 +161,10 @@ impl VmResources {
     pub(crate) fn validate_windows_support(
         &self,
     ) -> Result<(), crate::vmm_config::WindowsFeatureDisabled> {
+        #[cfg(target_arch = "x86_64")]
+        if self.console.is_some() {
+            crate::vmm_config::require_windows_support()?;
+        }
         if self.boot_source.config.firmware.is_some() {
             crate::vmm_config::require_windows_support()?;
         }
@@ -184,6 +194,10 @@ impl VmResources {
         metadata_json: Option<&str>,
     ) -> Result<Self, ResourcesError> {
         let vmm_config = serde_json::from_str::<VmmConfig>(config_json)?;
+        #[cfg(target_arch = "x86_64")]
+        if vmm_config.console.is_some() {
+            crate::vmm_config::require_windows_support()?;
+        }
         vmm_config.boot_source.validate()?;
 
         #[cfg(target_arch = "x86_64")]
@@ -224,6 +238,12 @@ impl VmResources {
                     resources.set_custom_cpu_template(template)
                 }
             }
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        if let Some(console) = vmm_config.console {
+            console.validate_for_firmware(vmm_config.boot_source.firmware.as_ref())?;
+            resources.console = Some(console);
         }
 
         resources.build_boot_source(vmm_config.boot_source)?;
@@ -555,6 +575,13 @@ impl VmResources {
     pub fn allocate_guest_memory(&self) -> Result<Vec<GuestRegionMmap>, MemoryError> {
         let regions =
             crate::arch::arch_memory_regions(mib_to_bytes(self.machine_config.mem_size_mib));
+        #[cfg(target_arch = "x86_64")]
+        #[cfg(feature = "windows")]
+        let regions = if self.console.is_some() {
+            crate::arch::x86_64::reserve_vga_memory(regions)
+        } else {
+            regions
+        };
         self.allocate_memory_regions(&regions)
     }
 
@@ -574,6 +601,8 @@ impl VmResources {
 impl From<&VmResources> for VmmConfig {
     fn from(resources: &VmResources) -> Self {
         VmmConfig {
+            #[cfg(target_arch = "x86_64")]
+            console: resources.console.clone(),
             balloon: resources.balloon.get_config().ok(),
             drives: resources.block.configs(),
             boot_source: resources.boot_source.config.clone(),
@@ -629,11 +658,12 @@ mod tests {
             "firmware":{"type":"seabios"}
         }})];
         #[cfg(target_arch = "x86_64")]
-        let requests = requests
-            .into_iter()
-            .chain([serde_json::json!({"machine-config":{
+        let requests = requests.into_iter().chain([
+            serde_json::json!({"console":{"socket_path":"console.sock"}}),
+            serde_json::json!({"machine-config":{
                 "vcpu_count":1,"mem_size_mib":128,"hyperv":true
-            }})]);
+            }}),
+        ]);
         for request in requests {
             let mut config = serde_json::json!({
                 "boot-source":{"kernel_image_path":"/nonexistent/windows-feature/kernel"},
@@ -676,6 +706,41 @@ mod tests {
             mtu: None,
             rx_rate_limiter: Some(RateLimiterConfig::default()),
             tx_rate_limiter: Some(RateLimiterConfig::default()),
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    #[cfg(feature = "windows")]
+    fn console_rom_profile_is_checked_before_opening_boot_files() {
+        for firmware in [
+            serde_json::Value::Null,
+            serde_json::json!({"type":"seabios"}),
+            serde_json::json!({"type":"cloud-hv", "system_uuid":"11223344-5566-7788-99aa-bbccddeeff01"}),
+        ] {
+            let cloud_hv = firmware
+                .get("type")
+                .is_some_and(|value| value == "cloud-hv");
+            let json = serde_json::json!({
+                "boot-source": {"kernel_image_path":"/nonexistent/optional-rom-test", "firmware":firmware},
+                "drives":[], "console":{"socket_path":"console.sock"},
+            });
+            let error = VmResources::from_json(
+                &json.to_string(),
+                &InstanceInfo::default(),
+                HTTP_MAX_PAYLOAD_SIZE,
+                None,
+            )
+            .unwrap_err();
+            if cloud_hv {
+                assert!(matches!(
+                    error,
+                    ResourcesError::BootSource(BootSourceConfigError::InvalidKernelPath(_))
+                ));
+            } else {
+                assert!(matches!(error, ResourcesError::File(_)));
+                assert!(error.to_string().contains("VGA option ROM is required"));
+            }
         }
     }
 
@@ -729,6 +794,8 @@ mod tests {
 
     fn default_vm_resources() -> VmResources {
         VmResources {
+            #[cfg(target_arch = "x86_64")]
+            console: None,
             machine_config: MachineConfig::default(),
             boot_source: default_boot_cfg(),
             block: default_blocks(),

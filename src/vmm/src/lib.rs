@@ -413,6 +413,10 @@ impl Vmm {
         // in resources.rs which is used to retrieve the config before the VM
         // is started.
         VmmConfig {
+            #[cfg(all(target_arch = "x86_64", feature = "windows"))]
+            console: self.device_manager.console_config(),
+            #[cfg(all(target_arch = "x86_64", not(feature = "windows")))]
+            console: None,
             balloon,
             drives: block,
             boot_source: self.boot_source_config.clone(),
@@ -465,6 +469,9 @@ impl Vmm {
             .ok_or_else(|| VmmError::NotSupportedOnVmType(self.vm.type_name()))?;
         self.device_manager.kick_virtio_devices();
         kvm_vm.resume_vcpus()?;
+        #[cfg(target_arch = "x86_64")]
+        #[cfg(feature = "windows")]
+        self.device_manager.set_console_running(true);
         self.instance_info.state = VmState::Running;
         Ok(())
     }
@@ -476,6 +483,9 @@ impl Vmm {
             .as_kvm()
             .ok_or_else(|| VmmError::NotSupportedOnVmType(self.vm.type_name()))?;
         kvm_vm.pause_vcpus()?;
+        #[cfg(target_arch = "x86_64")]
+        #[cfg(feature = "windows")]
+        self.device_manager.set_console_running(false);
         self.instance_info.state = VmState::Paused;
         Ok(())
     }

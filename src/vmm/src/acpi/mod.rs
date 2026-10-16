@@ -442,6 +442,7 @@ mod tests {
             .read_slice(&mut table, vm_memory::GuestAddress(fadt))
             .unwrap();
         assert_eq!(&table[..4], b"FACP");
+        assert_eq!(u16::from_le_bytes(table[109..111].try_into().unwrap()), 4);
         assert_ne!(
             u32::from_le_bytes(table[112..116].try_into().unwrap()) & (1 << 20),
             0
@@ -475,6 +476,7 @@ mod tests {
             table.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte)),
             0
         );
+        assert_eq!(u16::from_le_bytes(table[109..111].try_into().unwrap()), 4);
         let flags = u32::from_le_bytes(table[112..116].try_into().unwrap());
         assert_eq!(flags & (1 << 20), 0);
         assert_ne!(flags & (1 << 8), 0);
@@ -494,6 +496,49 @@ mod tests {
             .unwrap();
         assert_eq!(&facs[..8], b"FACS\x40\0\0\0");
         assert_eq!(facs[32], 2);
+    }
+
+    #[test]
+    #[cfg(feature = "windows")]
+    fn test_console_fadt_boot_architecture_flags() {
+        use std::sync::Arc;
+
+        use vmm_sys_util::tempdir::TempDir;
+        use zerocopy::IntoBytes;
+
+        use crate::EventManager;
+        use crate::device_manager::DeviceManager;
+        use crate::vmm_config::console::ConsoleConfig;
+
+        let directory = TempDir::new().unwrap();
+        let mut vm = setup_vm_with_memory(0x100000);
+        vm.setup_irqchip(true).unwrap();
+        let vm = Arc::new(vm);
+        let mut events = EventManager::new().unwrap();
+        let mut devices = DeviceManager::new(
+            &mut events,
+            vm.vcpus_exit_evt(),
+            &vm,
+            None,
+            None,
+            true,
+            true,
+        )
+        .unwrap();
+        devices
+            .attach_console(
+                &vm,
+                &ConsoleConfig {
+                    socket_path: directory.as_path().join("console.sock"),
+                    vga_rom_path: None,
+                    optical_image_path: None,
+                },
+                None,
+            )
+            .unwrap();
+        let mut fadt = acpi_tables::Fadt::new(super::OEM_ID, *b"FCVMFADT", super::OEM_REVISION);
+        super::setup_arch_fadt(&mut fadt, &devices);
+        assert_eq!(&fadt.as_bytes()[109..111], &[2, 0]);
     }
 
     #[test]
