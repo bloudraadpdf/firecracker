@@ -18,7 +18,7 @@ use crate::{Result, Sdt, checksum};
 ///
 /// This is the root pointer to the ACPI hierarchy. This is what OSs
 /// are looking for in the memory when initializing ACPI. It includes
-/// a pointer to XSDT
+/// pointers to the root tables.
 /// More information about this structure can be found in the ACPI specification:
 /// https://uefi.org/specs/ACPI/6.5/05_ACPI_Software_Programming_Model.html#root-system-description-pointer-rsdp
 #[repr(C, packed)]
@@ -36,14 +36,14 @@ pub struct Rsdp {
 }
 
 impl Rsdp {
-    pub fn new(oem_id: [u8; 6], xsdt_addr: u64) -> Self {
+    pub fn new(oem_id: [u8; 6], xsdt_addr: u64, rsdt_addr: Option<u32>) -> Self {
         let mut rsdp = Rsdp {
             // Space in the end of string is needed!
             signature: *b"RSD PTR ",
             checksum: 0,
             oem_id,
             revision: 2,
-            rsdt_addr: U32::ZERO,
+            rsdt_addr: U32::new(rsdt_addr.unwrap_or(0)),
             length: U32::new(std::mem::size_of::<Rsdp>().try_into().unwrap()),
             xsdt_addr: U64::new(xsdt_addr),
             extended_checksum: 0,
@@ -64,5 +64,21 @@ impl Sdt for Rsdp {
     fn write_to_guest<M: GuestMemory>(&mut self, mem: &M, address: GuestAddress) -> Result<()> {
         mem.write_slice(self.as_bytes(), address)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extended_only_root_retains_64_bit_address() {
+        let address = 0x1_2345_6789;
+        let rsdp = Rsdp::new(*b"FIRECK", address, None);
+        let bytes = rsdp.as_bytes();
+        assert_eq!(&bytes[16..20], &[0; 4]);
+        assert_eq!(&bytes[24..32], &address.to_le_bytes());
+        assert_eq!(checksum(&[&bytes[..20]]), 0);
+        assert_eq!(checksum(&[bytes]), 0);
     }
 }
