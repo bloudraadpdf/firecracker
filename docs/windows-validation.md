@@ -11,8 +11,10 @@ default-off `windows` Cargo feature. Both builds retain the saved-state fields;
 the default build rejects Windows configuration before opening its backends.
 Ordinary Linux snapshots must restore between the two builds.
 
-The following checks passed with Rust 1.98.1 on native AMD64 Linux/KVM, using
-implementation commit `1007215d9bd6641d7a00298f0636dcb88d8bec90`:
+The following checks used Rust 1.98.1 on native AMD64 Linux/KVM. The unit,
+standalone-tool and static results cover the same VMM, variable-helper and
+console-helper implementation inputs as this candidate. The functional checks
+use the candidate's release VMMs.
 
 | Check                                                  | Result                                          |
 | ------------------------------------------------------ | ----------------------------------------------- |
@@ -24,6 +26,10 @@ implementation commit `1007215d9bd6641d7a00298f0636dcb88d8bec90`:
 | Strict workspace Clippy                                | Default and all features, GNU and musl          |
 | Strict ARM64 cross-Clippy                              | Default and all features, GNU; compilation only |
 | Standalone tool Clippy and Rust/Markdown style gates   | Passed                                          |
+| Platform devices                                       | 7 passed                                        |
+| Selected API and boot tests                            | 65 passed; 2 empty CPU-template skips           |
+| Selected basic Linux snapshot tests                    | 36 passed                                       |
+| Selected Linux snapshot-cycle tests                    | 12 passed cumulatively across two runs          |
 
 The VMM suites execute the real swtpm restore, ACPICA evaluation and maximum
 optional-buffer snapshot-reader tests. The console backlog regression passes;
@@ -33,10 +39,20 @@ their two child entrypoints. Both parents were then run explicitly with the
 required privileges; they invoke the children. These results do not imply that
 every ignored documentation example was executed.
 
-Current platform/API, Linux snapshot, Windows installation, egress and
-performance qualification remains open. The historical results below use format
-31 and their matching binaries. They do not qualify format 32. Do not load an
-older saved state with the candidate.
+The selected API/boot tests have 65 passes and two empty CPU-template skips; no
+custom CPU-template coverage is claimed. The 12 selected cycle cases are covered
+cumulatively across two runs, not by a single passing 12-case invocation.
+
+An installed Windows 7 Enterprise SP1 x64 reference completes installation of
+NetKVM 61.77.104.17200 with device Code 0, `IsSigned=True`, the pinned selected
+INF/SYS and the running `netkvm` service. This is current-boot installation and
+binding only. Cold retention, generation-counter binding and polling, TAP,
+CONNECT and restore qualification remain open for this candidate.
+
+Current Windows installation, graphical input, security, TAP and CONNECT egress,
+and performance qualification remain open. The historical results below use
+format 31 and their matching binaries. They do not qualify format 32. Do not
+load an older saved state with the candidate.
 
 The variable helper is Rust and reuses the upstream AWS-LC versions and
 checksums: `aws-lc-rs` 1.18.0 and `aws-lc-sys` 0.44.0. Their existing backend
@@ -67,9 +83,11 @@ with three allowed transfers and three zero-payload denials per run. Host
 accounting and offline disk checks bind the results to the three phases. All
 listed runs finish with clean guest S5 and VMM exit zero.
 
-XP and Windows 7 use the documented external test-signed Viosock packages.
-Windows 7 retains three ACPI Code 28 devices. Real legacy generation-counter
-driver binding, polling and restore qualification remain open. VMClock
+XP and Windows 7 use the documented external test-signed Viosock packages. The
+format-31 Windows 7 inventory retains three ACPI Code 28 devices. Current legacy
+generation-counter driver binding, polling and restore qualification remain
+open. XP's original signed package and compatible KMDF preparation have
+static/build checks only; guest binding and queries remain unqualified. VMClock
 recognition on modern Windows establishes enumeration only. These installed
 references do not establish fresh XP, Windows 7, Windows 10 or IoT installation,
 or every graphical input path. Process/snapshot cache checks do not establish
