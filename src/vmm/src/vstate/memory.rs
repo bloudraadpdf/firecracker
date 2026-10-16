@@ -1885,7 +1885,6 @@ mod tests {
         use std::os::unix::fs::MetadataExt;
 
         use proptest::prelude::*;
-        use vmm_sys_util::tempfile::TempFile;
 
         use super::*;
 
@@ -2099,8 +2098,8 @@ mod tests {
                 // Run oracle first — dump_dirty calls reset_dirty() on
                 // success, which would clear the firecracker bitmap before
                 // the oracle implementation gets to read it.
-                let mut oracle_file = TempFile::new().unwrap().into_file();
-                oracle_file.set_len(total_size as u64).unwrap();
+                // memfd block counts exclude filesystem extent metadata.
+                let mut oracle_file = create_memfd(total_size as u64, None).unwrap().into_file();
                 let dirty_count = dump_dirty_oracle(&guest_memory, &mut oracle_file, &kvm_bitmap);
                 let expected_blocks = (dirty_count * page_size) as u64 / 512;
                 let oracle_pos = oracle_file.stream_position().unwrap();
@@ -2110,8 +2109,7 @@ mod tests {
                 prop_assert_eq!(oracle_file.metadata().unwrap().blocks(), expected_blocks);
 
                 // Run the optimized implementation.
-                let mut opt_file = TempFile::new().unwrap().into_file();
-                opt_file.set_len(total_size as u64).unwrap();
+                let mut opt_file = create_memfd(total_size as u64, None).unwrap().into_file();
                 guest_memory
                     .dump_dirty(&mut opt_file, &kvm_bitmap)
                     .unwrap();
