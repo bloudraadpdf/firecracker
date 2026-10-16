@@ -112,12 +112,12 @@ Here is an example on how to set multiple resource limits using this argument:
   `CLONE_NEWPID` flag. As a result, the jailer and the process running the exec
   file have different PIDs. The PID of the child process is stored in the jail
   root directory inside `<exec_file_name>.pid`.
-- `--api-sock-fd` names an inherited descriptor above 2. This descriptor must
-  be a listening `AF_UNIX` stream socket without close-on-exec. The jailer
-  keeps it open, checks it and passes `--api-sock-fd <api_sock_fd>` to
-  Firecracker. Firecracker serves its API on this socket and does not bind a
-  path. Do not pass `--api-sock` or `--no-api` to Firecracker with it. A client
-  can connect when the caller has called `listen()`, before Firecracker starts.
+- `--api-sock-fd` names an inherited descriptor above 2. This descriptor must be
+  a listening `AF_UNIX` stream socket without close-on-exec. The jailer keeps it
+  open, checks it and passes `--api-sock-fd <api_sock_fd>` to Firecracker.
+  Firecracker serves its API on this socket and does not bind a path. Do not
+  pass `--api-sock` or `--no-api` to Firecracker with it. A client can connect
+  when the caller has called `listen()`, before Firecracker starts.
 - The jailer adheres to the "end of command options" convention, meaning all
   parameters specified after `--` are forwarded to Firecracker. For example,
   this can be paired with the `--config-file` Firecracker argument to specify a
@@ -142,8 +142,8 @@ After starting, the Jailer goes through the following operations:
 - Copy the file specified with `--exec-file` into a new memory file
   (`memfd_create()` with `MFD_EXEC`) and seal it against writes and size
   changes. This ensures the new process will not share memory with any other
-  concurrent Firecracker process. The jail holds no copy of the executable.
-  A retained jail can instead supply `--exec-fd` with its sealed executable and
+  concurrent Firecracker process. The jail holds no copy of the executable. A
+  retained jail can instead supply `--exec-fd` with its sealed executable and
   `--mount-ns-fd` with its mount namespace. The owner must prove the previous
   VMM dead before reusing either. The bootstrap message returns the VMM pidfd,
   mount namespace and sealed executable descriptors to that owner.

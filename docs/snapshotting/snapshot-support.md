@@ -174,15 +174,15 @@ the feature can be combined with guest_memfd support in Firecracker.
 
 ## Optional x86 PIT
 
-The x86 `machine-config` field `pit` defaults to `true`. Set it to `false`
-for guests that use the KVM clock and local APIC TSC-deadline timer. The
-host and effective guest CPU configuration must provide TSC, APIC,
-TSC-deadline, ARAT and the KVM clock. Unsupported configurations fail before
-execution. The guest must also enable and use those facilities.
+The x86 `machine-config` field `pit` defaults to `true`. Set it to `false` for
+guests that use the KVM clock and local APIC TSC-deadline timer. The host and
+effective guest CPU configuration must provide TSC, APIC, TSC-deadline, ARAT and
+the KVM clock. Unsupported configurations fail before execution. The guest must
+also enable and use those facilities.
 
-Snapshots store PIT state only when the device exists. Restore uses that
-saved choice, with no independent PIT override. Format 12 is incompatible
-with format 11; create fresh snapshots when updating this fork.
+Snapshots store PIT state only when the device exists. Restore uses that saved
+choice, with no independent PIT override. Format 12 is incompatible with format
+11; create fresh snapshots when updating this fork.
 
 ## Snapshot versioning
 
@@ -752,13 +752,13 @@ For example, a snapshot taken on a m6i.metal host (Intel Ice Lake) running a
 host kernel (but not vice versa), but could not be restored on a m5n.metal host
 (Intel Cascade Lake).
 
-[man mincore]: https://man7.org/linux/man-pages/man2/mincore.2.html
-
 ### Block flush failure
 
 Snapshot creation returns an error if an activated block device cannot drain its
-I/O or flush its backing file. Devices are prepared once, before transport and KVM
-state capture. No snapshot state or memory output is written after a preparation
-error. Preparation can have changed another device before the failure, including
-resetting vsock connections. A failed snapshot is not proof that the source's
-control connection remains usable.
+I/O or flush its backing file. Devices are prepared once, before transport and
+KVM state capture. No snapshot state or memory output is written after a
+preparation error. Preparation can have changed another device before the
+failure, including resetting vsock connections. A failed snapshot is not proof
+that the source's control connection remains usable.
+
+[man mincore]: https://man7.org/linux/man-pages/man2/mincore.2.html

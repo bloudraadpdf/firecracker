@@ -728,7 +728,7 @@ pub(crate) mod tests {
         vm.setup_irqchip(1).unwrap();
 
         let mut event_manager = EventManager::new().unwrap();
-        for _i in crate::arch::GSI_LEGACY_START..=crate::arch::GSI_LEGACY_END {
+        for _i in 0..crate::arch::GSI_LEGACY_NUM {
             device_manager
                 .register_virtio_test_device(
                     &vm,
