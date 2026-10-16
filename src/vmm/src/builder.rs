@@ -241,7 +241,11 @@ pub fn build_microvm_for_boot(
         entry_point.protocol,
     )
     .map_err(ConfigurationError::FirmwareIdentity)?;
-    let initrd = InitrdConfig::from_config(boot_config, guest_memory)?;
+    #[cfg(all(target_arch = "aarch64", feature = "windows"))]
+    if entry_point.protocol == crate::arch::BootProtocol::FirmwareBoot {
+        crate::arch::aarch64::reserve_firmware_memory(&kvm_vm)?;
+    }
+    let initrd = InitrdConfig::from_config(boot_config, guest_memory, entry_point.protocol)?;
 
     if !vm_resources.pci_enabled {
         boot_cmdline.insert("pci", "off")?;

@@ -19,6 +19,7 @@ pub mod vm;
 use std::cmp::min;
 use std::fmt::Debug;
 use std::fs::File;
+use std::os::unix::fs::FileExt;
 
 use linux_loader::loader::pe::PE as Loader;
 use linux_loader::loader::{Cmdline, KernelLoader};
@@ -55,6 +56,19 @@ pub enum ConfigurationError {
     VcpuConfigure(#[from] KvmVcpuError),
     /// Failed to read host cache information: {0}
     CacheInfo(#[from] cache_info::CacheInfoError),
+    /// Failed to read firmware: {0}
+    FirmwareIo(#[from] std::io::Error),
+    /// Invalid firmware image size
+    FirmwareSize,
+    /// Invalid firmware volume header or checksum
+    FirmwareFormat,
+    /// Failed to reserve firmware handoff memory: {0}
+    FirmwareMemory(#[from] vm_allocator::Error),
+    /// Firmware requires a Firecracker build with the windows feature.
+    WindowsCapability,
+    /// ACPI table construction failed: {0}
+    #[cfg(feature = "windows")]
+    Acpi(#[from] crate::acpi::AcpiError),
 }
 
 /// Returns a Vec of the valid memory addresses for aarch64.
@@ -101,6 +115,10 @@ pub fn configure_system_for_boot(
     boot_cmdline: Cmdline,
     _firmware: Option<&crate::vmm_config::boot_source::FirmwareConfig>,
 ) -> Result<(), ConfigurationError> {
+    #[cfg(not(feature = "windows"))]
+    if entry_point.protocol == BootProtocol::FirmwareBoot || _firmware.is_some() {
+        return Err(ConfigurationError::WindowsCapability);
+    }
     // Construct the base CpuConfiguration to apply CPU template onto.
     let cpu_config = CpuConfiguration::new(cpu_template, vcpus)?;
 
@@ -133,21 +151,46 @@ pub fn configure_system_for_boot(
         .map(|cpu| cpu.kvm_vcpu.get_mpidr())
         .collect::<Result<Vec<_>, _>>()
         .map_err(KvmVcpuError::ConfigureRegisters)?;
+    let topology = CpuTopology {
+        mpidrs: vcpu_mpidr,
+        pmu_irq: vcpus[0].kvm_vcpu.has_pmu().then_some(layout::PMU_IRQ),
+    };
     let cmdline = boot_cmdline
         .as_cstring()
         .expect("Cannot create cstring from cmdline string");
 
+    #[cfg(feature = "windows")]
+    if entry_point.protocol == BootProtocol::FirmwareBoot {
+        crate::acpi::create_acpi_tables(
+            vm.guest_memory(),
+            device_manager,
+            &mut vm.resource_allocator(),
+            &topology,
+            vm.get_irqchip(),
+        )?;
+    }
+
     let fdt = fdt::create_fdt(
         vm.guest_memory(),
-        vcpu_mpidr,
+        &topology,
         cmdline,
         device_manager,
         vm.get_irqchip(),
         initrd,
+        entry_point.protocol,
     )?;
 
     let fdt_address = GuestAddress(get_fdt_addr(vm.guest_memory()));
     vm.guest_memory().write_slice(fdt.as_slice(), fdt_address)?;
+
+    #[cfg(feature = "windows")]
+    if entry_point.protocol == BootProtocol::FirmwareBoot {
+        if fdt.len() > 0x1_0000 {
+            return Err(ConfigurationError::FirmwareSize);
+        }
+        vm.guest_memory()
+            .write_slice(&fdt, GuestAddress(layout::FIRMWARE_FDT_ADDR))?;
+    }
 
     Ok(())
 }
@@ -252,11 +295,27 @@ fn get_fdt_addr(mem: &GuestMemoryMmap) -> u64 {
         .unwrap_or(layout::DRAM_MEM_START)
 }
 
-/// Load linux kernel into guest memory.
+/// CPU identifiers and optional performance-monitor interrupt for firmware tables.
+#[derive(Debug)]
+pub struct CpuTopology {
+    /// CPU affinities in vCPU order.
+    pub mpidrs: Vec<u64>,
+    /// Shared PPI used by each vCPU's performance monitor.
+    pub pmu_irq: Option<u32>,
+}
+
+/// Load a Linux kernel or CloudHv firmware into guest memory.
 pub fn load_kernel(
     kernel: &File,
     guest_memory: &GuestMemoryMmap,
 ) -> Result<EntryPoint, ConfigurationError> {
+    let mut signature = [0; 4];
+    if kernel.read_at(&mut signature, 0x1028)? == 4 && signature == *b"_FVH" {
+        #[cfg(feature = "windows")]
+        return load_firmware(kernel, guest_memory);
+        #[cfg(not(feature = "windows"))]
+        return Err(ConfigurationError::WindowsCapability);
+    }
     // Need to clone the File because reading from it
     // mutates it.
     let mut kernel_file = kernel
@@ -274,6 +333,90 @@ pub fn load_kernel(
         entry_addr: entry_addr.kernel_load,
         protocol: BootProtocol::LinuxBoot,
     })
+}
+
+#[cfg(feature = "windows")]
+fn load_firmware(
+    kernel: &File,
+    guest_memory: &GuestMemoryMmap,
+) -> Result<EntryPoint, ConfigurationError> {
+    let size = kernel.metadata()?.len();
+    if !(0x2000..=layout::FIRMWARE_MAX_SIZE).contains(&size) {
+        return Err(ConfigurationError::FirmwareSize);
+    }
+    let mut firmware = vec![0; usize::try_from(size).unwrap()];
+    kernel.read_exact_at(&mut firmware, 0)?;
+    let volume = &firmware[0x1000..];
+    let volume_len = u64::from_le_bytes(volume[32..40].try_into().unwrap());
+    let header_len = usize::from(u16::from_le_bytes(volume[48..50].try_into().unwrap()));
+    let header = volume
+        .get(..header_len)
+        .filter(|h| h.len() >= 56 && h.len().is_multiple_of(2))
+        .ok_or(ConfigurationError::FirmwareFormat)?;
+    if volume[55] != 2
+        || volume_len > volume.len() as u64
+        || volume_len < header_len as u64
+        || header.as_chunks::<2>().0.iter().fold(0_u16, |sum, word| {
+            sum.wrapping_add(u16::from_le_bytes(*word))
+        }) != 0
+    {
+        return Err(ConfigurationError::FirmwareFormat);
+    }
+    guest_memory.write_slice(&firmware, GuestAddress(layout::FIRMWARE_START))?;
+    Ok(EntryPoint {
+        entry_addr: GuestAddress(layout::FIRMWARE_START),
+        protocol: BootProtocol::FirmwareBoot,
+    })
+}
+
+#[cfg(feature = "windows")]
+fn reserve_firmware_handoff(
+    allocator: &mut vm_allocator::AddressAllocator,
+) -> Result<(), vm_allocator::Error> {
+    use vm_allocator::AllocPolicy;
+    let mut next = allocator.clone();
+    for (address, size) in [
+        (layout::DRAM_MEM_START, 0x10_0000),
+        (layout::FIRMWARE_RSDP_ADDR, 0x1_0000),
+    ] {
+        next.allocate(size, 1, AllocPolicy::ExactMatch(address))?;
+    }
+    *allocator = next;
+    Ok(())
+}
+
+/// Keep firmware handoff pages separate from allocated ACPI data.
+#[cfg(feature = "windows")]
+pub fn reserve_firmware_memory(vm: &KvmVm) -> Result<(), ConfigurationError> {
+    reserve_firmware_handoff(&mut vm.resource_allocator().system_memory)?;
+    Ok(())
+}
+
+#[cfg(test)]
+#[cfg(feature = "windows")]
+mod handoff_tests {
+    use super::*;
+    use vm_allocator::{AddressAllocator, AllocPolicy};
+
+    #[test]
+    fn failed_handoff_reservations_are_atomic() {
+        let mut allocator = AddressAllocator::new(layout::DRAM_MEM_START, 0x20_0000).unwrap();
+        let collision = layout::FIRMWARE_RSDP_ADDR;
+        allocator
+            .allocate(4096, 1, AllocPolicy::ExactMatch(collision))
+            .unwrap();
+        reserve_firmware_handoff(&mut allocator).unwrap_err();
+        allocator
+            .allocate(
+                0x10_0000,
+                1,
+                AllocPolicy::ExactMatch(layout::DRAM_MEM_START),
+            )
+            .unwrap();
+        allocator
+            .allocate(4096, 1, AllocPolicy::ExactMatch(collision))
+            .unwrap_err();
+    }
 }
 
 #[cfg(kani)]
@@ -350,6 +493,86 @@ mod tests {
         MMIO64_MEM_START,
     };
     use crate::test_utils::arch_mem;
+
+    #[cfg(not(feature = "windows"))]
+    #[test]
+    fn firmware_requires_capability_before_writing_guest_memory() {
+        use vmm_sys_util::tempfile::TempFile;
+
+        let file = TempFile::new_in(&std::env::current_dir().unwrap()).unwrap();
+        file.as_file().write_all_at(b"_FVH", 0x1028).unwrap();
+        let mem = arch_mem(0x80_0000);
+        let address = GuestAddress(layout::FIRMWARE_START);
+        mem.write_obj(0x55_u8, address).unwrap();
+        assert!(matches!(
+            load_kernel(file.as_file(), &mem),
+            Err(ConfigurationError::WindowsCapability)
+        ));
+        assert_eq!(mem.read_obj::<u8>(address).unwrap(), 0x55);
+    }
+
+    #[test]
+    #[cfg(feature = "windows")]
+    fn test_firmware_loader_bounds_and_header() {
+        use vmm_sys_util::tempfile::TempFile;
+
+        let file = TempFile::new_in(&std::env::current_dir().unwrap()).unwrap();
+        let mut image = vec![0_u8; 0x2000];
+        let volume = &mut image[0x1000..];
+        volume[32..40].copy_from_slice(&0x1000_u64.to_le_bytes());
+        volume[40..44].copy_from_slice(b"_FVH");
+        volume[48..50].copy_from_slice(&72_u16.to_le_bytes());
+        volume[55] = 2;
+        volume[56..60].copy_from_slice(&1_u32.to_le_bytes());
+        volume[60..64].copy_from_slice(&0x1000_u32.to_le_bytes());
+        let checksum = volume[..72]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .fold(0_u16, |sum, word| {
+                sum.wrapping_add(u16::from_le_bytes(*word))
+            });
+        volume[50..52].copy_from_slice(&checksum.wrapping_neg().to_le_bytes());
+        file.as_file().write_all_at(&image, 0).unwrap();
+
+        let mem = arch_mem(0x80_0000);
+        let address = GuestAddress(layout::FIRMWARE_START);
+        let entry = load_kernel(file.as_file(), &mem).unwrap();
+        assert_eq!(entry.protocol, BootProtocol::FirmwareBoot);
+        assert_eq!(entry.entry_addr, address);
+        let mut loaded = vec![0; image.len()];
+        mem.read_slice(&mut loaded, address).unwrap();
+        assert_eq!(loaded, image);
+
+        mem.write_obj(0x55_u8, address).unwrap();
+        file.as_file().write_all_at(&[1], 0x1000).unwrap();
+        assert!(matches!(
+            load_kernel(file.as_file(), &mem),
+            Err(ConfigurationError::FirmwareFormat)
+        ));
+        assert_eq!(mem.read_obj::<u8>(address).unwrap(), 0x55);
+
+        file.as_file().write_all_at(&image, 0).unwrap();
+        file.as_file()
+            .write_all_at(&u16::MAX.to_le_bytes(), 0x1030)
+            .unwrap();
+        assert!(matches!(
+            load_kernel(file.as_file(), &mem),
+            Err(ConfigurationError::FirmwareFormat)
+        ));
+        file.as_file()
+            .set_len(layout::FIRMWARE_MAX_SIZE + 1)
+            .unwrap();
+        assert!(matches!(
+            load_kernel(file.as_file(), &mem),
+            Err(ConfigurationError::FirmwareSize)
+        ));
+        file.as_file().set_len(0x102c).unwrap();
+        assert!(matches!(
+            load_kernel(file.as_file(), &mem),
+            Err(ConfigurationError::FirmwareSize)
+        ));
+    }
 
     #[test]
     fn test_regions_lt_1024gb() {
