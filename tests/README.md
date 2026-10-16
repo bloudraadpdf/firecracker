@@ -796,6 +796,12 @@ The normal build tests discover tracked standalone Rust tool workspaces.
 `test_tool_unittests` runs their unit tests and compiles their examples;
 `test_tool_clippy` checks their native GNU targets.
 
+The development container builds pinned swtpm/libtpms 0.10.2. Native test hosts
+need swtpm 0.10.2 with libtpms 0.10.x. Ubuntu 24.04's packaged swtpm lacks
+required checkpoint storage locking; use the development container on such
+hosts. The real swtpm checkpoint test runs with the normal VMM unit suite; a
+missing executable is a test failure.
+
 ### Optional Windows capability
 
 The normal Rust unit, example and benchmark checks cover default and `windows`
