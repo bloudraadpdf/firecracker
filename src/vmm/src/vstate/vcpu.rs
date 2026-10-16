@@ -96,7 +96,7 @@ pub struct Vcpu {
     exit_evt: EventFd,
     /// Debugger emitter for gdb events
     #[cfg(feature = "gdb")]
-    gdb_event: Option<Sender<usize>>,
+    gdb_event: Option<Sender<crate::gdb::GdbEvent>>,
     /// The receiving end of events channel owned by the vcpu side.
     event_receiver: Receiver<VcpuEvent>,
     /// The transmitting end of the events channel which will be given to the handler.
@@ -162,7 +162,7 @@ impl Vcpu {
 
     /// Attaches the fields required for debugging
     #[cfg(feature = "gdb")]
-    pub fn attach_debug_info(&mut self, gdb_event: Sender<usize>) {
+    pub fn attach_debug_info(&mut self, gdb_event: Sender<crate::gdb::GdbEvent>) {
         self.gdb_event = Some(gdb_event);
     }
 
@@ -386,19 +386,22 @@ impl Vcpu {
     // Note that this function isn't called when the guest asks for a CPU
     // reset via the i8042 controller on x86.
     fn exit(&mut self, exit_code: FcExitCode) -> VcpuRunState {
+        self.response_sender
+            .send(VcpuResponse::Exited(exit_code))
+            .expect("vcpu channel unexpectedly closed");
         if let Err(err) = self.exit_evt.write(1) {
             METRICS.vcpu.failures.inc();
             error!("Failed signaling vcpu exit event: {}", err);
         }
         // From this state we only accept going to finished.
         loop {
-            self.response_sender
-                .send(VcpuResponse::Exited(exit_code))
-                .expect("vcpu channel unexpectedly closed");
             // Wait for and only accept 'VcpuEvent::Finish'.
             if let Ok(VcpuEvent::Finish) = self.event_receiver.recv() {
                 break;
             }
+            self.response_sender
+                .send(VcpuResponse::Exited(exit_code))
+                .expect("vcpu channel unexpectedly closed");
         }
         VcpuRunState::Finished
     }
@@ -422,10 +425,10 @@ impl Vcpu {
                 Ok(VcpuEmulation::Interrupted)
             }
             #[cfg(feature = "gdb")]
-            Ok(VcpuExit::Debug(_)) => {
+            Ok(VcpuExit::Debug(debug)) => {
                 if let Some(gdb_event) = &self.gdb_event {
                     gdb_event
-                        .send(get_raw_tid(self.kvm_vcpu.index.into()))
+                        .send((get_raw_tid(self.kvm_vcpu.index.into()), debug))
                         .expect("Unable to notify gdb event");
                 }
 
@@ -733,6 +736,27 @@ pub(crate) mod tests {
         fn write(&mut self, _base: u64, _offset: u64, _data: &[u8]) -> Option<Arc<Barrier>> {
             None
         }
+    }
+
+    #[test]
+    fn exit_response_precedes_notification() {
+        let (_, mut vcpu) = setup_vcpu(0x1000);
+        vcpu.exit_evt = EventFd::new(0).unwrap();
+        let event = vcpu.exit_evt.try_clone().unwrap();
+        event.write(u64::MAX - 1).unwrap();
+        let responses = vcpu.response_receiver.take().unwrap();
+        let sender = vcpu.event_sender.take().unwrap();
+        let thread = std::thread::spawn(move || vcpu.exit(FcExitCode::GenericError));
+
+        // The saturated eventfd blocks notification until the status has been observed.
+        let response = responses.recv_timeout(RECV_TIMEOUT_SEC);
+        assert_eq!(event.read().unwrap(), u64::MAX - 1);
+        sender.send(VcpuEvent::Finish).unwrap();
+        assert!(matches!(thread.join().unwrap(), VcpuRunState::Finished));
+        assert!(matches!(
+            response,
+            Ok(VcpuResponse::Exited(FcExitCode::GenericError))
+        ));
     }
 
     #[test]
