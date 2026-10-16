@@ -60,7 +60,7 @@ pub(crate) fn setup_arch_dsdt(
         .append_aml_bytes(dsdt_data)?;
     }
     if let Some(legacy) = &devices.legacy_devices {
-        legacy.append_aml_bytes(dsdt_data, crate::acpi::DeviceScope::SystemBus)?;
+        legacy.append_aml_bytes(dsdt_data, devices.acpi_device_scope())?;
     }
     Ok(())
 }

@@ -1096,6 +1096,18 @@
         "filter_action": "allow",
         "filter": [
             {
+                "syscall": "read",
+                "comment": "Drain eventfd counters when resetting transitional PCI interrupts",
+                "args": [
+                    {
+                        "index": 2,
+                        "type": "qword",
+                        "op": "eq",
+                        "val": 8
+                    }
+                ]
+            },
+            {
                 "syscall": "exit"
             },
             {
@@ -1514,6 +1526,18 @@
                         "index": 1,
                         "type": "dword",
                         "op": "eq",
+                        "val": 1074025688,
+                        "comment": "TUNSETVNETHDRSZ during virtio-net activation"
+                    }
+                ]
+            },
+            {
+                "syscall": "ioctl",
+                "args": [
+                    {
+                        "index": 1,
+                        "type": "dword",
+                        "op": "eq",
                         "val": 44717,
                         "comment": "KVM_KVMCLOCK_CTRL. We call this after pausing vCPUs to avoid soft lockups in the guest."
                     }
@@ -1547,18 +1571,6 @@
                         "op": "eq",
                         "val": 131,
                         "comment": "KVM_CAP_MSI_DEVID"
-                    }
-                ]
-            },
-            {
-                "syscall": "ioctl",
-                "args": [
-                    {
-                        "index": 1,
-                        "type": "dword",
-                        "op": "eq",
-                        "val": 1074025688,
-                        "comment": "TUNSETVNETHDRSZ during virtio-net activation"
                     }
                 ]
             },
