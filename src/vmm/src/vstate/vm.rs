@@ -12,12 +12,12 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-#[cfg(target_arch = "x86_64")]
-use kvm_bindings::KVM_IRQCHIP_IOAPIC;
 use kvm_bindings::{
     KVM_IRQ_ROUTING_IRQCHIP, KVM_IRQ_ROUTING_MSI, KVM_MSI_VALID_DEVID, KvmIrqRouting,
     kvm_irq_routing_entry, kvm_userspace_memory_region,
 };
+#[cfg(target_arch = "x86_64")]
+use kvm_bindings::{KVM_IRQCHIP_IOAPIC, KVM_IRQCHIP_PIC_MASTER, KVM_IRQCHIP_PIC_SLAVE};
 use kvm_ioctls::VmFd;
 use serde::{Deserialize, Serialize};
 use userfaultfd::Uffd;
@@ -638,6 +638,26 @@ impl KvmVm {
     pub fn register_irq(&self, fd: &EventFd, gsi: u32) -> Result<(), errno::Error> {
         self.common.fd.register_irqfd(fd, gsi)?;
 
+        self.register_irq_route(gsi);
+        Ok(())
+    }
+
+    /// Register a level-triggered device IRQ with acknowledgement notification.
+    #[cfg(target_arch = "x86_64")]
+    pub fn register_level_irq(
+        &self,
+        fd: &EventFd,
+        resample: &EventFd,
+        gsi: u32,
+    ) -> Result<(), errno::Error> {
+        self.common
+            .fd
+            .register_irqfd_with_resample(fd, resample, gsi)?;
+        self.register_irq_route(gsi);
+        Ok(())
+    }
+
+    fn register_irq_route(&self, gsi: u32) {
         let mut entry = kvm_irq_routing_entry {
             gsi,
             type_: KVM_IRQ_ROUTING_IRQCHIP,
@@ -664,7 +684,6 @@ impl KvmVm {
                     masked: false,
                 },
             );
-        Ok(())
     }
 
     /// Register an MSI device interrupt
@@ -724,11 +743,35 @@ impl KvmVm {
     /// Set GSI routes to KVM
     pub fn set_gsi_routes(&self) -> Result<(), InterruptError> {
         let entries = self.common.interrupts.lock().expect("Poisoned lock");
-        let unmasked = entries.values().filter(|e| !e.masked).count();
-        let mut routes = KvmIrqRouting::new(unmasked)?;
-        for (slot, entry) in entries.values().filter(|e| !e.masked).enumerate() {
-            routes.as_mut_slice()[slot] = entry.entry;
-        }
+        let active = entries.values().filter(|e| !e.masked).map(|e| e.entry);
+        #[cfg(target_arch = "x86_64")]
+        let active = {
+            let legacy = (0..24)
+                .filter(|gsi| !entries.contains_key(gsi))
+                .map(|gsi| (gsi, KVM_IRQCHIP_IOAPIC, gsi))
+                .chain((0..16).map(|gsi| {
+                    let chip = if gsi < 8 {
+                        KVM_IRQCHIP_PIC_MASTER
+                    } else {
+                        KVM_IRQCHIP_PIC_SLAVE
+                    };
+                    (gsi, chip, gsi % 8)
+                }))
+                .map(|(gsi, chip, pin)| {
+                    let mut entry = kvm_irq_routing_entry {
+                        gsi,
+                        type_: KVM_IRQ_ROUTING_IRQCHIP,
+                        ..Default::default()
+                    };
+                    entry.u.irqchip.irqchip = chip;
+                    entry.u.irqchip.pin = pin;
+                    entry
+                });
+            active.chain(legacy)
+        };
+        let active: Vec<_> = active.collect();
+        let mut routes = KvmIrqRouting::new(active.len())?;
+        routes.as_mut_slice().copy_from_slice(&active);
 
         self.common.fd.set_gsi_routing(&routes)?;
         Ok(())
@@ -970,6 +1013,31 @@ pub(crate) mod tests {
             msix_group.update(4, &config, sbdf),
             Err(InterruptError::InvalidVectorIndex(4)),
         );
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_pit_route_survives_gsi_update() {
+        use kvm_bindings::{KVM_IRQCHIP_PIC_MASTER, kvm_irqchip};
+
+        let mut vm = setup_vm_with_memory(mib_to_bytes(1));
+        vm.setup_irqchip(true).unwrap();
+        vm.set_gsi_routes().unwrap();
+        vm.fd().set_irq_line(0, true).unwrap();
+        let mut pic = kvm_irqchip {
+            chip_id: KVM_IRQCHIP_PIC_MASTER,
+            ..Default::default()
+        };
+        vm.fd().get_irqchip(&mut pic).unwrap();
+        // SAFETY: KVM returned the PIC selected by chip_id.
+        assert_ne!(unsafe { pic.chip.pic.irr } & 1, 0);
+        let mut ioapic = kvm_irqchip {
+            chip_id: KVM_IRQCHIP_IOAPIC,
+            ..Default::default()
+        };
+        vm.fd().get_irqchip(&mut ioapic).unwrap();
+        // SAFETY: KVM returned the IOAPIC selected by chip_id.
+        assert_ne!(unsafe { ioapic.chip.ioapic.irr } & 1, 0);
     }
 
     #[test]

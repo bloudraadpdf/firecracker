@@ -1071,6 +1071,30 @@ definitions:
       kernel_image_path:
         type: string
         description: Host level path to the kernel image used to boot the guest
+      firmware:
+        $ref: "#/definitions/FirmwareConfig"
+
+  FirmwareConfig:
+    type: object
+    additionalProperties: false
+    required:
+      - type
+    description: |
+      Explicit AMD64 firmware ABI declaration. Both profiles require a PVH ELF
+      image without an initrd and select conventional PC timers and ACPI power
+      registers. CloudHv requires a stable system UUID, retained on restore.
+      SeaBIOS accepts only an absent or null system UUID and has no CloudHv
+      SMBIOS handoff. Omit the firmware object for direct Linux kernel boot.
+    properties:
+      type:
+        type: string
+        enum: [cloud-hv, seabios]
+      system_uuid:
+        type: string
+        format: uuid
+        description: |
+          Required and non-null for CloudHv; absent or null for SeaBIOS.
+          Zero and all-ones UUIDs are invalid.
 
   CpuTemplate:
     type: string
@@ -1466,7 +1490,8 @@ definitions:
         default: false
         description: >-
           Enable KVM Hyper-V enlightenments for Windows guests. Available only on
-          x86_64. Requires host Hyper-V CPUID and SynIC2 support.
+          x86_64. Requires host Hyper-V CPUID and SynIC2 support. Firmware boot
+          also requires a CloudHv PVH ELF image and PCI virtio transport.
       mem_size_mib:
         type: integer
         description: Memory size of VM
