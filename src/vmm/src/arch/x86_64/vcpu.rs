@@ -762,18 +762,80 @@ impl KvmVcpu {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum PioWidth {
+    Byte,
+    Word,
+    Dword,
+}
+
+impl PioWidth {
+    fn from_kvm(size: u8) -> Result<Self, VcpuError> {
+        match size {
+            1 => Ok(Self::Byte),
+            2 => Ok(Self::Word),
+            4 => Ok(Self::Dword),
+            _ => Err(VcpuError::FaultyKvmExit(format!(
+                "Invalid PIO width: {size}"
+            ))),
+        }
+    }
+
+    fn bytes(self) -> usize {
+        match self {
+            Self::Byte => 1,
+            Self::Word => 2,
+            Self::Dword => 4,
+        }
+    }
+}
+
+impl KvmVcpu {
+    /// Completes each element of a KVM port-I/O exit at the same port.
+    pub fn emulate_pio(&mut self) -> Result<VcpuEmulation, VcpuError> {
+        let run = self.fd.get_kvm_run();
+        if run.exit_reason != kvm_bindings::KVM_EXIT_IO {
+            return Err(VcpuError::FaultyKvmExit("Expected KVM_EXIT_IO".to_owned()));
+        }
+        // SAFETY: KVM_EXIT_IO selects the io union member. KVM_RUN has returned.
+        let io = unsafe { run.__bindgen_anon_1.io };
+        let width = PioWidth::from_kvm(io.size)?;
+        let length = usize::try_from(io.count).unwrap() * width.bytes();
+        let offset = usize::try_from(io.data_offset)
+            .map_err(|_| VcpuError::FaultyKvmExit("PIO offset exceeds address space".to_owned()))?;
+        // SAFETY: KVM provides the offset and packed array length within the vCPU
+        // mapping. The previous VcpuExit borrow is gone; this thread exclusively
+        // owns the mapping until the next KVM_RUN, as required by the KVM ABI.
+        let data = unsafe {
+            std::slice::from_raw_parts_mut(std::ptr::from_mut(run).cast::<u8>().add(offset), length)
+        };
+        let exit = match u32::from(io.direction) {
+            kvm_bindings::KVM_EXIT_IO_IN => VcpuExit::IoIn(io.port, data),
+            kvm_bindings::KVM_EXIT_IO_OUT => VcpuExit::IoOut(io.port, data),
+            direction => {
+                return Err(VcpuError::FaultyKvmExit(format!(
+                    "Invalid PIO direction: {direction}"
+                )));
+            }
+        };
+        self.peripherals.emulate_pio(exit, width)
+    }
+}
+
 impl Peripherals {
-    /// Runs the vCPU in KVM context and handles the kvm exit reason.
-    ///
-    /// Returns error or enum specifying whether emulation was handled or interrupted.
-    pub fn run_arch_emulation(&self, exit: VcpuExit) -> Result<VcpuEmulation, VcpuError> {
+    fn emulate_pio(&self, exit: VcpuExit, width: PioWidth) -> Result<VcpuEmulation, VcpuError> {
         match exit {
             VcpuExit::IoIn(addr, data) => {
                 data.fill(0);
                 if let Some(pio_bus) = &self.pio_bus {
                     let _metric = METRICS.vcpu.exit_io_in_agg.record_latency_metrics();
-                    if let Err(err) = pio_bus.read(u64::from(addr), data) {
-                        warn!("vcpu: IO read @ {addr:#x}:{:#x} failed: {err}", data.len());
+                    for element in data.chunks_exact_mut(width.bytes()) {
+                        if let Err(err) = pio_bus.read(u64::from(addr), element) {
+                            warn!(
+                                "vcpu: IO read @ {addr:#x}:{:#x} failed: {err}",
+                                element.len()
+                            );
+                        }
                     }
                     METRICS.vcpu.exit_io_in.inc();
                 }
@@ -782,22 +844,27 @@ impl Peripherals {
             VcpuExit::IoOut(addr, data) => {
                 if let Some(pio_bus) = &self.pio_bus {
                     let _metric = METRICS.vcpu.exit_io_out_agg.record_latency_metrics();
-                    if let Err(err) = pio_bus.write(u64::from(addr), data) {
-                        warn!("vcpu: IO write @ {addr:#x}:{:#x} failed: {err}", data.len());
+                    for element in data.chunks_exact(width.bytes()) {
+                        if let Err(err) = pio_bus.write(u64::from(addr), element) {
+                            warn!(
+                                "vcpu: IO write @ {addr:#x}:{:#x} failed: {err}",
+                                element.len()
+                            );
+                        }
                     }
                     METRICS.vcpu.exit_io_out.inc();
                 }
                 Ok(VcpuEmulation::Handled)
             }
-            unexpected_exit => {
-                METRICS.vcpu.failures.inc();
-                error!("Unexpected exit reason on vcpu run: {:?}", unexpected_exit);
-                Err(VcpuError::UnhandledKvmExit(format!(
-                    "{:?}",
-                    unexpected_exit
-                )))
-            }
+            unexpected_exit => self.run_arch_emulation(unexpected_exit),
         }
+    }
+
+    /// Reports an x86 exit not handled by the common or port-I/O paths.
+    pub fn run_arch_emulation(&self, exit: VcpuExit) -> Result<VcpuEmulation, VcpuError> {
+        METRICS.vcpu.failures.inc();
+        error!("Unexpected exit reason on vcpu run: {:?}", exit);
+        Err(VcpuError::UnhandledKvmExit(format!("{:?}", exit)))
     }
 }
 
@@ -857,7 +924,7 @@ mod tests {
 
     use kvm_bindings::kvm_msr_entry;
     use kvm_ioctls::Cap;
-    use vm_memory::GuestAddress;
+    use vm_memory::{Bytes, GuestAddress};
 
     use super::*;
     use crate::arch::BootProtocol;
@@ -887,6 +954,170 @@ mod tests {
                 tsc_khz: Some(0),
             }
         }
+    }
+
+    #[derive(Default)]
+    struct PioRecorder {
+        writes: Vec<(u64, Vec<u8>)>,
+        reads: Vec<(u64, usize)>,
+    }
+
+    impl crate::vstate::bus::BusDevice for PioRecorder {
+        fn read(&mut self, _base: u64, offset: u64, data: &mut [u8]) {
+            self.reads.push((offset, data.len()));
+            data.fill(u8::try_from(self.reads.len()).unwrap());
+        }
+
+        fn write(
+            &mut self,
+            _base: u64,
+            offset: u64,
+            data: &[u8],
+        ) -> Option<Arc<std::sync::Barrier>> {
+            self.writes.push((offset, data.to_vec()));
+            None
+        }
+    }
+
+    #[test]
+    fn test_pio_string_elements_keep_port_and_width() {
+        use std::sync::Mutex;
+
+        let bus = Arc::new(Bus::new());
+        let device = Arc::new(Mutex::new(PioRecorder::default()));
+        bus.insert(device.clone(), 0x1f0, 8).unwrap();
+        let peripherals = Peripherals {
+            pio_bus: Some(bus),
+            mmio_bus: None,
+        };
+        for width in [PioWidth::Byte, PioWidth::Word, PioWidth::Dword] {
+            let bytes: Vec<u8> = (0..u8::try_from(width.bytes() * 3).unwrap()).collect();
+            peripherals
+                .emulate_pio(VcpuExit::IoOut(0x1f0, &bytes), width)
+                .unwrap();
+            let mut recording = device.lock().unwrap();
+            assert_eq!(recording.writes.len(), 3);
+            for (index, (port, value)) in recording.writes.iter().enumerate() {
+                assert_eq!(*port, 0);
+                assert_eq!(
+                    value,
+                    &bytes[index * width.bytes()..(index + 1) * width.bytes()]
+                );
+            }
+            recording.writes.clear();
+            drop(recording);
+            let mut data = vec![0; width.bytes() * 3];
+            peripherals
+                .emulate_pio(VcpuExit::IoIn(0x1f0, &mut data), width)
+                .unwrap();
+            assert_eq!(device.lock().unwrap().reads, vec![(0, width.bytes()); 3]);
+            assert_eq!(
+                data,
+                [
+                    vec![1; width.bytes()],
+                    vec![2; width.bytes()],
+                    vec![3; width.bytes()]
+                ]
+                .concat()
+            );
+            device.lock().unwrap().reads.clear();
+        }
+        for size in [0, 3, 8, 255] {
+            PioWidth::from_kvm(size).unwrap_err();
+        }
+    }
+
+    #[test]
+    fn test_pio_single_indexed_word_stays_atomic() {
+        use std::sync::Mutex;
+
+        let bus = Arc::new(Bus::new());
+        let device = Arc::new(Mutex::new(PioRecorder::default()));
+        bus.insert(device.clone(), 0x3c4, 2).unwrap();
+        let peripherals = Peripherals {
+            pio_bus: Some(bus),
+            mmio_bus: None,
+        };
+        peripherals
+            .emulate_pio(VcpuExit::IoOut(0x3c4, &[2, 15]), PioWidth::Word)
+            .unwrap();
+        assert_eq!(device.lock().unwrap().writes, vec![(0, vec![2, 15])]);
+    }
+
+    #[test]
+    fn test_pio_kvm_string_io() {
+        use std::sync::Mutex;
+
+        let (vm, mut vcpu) = setup_vcpu(0x4000);
+        let device = Arc::new(Mutex::new(PioRecorder::default()));
+        let bus = Arc::new(Bus::new());
+        bus.insert(device.clone(), 0x1f0, 8).unwrap();
+        vcpu.peripherals.pio_bus = Some(bus);
+        // Real-mode REP OUTSB, OUTSW, OUTSD and INSW, three elements each.
+        let code = [
+            0xba, 0xf0, 0x01, 0xbe, 0x00, 0x20, 0xb9, 0x03, 0x00, 0xf3, 0x6e, 0xb9, 0x03, 0x00,
+            0xf3, 0x6f, 0xb9, 0x03, 0x00, 0x66, 0xf3, 0x6f, 0xbf, 0x00, 0x21, 0xb9, 0x03, 0x00,
+            0xf3, 0x6d, 0xb0, 0x5a, 0xe6, 0x80,
+        ];
+        vm.guest_memory()
+            .write_slice(&code, GuestAddress(0x1000))
+            .unwrap();
+        let source: Vec<u8> = (0..21).collect();
+        vm.guest_memory()
+            .write_slice(&source, GuestAddress(0x2000))
+            .unwrap();
+        let mut sregs = vcpu.fd.get_sregs().unwrap();
+        sregs.cs.base = 0;
+        sregs.cs.selector = 0;
+        sregs.ds.base = 0;
+        sregs.es.base = 0;
+        vcpu.fd.set_sregs(&sregs).unwrap();
+        vcpu.fd
+            .set_regs(&kvm_regs {
+                rip: 0x1000,
+                rflags: 2,
+                ..Default::default()
+            })
+            .unwrap();
+        let mut finished = false;
+        for _ in 0..64 {
+            match vcpu.fd.run().unwrap() {
+                VcpuExit::IoOut(0x80, data) => {
+                    assert_eq!(data, [0x5a]);
+                    finished = true;
+                    break;
+                }
+                VcpuExit::IoIn(..) | VcpuExit::IoOut(..) => {
+                    vcpu.emulate_pio().unwrap();
+                }
+                other => panic!("Unexpected PIO test exit: {other:?}"),
+            }
+        }
+        assert!(finished);
+        let recording = device.lock().unwrap();
+        assert_eq!(
+            recording
+                .writes
+                .iter()
+                .map(|(_, bytes)| bytes.len())
+                .collect::<Vec<_>>(),
+            [1, 1, 1, 2, 2, 2, 4, 4, 4]
+        );
+        assert!(recording.writes.iter().all(|(port, _)| *port == 0));
+        assert_eq!(
+            recording
+                .writes
+                .iter()
+                .flat_map(|(_, bytes)| bytes.iter().copied())
+                .collect::<Vec<_>>(),
+            source
+        );
+        assert_eq!(recording.reads, [(0, 2); 3]);
+        let mut readback = [0; 6];
+        vm.guest_memory()
+            .read_slice(&mut readback, GuestAddress(0x2100))
+            .unwrap();
+        assert_eq!(readback, [1, 1, 2, 2, 3, 3]);
     }
 
     fn setup_vcpu(mem_size: usize) -> (KvmVm, KvmVcpu) {
