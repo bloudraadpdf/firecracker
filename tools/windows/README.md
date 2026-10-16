@@ -47,8 +47,8 @@ build/windows/prepare-nt6 server2025 windows-server-2025.iso virtio-win.iso \
 ```
 
 For standard Windows 11 Enterprise Evaluation, use the matching client image
-index. Its secure firmware and media policy must match the image; preparing an
-answer file does not supply that platform:
+index and the
+[secure firmware/media procedure](../../resources/firmware/cloudhv-secureboot/README.md#current-windows-installation-media):
 
 ```sh
 build/windows/prepare client build/windows/windows11-enterprise 1
