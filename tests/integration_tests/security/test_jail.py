@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests that verify the jailer's behavior."""
 
+import fcntl
 import http.client as http_client
 import os
 import resource
@@ -29,7 +30,6 @@ REG_PERMS = (
     | stat.S_IXOTH
 )
 DIR_STATS = stat.S_IFDIR | stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR
-FILE_STATS = stat.S_IFREG | REG_PERMS
 SOCK_STATS = stat.S_IFSOCK | REG_PERMS
 # These are the stats of the devices created by tha jailer.
 CHAR_STATS = stat.S_IFCHR | stat.S_IRUSR | stat.S_IWUSR
@@ -51,6 +51,50 @@ def check_stats(filepath, stats, uid, gid):
     assert st.st_gid == gid
     assert st.st_uid == uid
     assert st.st_mode ^ stats == 0
+
+
+def check_sealed_executable(vm):
+    """Check that the VMM executes a sealed private copy of the source binary."""
+    executable = Path(f"/proc/{vm.firecracker_pid}/exe")
+    assert executable.readlink() == Path(f"/memfd:{vm.fc_binary_path.name} (deleted)")
+    with executable.open("rb") as actual, vm.fc_binary_path.open("rb") as source:
+        required_seals = (
+            fcntl.F_SEAL_SEAL
+            | fcntl.F_SEAL_SHRINK
+            | fcntl.F_SEAL_GROW
+            | fcntl.F_SEAL_WRITE
+        )
+        assert (
+            fcntl.fcntl(actual.fileno(), fcntl.F_GET_SEALS) & required_seals
+            == required_seals
+        )
+        assert not os.path.samestat(
+            os.fstat(actual.fileno()), os.fstat(source.fileno())
+        )
+        assert actual.read() == source.read()
+
+
+def check_exec_destination(vm, destination, target):
+    """Spawn the VMM and check that an existing destination stays unchanged."""
+    link_stat = destination.lstat()
+    target_stat = target.stat()
+    target_bytes = target.read_bytes()
+
+    vm.spawn()
+
+    check_sealed_executable(vm)
+    link_after = destination.lstat()
+    assert os.path.samestat(link_after, link_stat)
+    assert link_after.st_mode == link_stat.st_mode
+    assert link_after.st_uid == link_stat.st_uid
+    assert link_after.st_gid == link_stat.st_gid
+    assert link_after.st_nlink == link_stat.st_nlink
+    target_after = target.stat()
+    assert os.path.samestat(target_after, target_stat)
+    if not os.path.samestat(link_stat, target_stat):
+        assert target_after.st_nlink == target_stat.st_nlink
+    check_stats(target, target_stat.st_mode, target_stat.st_uid, target_stat.st_gid)
+    assert target.read_bytes() == target_bytes
 
 
 @pin_guest_kernel(GUEST_KERNEL_DEFAULT)
@@ -111,43 +155,37 @@ def test_exec_file_not_exist(uvm, tmp_path):
 
 
 @pin_guest_kernel(GUEST_KERNEL_DEFAULT)
-def test_exec_destination_path_is_symlink(uvm):
+def test_exec_destination_path_is_symlink(uvm, tmp_path):
     """
-    Test the jailer correctly refuses to copy binary into symlink
+    Test that a destination symlink and its target remain unchanged.
     """
     test_microvm = uvm
 
     firecracker_root_dir = Path(test_microvm.chroot())
     firecracker_bin_path = firecracker_root_dir / "firecracker"
-    dummy_path = Path("/srv/dummy")
-    dummy_path.unlink(missing_ok=True)
-    dummy_path.touch()
+    dummy_path = tmp_path / "dummy"
+    dummy_path.write_bytes(b"symlink target")
     firecracker_bin_path.symlink_to(dummy_path)
-    with pytest.raises(
-        Exception,
-        match=f"Failed to open {firecracker_bin_path}",
-    ):
-        test_microvm.spawn()
+
+    check_exec_destination(test_microvm, firecracker_bin_path, dummy_path)
+    assert firecracker_bin_path.readlink() == dummy_path
 
 
 @pin_guest_kernel(GUEST_KERNEL_DEFAULT)
 def test_exec_destination_path_is_hardlink(uvm):
     """
-    Test the jailer correctly refuses to copy binary into hardlink
+    Test that a destination hardlink and its target remain unchanged.
     """
     test_microvm = uvm
 
     firecracker_root_dir = Path(test_microvm.chroot())
     firecracker_bin_path = firecracker_root_dir / "firecracker"
-    dummy_path = Path("/srv/dummy")
-    dummy_path.unlink(missing_ok=True)
-    dummy_path.touch()
+    dummy_path = firecracker_root_dir / "dummy"
+    dummy_path.write_bytes(b"hardlink target")
     firecracker_bin_path.hardlink_to(dummy_path)
-    with pytest.raises(
-        Exception,
-        match=f"Detected hard link at: {firecracker_bin_path}",
-    ):
-        test_microvm.spawn()
+
+    check_exec_destination(test_microvm, firecracker_bin_path, dummy_path)
+    assert firecracker_bin_path.samefile(dummy_path)
 
 
 @pin_guest_kernel(GUEST_KERNEL_DEFAULT)
@@ -197,12 +235,8 @@ def test_default_chroot_hierarchy(uvm):
         test_microvm.jailer.uid,
         test_microvm.jailer.gid,
     )
-    check_stats(
-        os.path.join(test_microvm.jailer.chroot_path(), "firecracker"),
-        FILE_STATS,
-        test_microvm.jailer.uid,
-        test_microvm.jailer.gid,
-    )
+    assert not (Path(test_microvm.chroot()) / FC_BINARY_NAME).exists()
+    check_sealed_executable(test_microvm)
 
 
 @pin_guest_kernel(GUEST_KERNEL_DEFAULT)
