@@ -335,6 +335,8 @@ pub mod test {
         pub fn get_default(mem: &'a GuestMemoryMmap) -> TestHelper<'a> {
             let mut event_manager = EventManager::new().unwrap();
             let mut net = default_net();
+            net.acked_features =
+                1 << crate::devices::virtio::generated::virtio_config::VIRTIO_F_VERSION_1;
 
             let rxq = VirtQueue::new(GuestAddress(0), mem, Self::QUEUE_SIZE);
             let txq = VirtQueue::new(
