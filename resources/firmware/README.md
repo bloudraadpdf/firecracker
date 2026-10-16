@@ -53,3 +53,22 @@ loader, ACPI handoff and I/O ports remain those of CloudHv.
 EDK II source and this source patch use `BSD-2-Clause-Patent`, as declared in
 the modified upstream files. See the
 [upstream licence](https://github.com/cloud-hypervisor/edk2/blob/ch-97eeb7b09/License.txt).
+
+## ARM64 firmware
+
+`cloudhv-firecracker-arm64.patch` applies to the same EDK II tag. It uses
+Firecracker's RAM, ECAM and PCI apertures, its MMIO 16550 UART, and a fixed
+FDT/RSDP handoff. Firmware reserves the platform data and firmware image in its
+UEFI memory map. PCI enumeration honours `linux,pci-probe-only`.
+
+Apply the ARM64 patch to the pinned checkout, then build:
+
+```sh
+git apply --ignore-whitespace ../../../resources/firmware/cloudhv-firecracker-arm64.patch
+build -p ArmVirtPkg/ArmVirtCloudHv.dsc -a AARCH64 -t GCC -b RELEASE -n 2
+```
+
+For a cross-build, set `GCC_AARCH64_PREFIX` to the AArch64 GCC tool prefix. The
+raw firmware is `Build/ArmVirtCloudHv-AARCH64/RELEASE_GCC/FV/CLOUDHV_EFI.fd`.
+Pass it as Firecracker's kernel image and enable PCI. See the
+[ARM64 guest guide](../../docs/windows-arm64.md) for host requirements.
