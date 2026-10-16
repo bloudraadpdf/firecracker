@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests ensuring codebase style compliance for Rust."""
 
-from framework import utils
+from framework import utils, utils_repo
 from host_tools.fcmetrics import find_unused_metrics
 
 
@@ -13,15 +13,18 @@ def test_rust_order():
     _, _, _ = utils.check_output(
         cmd="cargo-sort --workspace --check --grouped", cwd=".."
     )
+    for directory in utils_repo.rust_tool_directories():
+        utils.check_output("cargo-sort --check --grouped", cwd=directory)
 
 
 def test_rust_style():
     """Test that rust code passes style checks."""
     # Check that the output is empty.
-    _, stdout, _ = utils.check_output("cargo fmt --all -- --check")
+    for directory in ["..", *utils_repo.rust_tool_directories()]:
+        _, stdout, _ = utils.check_output("cargo fmt --all -- --check", cwd=directory)
 
-    # rustfmt prepends `"Diff in"` to the reported output.
-    assert "Diff in" not in stdout
+        # rustfmt prepends `"Diff in"` to the reported output.
+        assert "Diff in" not in stdout
 
 
 def test_unused_metrics():
