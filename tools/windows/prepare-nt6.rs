@@ -1,7 +1,7 @@
 // Copyright 2026 Bloudraad.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Rebuild pinned Windows UDF installation media with a selectable viostor driver.
+//! Prepare pinned AMD64 installation media or stage ARM64 media for servicing.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -11,6 +11,39 @@ use std::process::Command;
 
 mod media;
 use media::{OutputDirectory, Result, boot_catalog, checked as run, digest, verify};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Architecture {
+    Amd64,
+    Arm64,
+}
+
+impl Architecture {
+    fn directory(self) -> &'static str {
+        match self {
+            Self::Amd64 => "amd64",
+            Self::Arm64 => "ARM64",
+        }
+    }
+}
+
+fn verify_arm_boot(tree: &Path) -> Result<()> {
+    let mut loader = File::open(tree.join("efi/boot/bootaa64.efi"))?;
+    let mut header = [0; 64];
+    loader.read_exact(&mut header)?;
+    if header[..2] != *b"MZ" {
+        return Err("ARM64 fallback loader is not a PE image".into());
+    }
+    loader.seek(SeekFrom::Start(u64::from(u32::from_le_bytes(
+        header[60..64].try_into()?,
+    ))))?;
+    let mut pe = [0; 6];
+    loader.read_exact(&mut pe)?;
+    if pe[..4] != *b"PE\0\0" || u16::from_le_bytes(pe[4..6].try_into()?) != 0xaa64 {
+        return Err("fallback loader must target ARM64".into());
+    }
+    Ok(())
+}
 
 fn manifest(
     root: &Path,
@@ -139,48 +172,61 @@ fn prepare_2023_boot(tree: &Path, output: &Path, unattended_pro: bool) -> Result
 
 fn profile_config(
     profile: Option<&str>,
-) -> Result<(&'static str, &'static str, &'static str, bool)> {
+) -> Result<(&'static str, &'static str, &'static str, bool, Architecture)> {
     Ok(match profile {
         Some("win7") => (
             "windows7",
             "ee69f3e9b86ff973f632db8e01700c5724ef78420b175d25bae6ead90f6805a7",
             "w7",
             false,
+            Architecture::Amd64,
         ),
         Some("win10") => (
             "windows10",
             "c90a6df8997bf49e56b9673982f3e80745058723a707aef8f22998ae6479597d",
             "w10",
             false,
+            Architecture::Amd64,
         ),
         Some("win11") => (
             "windows11",
             "4f59662a96fc1da48c1b415d6c369d08af55ddd64e8f1c84e0166d9e50405d7a",
             "w11",
             false,
+            Architecture::Amd64,
         ),
         Some("win11-enterprise-26h2") => (
             "windows11-enterprise-26h2",
             "bc3f24086ebadc94489066b5ad78089e2cf5c3491e90e790bb81a2b199c10e38",
             "w11",
             true,
+            Architecture::Amd64,
         ),
         Some("win11-pro-26h2") => (
             "windows11-pro-26h2",
             "bd4307df32bc8af33b39ccecb1174aeb345386630f89a2b86c7a4e36b55ea650",
             "w11",
             true,
+            Architecture::Amd64,
+        ),
+        Some("win11-iot-arm64") => (
+            "windows11-iot-arm64",
+            "f8f068cdc90c894a55d8c8530db7c193234ba57bb11d33b71383839ac41246b4",
+            "w11",
+            false,
+            Architecture::Arm64,
         ),
         Some("server2025") => (
             "server2025",
             "7b052573ba7894c9924e3e87ba732ccd354d18cb75a883efa9b900ea125bfd51",
             "2k25",
             false,
+            Architecture::Amd64,
         ),
         _ => {
             return Err(
-                "profile must be win7, win10, win11, win11-enterprise-26h2, win11-pro-26h2 or \
-                 server2025"
+                "profile must be win7, win10, win11, win11-enterprise-26h2, win11-pro-26h2, \
+                 win11-iot-arm64 or server2025"
                     .into(),
             );
         }
@@ -201,6 +247,7 @@ fn read_answer(path: &Path) -> Result<Vec<u8>> {
 fn prepare_install_files(
     drivers: &Path,
     driver: &str,
+    architecture: Architecture,
     output: &Path,
     tree: &Path,
     answer: Option<Vec<u8>>,
@@ -208,7 +255,7 @@ fn prepare_install_files(
     let automatic = tree.join("$WinPEDriver$");
     fs::create_dir(&automatic)?;
     let driver_tree = output.join("driver-tree");
-    let driver_path = format!("viostor/{driver}/amd64");
+    let driver_path = format!("viostor/{driver}/{}", architecture.directory());
     extract(drivers, &driver_tree, &[&format!("{driver_path}/*")])?;
     let destination = automatic.join("viostor");
     fs::create_dir(&destination)?;
@@ -218,20 +265,25 @@ fn prepare_install_files(
             destination.join(name),
         )?;
     }
-    let network = format!("NetKVM/{driver}/amd64");
-    let network_tree = output.join("network-driver-tree");
-    extract(drivers, &network_tree, &[&format!("{network}/*")])?;
-    let destination = automatic.join("NetKVM");
-    fs::create_dir(&destination)?;
-    for entry in fs::read_dir(network_tree.join(network))? {
-        let entry = entry?;
-        if !entry.file_type()?.is_file() {
-            return Err("unexpected network driver entry".into());
+    fs::remove_dir_all(driver_tree)?;
+    let components: &[&str] = match architecture {
+        Architecture::Amd64 => &["NetKVM"],
+        Architecture::Arm64 => &["NetKVM", "vioinput", "viosock"],
+    };
+    for component in components {
+        let package = format!("{component}/{driver}/{}", architecture.directory());
+        let extracted = output.join("component-driver-tree");
+        extract(drivers, &extracted, &[&format!("{package}/*")])?;
+        let destination = automatic.join(component);
+        fs::create_dir(&destination)?;
+        for entry in fs::read_dir(extracted.join(package))? {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                return Err("unexpected driver package entry".into());
+            }
+            fs::copy(entry.path(), destination.join(entry.file_name()))?;
         }
-        fs::copy(entry.path(), destination.join(entry.file_name()))?;
-    }
-    for directory in [driver_tree, network_tree] {
-        fs::remove_dir_all(directory)?;
+        fs::remove_dir_all(extracted)?;
     }
     if let Some(answer) = answer {
         if tree.join("Autounattend.xml").exists() {
@@ -245,16 +297,18 @@ fn prepare_install_files(
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).map(PathBuf::from).collect();
     let [profile, source, drivers, output, extra @ ..] = args.as_slice() else {
-        return Err("usage: prepare-nt6 \
-                    win7|win10|win11|win11-enterprise-26h2|win11-pro-26h2|server2025 \
-                    WINDOWS_ISO VIRTIO_DRIVER_ISO NEW_OUTPUT_DIRECTORY [ANSWER_XML]"
-            .into());
+        return Err(
+            "usage: prepare-nt6 \
+             win7|win10|win11|win11-enterprise-26h2|win11-pro-26h2|win11-iot-arm64|server2025 \
+             WINDOWS_ISO VIRTIO_DRIVER_ISO NEW_OUTPUT_DIRECTORY [ANSWER_XML]"
+                .into(),
+        );
     };
     if extra.len() > 1 {
         return Err("at most one answer file is allowed".into());
     }
     let answer = extra.first().map(|path| read_answer(path)).transpose()?;
-    let (name, hash, driver, uses_2023_boot) = profile_config(profile.to_str())?;
+    let (name, hash, driver, uses_2023_boot, architecture) = profile_config(profile.to_str())?;
     for (path, expected) in [
         (source, hash),
         (
@@ -267,7 +321,10 @@ fn main() -> Result<()> {
     let output_guard = OutputDirectory::create(output)?;
     let tree = output.join("tree");
     extract(source, &tree, &[])?;
-    verify_boot_images(source, &tree)?;
+    match architecture {
+        Architecture::Amd64 => verify_boot_images(source, &tree)?,
+        Architecture::Arm64 => verify_arm_boot(&tree)?,
+    }
     if uses_2023_boot {
         prepare_2023_boot(
             &tree,
@@ -275,9 +332,24 @@ fn main() -> Result<()> {
             name == "windows11-pro-26h2" && answer.is_some(),
         )?;
     }
-    prepare_install_files(drivers, driver, output, &tree, answer)?;
+    prepare_install_files(drivers, driver, architecture, output, &tree, answer)?;
     let mut expected = BTreeMap::new();
     manifest(&tree, &tree, &mut expected)?;
+    let evidence: String = expected
+        .iter()
+        .map(|(path, (size, hash))| format!("{hash} {size} {}\n", path.display()))
+        .collect();
+    fs::write(output.join("files.sha256-sizes"), evidence)?;
+    if architecture == Architecture::Arm64 {
+        println!(
+            "Staged {} ARM64 payload files: {}. WIM servicing and GPT/FAT installer assembly \
+             remain required.",
+            expected.len(),
+            tree.display()
+        );
+        output_guard.finish();
+        return Ok(());
+    }
     let partial = output.join(format!("{name}-viostor.partial.iso"));
     run(Command::new("genisoimage")
         .args([
@@ -315,11 +387,6 @@ fn main() -> Result<()> {
             return Err(format!("rebuilt UDF file differs: {}", path.display()).into());
         }
     }
-    let evidence: String = expected
-        .iter()
-        .map(|(path, (size, hash))| format!("{hash} {size} {}\n", path.display()))
-        .collect();
-    fs::write(output.join("files.sha256-sizes"), evidence)?;
     let result = output.join(format!("{name}-viostor.iso"));
     fs::rename(partial, &result)?;
     fs::write(
@@ -352,6 +419,7 @@ mod tests {
                     "ee69f3e9b86ff973f632db8e01700c5724ef78420b175d25bae6ead90f6805a7",
                     "w7",
                     false,
+                    Architecture::Amd64,
                 ),
             ),
             (
@@ -361,6 +429,7 @@ mod tests {
                     "c90a6df8997bf49e56b9673982f3e80745058723a707aef8f22998ae6479597d",
                     "w10",
                     false,
+                    Architecture::Amd64,
                 ),
             ),
             (
@@ -370,6 +439,7 @@ mod tests {
                     "4f59662a96fc1da48c1b415d6c369d08af55ddd64e8f1c84e0166d9e50405d7a",
                     "w11",
                     false,
+                    Architecture::Amd64,
                 ),
             ),
             (
@@ -379,6 +449,7 @@ mod tests {
                     "bc3f24086ebadc94489066b5ad78089e2cf5c3491e90e790bb81a2b199c10e38",
                     "w11",
                     true,
+                    Architecture::Amd64,
                 ),
             ),
             (
@@ -388,6 +459,17 @@ mod tests {
                     "bd4307df32bc8af33b39ccecb1174aeb345386630f89a2b86c7a4e36b55ea650",
                     "w11",
                     true,
+                    Architecture::Amd64,
+                ),
+            ),
+            (
+                "win11-iot-arm64",
+                (
+                    "windows11-iot-arm64",
+                    "f8f068cdc90c894a55d8c8530db7c193234ba57bb11d33b71383839ac41246b4",
+                    "w11",
+                    false,
+                    Architecture::Arm64,
                 ),
             ),
             (
@@ -397,6 +479,7 @@ mod tests {
                     "7b052573ba7894c9924e3e87ba732ccd354d18cb75a883efa9b900ea125bfd51",
                     "2k25",
                     false,
+                    Architecture::Amd64,
                 ),
             ),
         ] {
@@ -404,6 +487,32 @@ mod tests {
         }
         assert!(profile_config(Some("windows-server-latest.iso")).is_err());
         assert!(profile_config(None).is_err());
+    }
+
+    #[test]
+    fn arm_fallback_loader_rejects_wrong_machine_and_invalid_headers() {
+        let root = std::env::current_dir()
+            .unwrap()
+            .join("build")
+            .join(format!("nt6-arm-loader-fixture-{}", std::process::id()));
+        let _owner = OutputDirectory::create(&root).unwrap();
+        fs::create_dir_all(root.join("efi/boot")).unwrap();
+        let path = root.join("efi/boot/bootaa64.efi");
+        let mut valid = [0; 70];
+        valid[..2].copy_from_slice(b"MZ");
+        valid[60..64].copy_from_slice(&64u32.to_le_bytes());
+        valid[64..68].copy_from_slice(b"PE\0\0");
+        valid[68..70].copy_from_slice(&0xaa64u16.to_le_bytes());
+        fs::write(&path, valid).unwrap();
+        verify_arm_boot(&root).unwrap();
+        for (offset, bytes) in [(0, b"XX".as_slice()), (64, b"PX"), (68, &[0x64, 0x86])] {
+            let mut invalid = valid;
+            invalid[offset..offset + bytes.len()].copy_from_slice(bytes);
+            fs::write(&path, invalid).unwrap();
+            assert!(verify_arm_boot(&root).is_err());
+        }
+        fs::write(&path, &valid[..69]).unwrap();
+        assert!(verify_arm_boot(&root).is_err());
     }
 
     #[test]
@@ -457,25 +566,43 @@ mod tests {
         }
     }
 
-    fn check_automatic_drivers(with_answer: bool) {
+    fn check_automatic_drivers(with_answer: bool, architecture: Architecture) {
         let root = std::env::current_dir().unwrap().join("build").join(format!(
-            "nt6-driver-fixture-{}-{with_answer}",
-            std::process::id()
+            "nt6-driver-fixture-{}-{with_answer}-{}",
+            std::process::id(),
+            architecture.directory()
         ));
         let _owner = OutputDirectory::create(&root).unwrap();
         let source = root.join("source");
         let tree = root.join("tree");
         fs::create_dir(&tree).unwrap();
         let mut selected = BTreeMap::new();
-        for component in ["viostor", "NetKVM"] {
-            for (version, arch) in [("w11", "amd64"), ("w10", "amd64"), ("w11", "x86")] {
+        for component in ["viostor", "NetKVM", "vioinput", "viosock"] {
+            for (version, arch) in [
+                ("w11", "amd64"),
+                ("w10", "amd64"),
+                ("w11", "x86"),
+                ("w11", "ARM64"),
+            ] {
                 let directory = source.join(component).join(version).join(arch);
                 fs::create_dir_all(&directory).unwrap();
-                for extension in ["inf", "sys", "cat"] {
-                    let name = format!("{}.{}", component.to_ascii_lowercase(), extension);
+                let mut names: Vec<_> = ["inf", "sys", "cat"]
+                    .map(|extension| format!("{}.{}", component.to_ascii_lowercase(), extension))
+                    .into();
+                let dependencies: &[&str] = match component {
+                    "vioinput" => &["viohidkmdf.sys"],
+                    "viosock" => &["viosocklib.dll", "viosockwspsvc.exe", "vstbridge.exe"],
+                    _ => &[],
+                };
+                names.extend(dependencies.iter().map(|name| (*name).to_owned()));
+                for name in names {
                     let bytes = format!("{component}/{version}/{arch}/{name}").into_bytes();
                     fs::write(directory.join(&name), &bytes).unwrap();
-                    if version == "w11" && arch == "amd64" {
+                    if version == "w11"
+                        && arch == architecture.directory()
+                        && (matches!(component, "viostor" | "NetKVM")
+                            || architecture == Architecture::Arm64)
+                    {
                         selected.insert(Path::new(component).join(name), bytes);
                     }
                 }
@@ -485,11 +612,11 @@ mod tests {
         run(Command::new("7z")
             .args(["a", "-tzip", "-bd"])
             .arg(&archive)
-            .args(["viostor", "NetKVM"])
+            .args(["viostor", "NetKVM", "vioinput", "viosock"])
             .current_dir(&source))
         .unwrap();
         let answer = with_answer.then(|| b"<unattend/>".to_vec());
-        prepare_install_files(&archive, "w11", &root, &tree, answer.clone()).unwrap();
+        prepare_install_files(&archive, "w11", architecture, &root, &tree, answer.clone()).unwrap();
         let automatic = tree.join("$WinPEDriver$");
         assert!(
             automatic.is_dir(),
@@ -507,11 +634,15 @@ mod tests {
 
     #[test]
     fn graphical_media_has_automatic_storage_and_network_drivers() {
-        check_automatic_drivers(false);
+        for architecture in [Architecture::Amd64, Architecture::Arm64] {
+            check_automatic_drivers(false, architecture);
+        }
     }
 
     #[test]
     fn unattended_media_has_the_same_automatic_driver_layout() {
-        check_automatic_drivers(true);
+        for architecture in [Architecture::Amd64, Architecture::Arm64] {
+            check_automatic_drivers(true, architecture);
+        }
     }
 }
