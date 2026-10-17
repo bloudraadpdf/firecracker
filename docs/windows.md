@@ -215,7 +215,7 @@ and the separate [ARM64 validation](windows-arm64.md) for that architecture.
 
 ## Snapshots
 
-This branch uses snapshot format 32.0.0. It saves the selected PCI transport,
+This branch uses snapshot format 33.0.0. It saves the selected PCI transport,
 firmware profile and system UUID, CET/Hyper-V processor state, ACPI timer/power
 registers, CMOS/RTC state and optional console, TPM and authenticated-variable
 checkpoints. Restore recreates the saved PC timer group, independently of the
@@ -229,6 +229,15 @@ See [the validation record](windows-validation.md) and
 The RTC follows host UTC plus the saved guest adjustment, including elapsed time
 while the VM is stopped. It provides periodic, alarm and update interrupts on
 reserved IRQ 8. Register C reads acknowledge pending flags.
+
+The conventional PC hardware group routes VM Generation ID notifications through
+its existing SCI and GPE0. The generation device shares that interrupt owner;
+there is no separate GED device or generation interrupt in this hardware group.
+The GPE status and enable bits are saved. Default Linux and ARM hardware retain
+the existing GED route. This hardware choice does not infer a guest OS. Actual
+Windows driver polling and event-driven restore checks remain separate from ACPI
+table and host tests. XP's documented driver API supports polling, not
+event-driven queries.
 
 The VMClock device publishes generation and disruption counters. Its
 `clock_status` remains `UNKNOWN` and its `counter_id` remains `INVALID`; this

@@ -6,15 +6,22 @@ Windows support is experimental. Use the [AMD64 guide](windows.md),
 
 ## Current integration candidate
 
-The candidate uses snapshot format 32. Windows hardware and firmware require the
+The candidate uses snapshot format 33. Windows hardware and firmware require the
 default-off `windows` Cargo feature. Both builds retain the saved-state fields;
 the default build rejects Windows configuration before opening its backends.
 Ordinary Linux snapshots must restore between the two builds.
 
+The current correction adds conventional PC GPE status/enable state and routes
+VM Generation ID notification through the existing SCI. It has not yet been
+built or qualified. The results below apply to the preceding format-32
+implementation, not the new source or format-33 snapshots.
+
+### Last tested format-32 implementation
+
 The following checks used Rust 1.98.1 on native AMD64 Linux/KVM. The unit,
 standalone-tool and static results cover the same VMM, variable-helper and
-console-helper implementation inputs as this candidate. The functional checks
-use the candidate's release VMMs.
+console-helper implementation inputs of that format-32 candidate. The functional
+checks use its release VMMs.
 
 | Check                                                  | Result                                          |
 | ------------------------------------------------------ | ----------------------------------------------- |
@@ -43,16 +50,19 @@ The selected API/boot tests have 65 passes and two empty CPU-template skips; no
 custom CPU-template coverage is claimed. The 12 selected cycle cases are covered
 cumulatively across two runs, not by a single passing 12-case invocation.
 
-An installed Windows 7 Enterprise SP1 x64 reference completes installation of
-NetKVM 61.77.104.17200 with device Code 0, `IsSigned=True`, the pinned selected
-INF/SYS and the running `netkvm` service. This is current-boot installation and
-binding only. Cold retention, generation-counter binding and polling, TAP,
-CONNECT and restore qualification remain open for this candidate.
+On the format-32 implementation, an installed Windows 7 Enterprise SP1 x64
+reference retains the installed SSU and SHA-2 updates after a normal restart.
+NetKVM 61.77.104.17200 and Microsoft's generation-counter driver 6.3.9600.18080
+retain device Code 0, `IsSigned=True`, the pinned selected INF/SYS and running
+services. The KMDF runtime is running. Two actual driver queries return the same
+nonzero 16-byte generation ID, followed by normal shutdown. These checks do not
+qualify notification, TAP, CONNECT or restore. Cold driver retention and polling
+must also be repeated for the format-33 implementation.
 
 Current Windows installation, graphical input, security, TAP and CONNECT egress,
 and performance qualification remain open. The historical results below use
-format 31 and their matching binaries. They do not qualify format 32. Do not
-load an older saved state with the candidate.
+format 31 and their matching binaries. They do not qualify formats 32 or 33. Do
+not load an older saved state with the candidate.
 
 The variable helper is Rust and reuses the upstream AWS-LC versions and
 checksums: `aws-lc-rs` 1.18.0 and `aws-lc-sys` 0.44.0. Their existing backend
@@ -144,7 +154,7 @@ success.
 ## Open qualification
 
 Standard Windows 11 Pro, Server Core and Desktop, the remaining fresh
-installations and the current format-32 guest matrix remain unqualified. The
+installations and the current format-33 guest matrix remain unqualified. The
 earlier memory comparison against fork baseline `658ff27e` exceeded the normal
 performance gates. The final candidate must pass unchanged gates against the
 registered consumer base `c6655e5`, with default and Windows builds measured
