@@ -13,7 +13,8 @@ SeaVGABIOS for graphics and input. See the
 
 The source is SeaBIOS 1.17.0, commit `b52ca86e094d19b58e2304417787e96b940e39c6`.
 The patch writes ACKNOWLEDGE before DRIVER during virtio initialisation. The
-configuration builds SeaBIOS as a coreboot payload with serial output. Keep the
+configuration builds SeaBIOS as a coreboot payload. Firmware diagnostics use
+COM1 (`0x3f8`) at debug level 3; debug I/O-port output is disabled. Keep the
 configuration and patch with the firmware; an unpatched upstream build is not
 the tested platform.
 
@@ -58,12 +59,14 @@ start in long mode. The linker rejects an image that overlaps the ACPI handoff.
 
 SeaBIOS embeds build metadata, so digests can differ between builds. The
 original XP validation firmware has SHA-256
-`c5b4bb8a04bb2835eec685e80063f0e7dd55f736de432fbc4430b9518c73c959`. The
-preserved Rust source, linker script and SeaBIOS configuration match that test's
-inputs. A fresh build from these instructions produces
-`2c97c0e13ec572dd641a037c695c0b1bd9611ab6cd4601f7fa21187707fe4512`. XP passes
+`c5b4bb8a04bb2835eec685e80063f0e7dd55f736de432fbc4430b9518c73c959`. The retained
+historical Rust source, linker script and SeaBIOS configuration match that
+test's inputs. An earlier build with debug I/O-port output enabled produced
+`2c97c0e13ec572dd641a037c695c0b1bd9611ab6cd4601f7fa21187707fe4512`. XP passed
 cold boot, storage, HTTP/TCP egress, full and differential restore, and S5 with
-that build. Evidence is under `build/windows/seabios-pvh/run2`.
+that build. Evidence is under `build/windows/seabios-pvh/run2`. These historical
+results do not qualify the current COM1-only diagnostic configuration. Record
+new firmware digests and build provenance, then validate the new firmware.
 
 SeaBIOS carries its upstream licences in `COPYING`, `COPYING.LESSER` and source
 headers. The combined firmware embeds SeaBIOS; retain those licences and its

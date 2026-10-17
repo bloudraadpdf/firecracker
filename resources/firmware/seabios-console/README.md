@@ -4,6 +4,8 @@ Build SeaVGABIOS from SeaBIOS 1.17.0, revision
 `b52ca86e094d19b58e2304417787e96b940e39c6`. This is the same source revision as
 the [serial PVH firmware](../seabios/README.md). The display option ROM is a
 separate build. It uses the Bochs DISPI interface and PCI ID `1234:1111`.
+Firmware diagnostics use COM1 (`0x3f8`) at debug level 3; debug I/O-port output
+is disabled.
 
 The Firecracker VGA device is an independent Rust implementation. It does not
 incorporate QEMU or Bochs device code. SeaVGABIOS supplies the guest font and
@@ -90,6 +92,9 @@ KiB ROM BAR. Its ROM signature is `55aa`, its checksum is zero, and its PCIR
 vendor/device is `1234:1111`. The initial build digest was
 `7db37a45944ff051fe3b3f02bff33db5d414dbdc4b6dbc4ba14fb248133a44c7`. The filtered
 build digest is
-`4290493bd94206f4b886cc3a35716300ca9008f76afa4ddc9f7db2407fa8679d`. SeaBIOS
-embeds build metadata, so a later build can have a different digest. Keep each
-ROM immutable while a VM or snapshot refers to it.
+`4290493bd94206f4b886cc3a35716300ca9008f76afa4ddc9f7db2407fa8679d`. The earlier
+configuration enabled debug I/O-port output. These historical results do not
+qualify the current COM1-only diagnostic configuration. Record new ROM digests
+and build provenance, then validate the new firmware. SeaBIOS embeds build
+metadata, so a later build can have a different digest. Keep each ROM immutable
+while a VM or snapshot refers to it.
