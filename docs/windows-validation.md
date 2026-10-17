@@ -1,27 +1,31 @@
 # Windows guest validation
 
+The recorded format33 results below do not qualify the optional VMClock choice
+or format34. Rebuild snapshots and repeat the affected device, generation and
+transport checks before making those claims for the new code.
+
 Windows support is experimental. Use the [AMD64 guide](windows.md),
 [installation console](windows-console.md) and
 [secure platform guide](windows-secure-boot.md) for configuration.
 
-## Current integration candidate
+## Recorded format33 integration candidate
 
-The candidate uses snapshot format 33. Windows hardware and firmware require the
-default-off `windows` Cargo feature. Both builds retain the saved-state fields;
-the default build rejects Windows configuration before opening its backends.
-Ordinary Linux snapshots must restore between the two builds.
+The recorded candidate uses snapshot format 33. Windows hardware and firmware
+require the default-off `windows` Cargo feature. Both builds retain the
+saved-state fields; the default build rejects Windows configuration before
+opening its backends. Ordinary Linux snapshots must restore between the two
+builds.
 
-The current correction adds conventional PC GPE status/enable state and routes
-VM Generation ID notification through the existing SCI. Default and Windows
-release builds pass. The following checks used Rust 1.98.1 on native AMD64
-Linux/KVM.
+That correction adds conventional PC GPE status/enable state and routes VM
+Generation ID notification through the existing SCI. Default and Windows release
+builds pass. The following checks used Rust 1.98.1 on native AMD64 Linux/KVM.
 
-### Current host checks
+### Recorded host checks
 
-The full unit suites used the current production source. Subsequent changes were
-confined to test configuration and error assertions; both affected tests pass on
-the final source. Standalone-tool results cover unchanged implementation inputs.
-The functional checks use the current release VMMs.
+The full unit suites used the recorded production source. Subsequent changes
+were confined to test configuration and error assertions; both affected tests
+passed on that recorded source. Standalone-tool results cover unchanged
+implementation inputs. The functional checks used the recorded release VMMs.
 
 | Check                                                  | Result                                          |
 | ------------------------------------------------------ | ----------------------------------------------- |
@@ -58,9 +62,9 @@ invocation with unchanged test thresholds. An earlier cycle run failed on a
 passing run recorded no owned Firecracker executions and provides no usable
 trace; the pass does not establish a scheduler or storage-latency bound.
 
-### Current Windows 7 reference
+### Recorded Windows 7 reference
 
-On the current format-33 implementation, an installed Windows 7 Enterprise SP1
+On the recorded format-33 implementation, an installed Windows 7 Enterprise SP1
 x64 reference retains the installed SSU and SHA-2 updates after a normal
 restart. NetKVM 61.77.104.17200 and Microsoft's generation-counter driver
 6.3.9600.18080 retain device Code 0, `IsSigned=True`, the pinned selected
@@ -101,9 +105,9 @@ instances stop at snapshot boundaries; the final instance requests S5 and the
 VMM exits zero. Host process, mount and loop closure checks pass. This qualifies
 only the installed Win7 test-signing profile and fresh connections.
 
-### Current Windows XP reference
+### Recorded Windows XP reference
 
-On the current format-33 implementation, the installed XP Professional SP3 x86
+On the recorded format-33 implementation, the installed XP Professional SP3 x86
 reference has the genuine Microsoft generation-counter package 6.3.9600.17831.
 Separate read-only catalogue-member checks accept its installed INF and SYS; WMI
 records the selected signed driver. After a distinct cold boot, the device has
@@ -180,8 +184,8 @@ clean device inventory also remain open.
 Current Windows installation, the remaining graphical input and display matrix,
 security, the other guests' TAP routes and performance qualification remain
 open. The historical results below use format 31 and their matching binaries.
-They do not qualify formats 32 or 33. Do not load an older saved state with the
-candidate.
+They do not qualify later snapshot formats. Do not load an older saved state
+with the candidate.
 
 The variable helper is Rust and reuses the upstream AWS-LC versions and
 checksums: `aws-lc-rs` 1.18.0 and `aws-lc-sys` 0.44.0. Their existing backend
@@ -213,9 +217,9 @@ accounting and offline disk checks bind the results to the three phases. All
 listed runs finish with clean guest S5 and VMM exit zero.
 
 XP and Windows 7 use the documented external test-signed Viosock packages. The
-format-31 Windows 7 inventory retains three ACPI Code 28 devices. Current
+format-31 Windows 7 inventory retains three ACPI Code 28 devices. Recorded
 Windows 7 generation-counter binding, polling and TAP restore results are
-described above. Current XP driver-query, TAP and CONNECT restore results are
+described above. Recorded XP driver-query, TAP and CONNECT restore results are
 also described above, with their separate installed references, tested inputs
 and failure qualifications. XP results establish polling only. Historical egress
 results do not prove six generation reads across restores. VMClock recognition
@@ -275,11 +279,11 @@ success.
 ## Open qualification
 
 Standard Windows 11 Pro, Server Core and Desktop, and the remaining fresh
-installations remain unqualified. The current format-33 guest matrix is
-incomplete. The earlier memory comparison against fork baseline `658ff27e`
-exceeded the normal performance gates. The final candidate must pass unchanged
-gates against the registered consumer base `c6655e5`, with default and Windows
-builds measured separately.
+installations remain unqualified. The recorded format-33 guest matrix is
+incomplete and does not qualify format 34. The earlier memory comparison against
+fork baseline `658ff27e` exceeded the normal performance gates. The final
+candidate must pass unchanged gates against the registered consumer base
+`c6655e5`, with default and Windows builds measured separately.
 
 The native AMD64 host runs Linux 7.0.0-60009-generic. Its results do not qualify
 the supported host-kernel matrix. [ARM64 results](windows-arm64.md) are

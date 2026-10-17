@@ -419,7 +419,9 @@ pub fn build_microvm_for_boot(
             .map_err(StartMicrovmError::UefiVars)?;
     }
     device_manager.attach_vmgenid_device(&kvm_vm)?;
-    device_manager.attach_vmclock_device(&kvm_vm)?;
+    if vm_resources.machine_config.vmclock {
+        device_manager.attach_vmclock_device(&kvm_vm)?;
+    }
 
     #[cfg(target_arch = "aarch64")]
     if vcpus[0].kvm_vcpu.supports_pvtime() {

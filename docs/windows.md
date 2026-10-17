@@ -3,10 +3,10 @@
 Historical tests ran AMD64 Windows Server 2025 Core, Windows 10, Windows 11, XP
 x86 and Windows 7 x64 on Linux/KVM with virtio PCI storage, networking and
 full/differential snapshots. Support is experimental; the
-[validation record](windows-validation.md#current-integration-candidate)
-separates current checks from those earlier results. This adds no Windows host
-backend. See the [ARM64 guide](windows-arm64.md) for the separate firmware path
-and its validation status.
+[validation record](windows-validation.md#recorded-format33-integration-candidate)
+distinguishes recorded results from open qualification. This adds no Windows
+host backend. See the [ARM64 guide](windows-arm64.md) for the separate firmware
+path and its validation status.
 
 ## Build
 
@@ -56,7 +56,8 @@ Example configuration for a prepared disk:
   "machine-config": {
     "vcpu_count": 2,
     "mem_size_mib": 4096,
-    "hyperv": true
+    "hyperv": true,
+    "vmclock": false
   },
   "drives": [{
     "drive_id": "windows",
@@ -88,6 +89,16 @@ does not change on snapshot restore.
 The terminal is the guest serial console. Once SAC reports that CMD is
 available, enter `cmd`, wait for the new channel, then enter `ch -si 1`. Press
 Enter and follow the login prompts individually.
+
+Set `"vmclock": false` for a Windows configuration that does not use the VMClock
+interface. This removes the device and its page/interrupt allocation; it does
+not hide an ACPI node or install a null driver. VM Generation ID is a separate
+device and remains present. VMClock defaults to `true` for existing
+configurations on both architectures. PUT `/machine-config` resets an omitted
+`vmclock` field to `true`; PATCH preserves the current value when the field is
+omitted. The default true value is omitted from configuration responses. This is
+a preboot choice, not a runtime device toggle. Snapshot restore uses the saved
+presence and does not accept an override.
 
 `hyperv` defaults to `false`. PUT `/machine-config` resets an omitted `hyperv`
 field to `false`; PATCH preserves an omitted field. The field is available only
@@ -215,16 +226,17 @@ and the separate [ARM64 validation](windows-arm64.md) for that architecture.
 
 ## Snapshots
 
-This branch uses snapshot format 33.0.0. It saves the selected PCI transport,
-firmware profile and system UUID, CET/Hyper-V processor state, ACPI timer/power
-registers, CMOS/RTC state and optional console, TPM and authenticated-variable
-checkpoints. Restore recreates the saved PC timer group, independently of the
-boot configuration, and rejects a snapshot with only one of RTC and power state.
-Format 29 changes firmware profile encoding; it cannot load format 28 snapshots.
-Use the matching earlier VMM for older snapshots. The optical media path is part
-of console configuration and is not duplicated in the optical device checkpoint.
-See [the validation record](windows-validation.md) and
-[the secure platform](windows-secure-boot.md).
+This branch uses snapshot format 34.0.0. VMClock presence is optional saved
+state; format33 files require their matching older binary. It saves the selected
+PCI transport, firmware profile and system UUID, CET/Hyper-V processor state,
+ACPI timer/power registers, CMOS/RTC state and optional console, TPM and
+authenticated-variable checkpoints. Restore recreates the saved PC timer group,
+independently of the boot configuration, and rejects a snapshot with only one of
+RTC and power state. Format 29 changes firmware profile encoding; it cannot load
+format 28 snapshots. Use the matching earlier VMM for older snapshots. The
+optical media path is part of console configuration and is not duplicated in the
+optical device checkpoint. See [the validation record](windows-validation.md)
+and [the secure platform](windows-secure-boot.md).
 
 The RTC follows host UTC plus the saved guest adjustment, including elapsed time
 while the VM is stopped. It provides periodic, alarm and update interrupts on

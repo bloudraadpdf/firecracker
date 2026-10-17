@@ -3,7 +3,7 @@
 Standard Windows 11 Pro and Enterprise are in the acceptance scope. Historical
 format-31 Enterprise Evaluation tests passed installation, Secure Boot, TPM,
 cold/full/differential restore and both egress paths on the recorded build. The
-[validation record](windows-validation.md#current-integration-candidate)
+[validation record](windows-validation.md#recorded-format33-integration-candidate)
 separates those results from current qualification. Support is experimental. The
 prior IoT Enterprise LTSC result does not qualify these editions. Do not bypass
 Setup's hardware checks. Windows 11 Pro has not been separately installed or
@@ -67,7 +67,7 @@ update.
 
 ## Checkpoints
 
-Snapshot format 33.0.0 includes complete TPM and variable-service state,
+Snapshot format 34.0.0 includes complete TPM and variable-service state,
 physical-presence registers and the firmware profile/system UUID. Earlier
 snapshots require the matching earlier VMM; there is no implicit conversion.
 Display memory, TPM state and variables fit the bounded 32 MiB snapshot reader.
