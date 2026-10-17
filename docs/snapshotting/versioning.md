@@ -83,7 +83,7 @@ The current implementation relies on the
 
 ## Snapshot compatibility
 
-This fork uses format32.0.0. The x86 PIT state is optional and records whether
+This fork uses format33.0.0. The x86 PIT state is optional and records whether
 the timer exists; restore uses that saved hardware choice. The format also
 contains optional virtio-input state, the ARM64 console/security topology and
 the optional AMD64 VGA expansion ROM. The input device owns its pending frames,
@@ -91,9 +91,17 @@ accepted and delivered keys, position and guest/pending lock LEDs. Console
 restore reuses that saved PCI backend. The AMD64 display saves two MMIO mappings
 and a typed optional ROM containing its bytes, mapping and PCI ROM BAR state; an
 absent ROM has no mapping or ROM BAR. The console's saved configuration also
-records the optional ROM path. Format29.0.0, format30.0.0 and format31.0.0 files
-require their matching older binaries; format32 does not decode them. Snapshot
-state remains specific to its CPU architecture.
+records the optional ROM path. Format29.0.0 through format32.0.0 files require
+their matching older binaries; format33 does not decode them. Snapshot state
+remains specific to its CPU architecture.
+
+The conventional PC event state also saves GPE0 status and enable bits. Its VM
+Generation ID notification uses that group's shared SCI and a GPE method,
+without a separate GED interrupt or allocation. Restore uses the saved complete
+PC hardware pair, validates its route before constructing devices, writes the
+new generation ID, then latches the event before vCPUs resume. Default Linux and
+ARM hardware retain the dedicated GED route. Both Cargo builds use the same
+format33 schema; no format32 decoder or migration is provided.
 
 ### Host kernel
 

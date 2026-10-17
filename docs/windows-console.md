@@ -269,7 +269,7 @@ would otherwise select installation media again.
 AMD64 console snapshots contain display memory and registers, keyboard/mouse
 queues, held input, pending releases, keyboard LEDs and pending lock updates,
 USB controller/HID state, PCI state, optical transfer state and media identity.
-The current snapshot format is 32.0.0. Display state adds about 16 MiB; the
+The current snapshot format is 33.0.0. Display state adds about 16 MiB; the
 bounded snapshot reader accepts at most 32 MiB. The guest disk remains a
 separate artifact, as with ordinary Firecracker snapshots.
 
@@ -278,15 +278,17 @@ state in the PCI device manager. The console reuses that backend on restore; it
 does not save a second held-key or LED state. Pending frames, partial-frame
 cursor, position, held releases and guest/pending lock LEDs travel with Input.
 Missing, stray or mismatched console/input topology is rejected before backend
-attachment. Format29 through format31 snapshots require their matching older
-binaries; format32 has no decoder for them. Snapshots do not move between AMD64
+attachment. Format29 through format32 snapshots require their matching older
+binaries; format33 has no decoder for them. Snapshots do not move between AMD64
 and ARM64.
 
-The Windows 11 test edition is IoT Enterprise LTSC 2024. It passed Setup's
-hardware check without registry bypasses. The optional
+The historical format31 Windows 11 test edition was IoT Enterprise LTSC 2024. It
+passed Setup's hardware check without registry bypasses. The optional
 [secure platform](windows-secure-boot.md) adds TPM and protected firmware
-variables. Standard Windows 11 Enterprise Evaluation passes the recorded secure
-matrix; other editions are not inferred from that result.
+variables. The recorded Standard Windows 11 Enterprise Evaluation secure matrix
+also used format31. See [current validation](windows-validation.md) for the
+current source and format; those historical results do not qualify format33 or
+other editions.
 
 The console reserves the VGA aperture at `0xa0000..0xbffff` and platform table
 memory at 32..33 MiB. The IDE interrupt uses PCI GSI16 in native mode and IRQ14
@@ -340,11 +342,13 @@ not leave an empty CD-ROM attached. Disk, network and vsock devices remain
 separate explicit configuration choices. TPM and protected firmware variables
 are also opt-in.
 
-The existing platform still exposes serial, RTC, i8042, VM Generation ID, GED
-and VMClock. XP and Windows 7 do not bind drivers to all these ACPI features. XP
-also retains a VGA device warning while its basic display works. These
-limitations are separate from the keyboard and pointer drivers; do not report a
-completely clean device inventory for those guests.
+The conventional PC platform exposes serial, RTC, i8042, VM Generation ID and
+VMClock. Generation notifications use its existing SCI/GPE hardware, without a
+separate GED device. Default Linux and ARM hardware retain GED. XP and Windows 7
+do not bind drivers to all these ACPI features. XP also retains a VGA device
+warning while its basic display works. These limitations are separate from the
+keyboard and pointer drivers; do not report a completely clean device inventory
+for those guests.
 
 The bridge uses the guest keyboard LEDs to preserve printable ASCII case and
 punctuation with Caps Lock and Num Lock. It waits at most 100 ms for a pending

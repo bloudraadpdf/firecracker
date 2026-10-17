@@ -188,7 +188,7 @@ pub enum CreateSnapshotError {
 }
 
 /// Snapshot version
-pub const SNAPSHOT_VERSION: Version = Version::new(32, 0, 0);
+pub const SNAPSHOT_VERSION: Version = Version::new(33, 0, 0);
 
 /// Creates a Microvm snapshot.
 pub fn create_snapshot(
@@ -870,9 +870,25 @@ mod tests {
             )
             .unwrap();
         manager.console.as_ref().unwrap().fill_test_framebuffer();
+        #[cfg(target_arch = "x86_64")]
+        {
+            use crate::vstate::bus::BusDevice;
+            let mut power = manager.pc_devices().unwrap().acpi_power.lock().unwrap();
+            power.write(crate::devices::legacy::acpi::POWER_PORT, 13, &[1]);
+            power.notify_vmgenid().unwrap();
+        }
+
         let mut state = MicrovmState {
             device_states: crate::device_manager::DevicesState {
                 console: manager.save_console(),
+                #[cfg(target_arch = "x86_64")]
+                cmos_state: manager
+                    .pc_devices()
+                    .map(|pc| pc.cmos.lock().unwrap().save()),
+                #[cfg(target_arch = "x86_64")]
+                power_state: manager
+                    .pc_devices()
+                    .map(|pc| pc.acpi_power.lock().unwrap().save()),
                 #[cfg(target_arch = "aarch64")]
                 virtio_state: {
                     let crate::device_manager::VirtioDevices::Pci(pci) = &manager.virtio_devices

@@ -28,7 +28,8 @@ pub const PM1_EVENT_PORT: u64 = POWER_PORT + 2;
 pub const PM1_CONTROL_PORT: u64 = POWER_PORT + 6;
 pub const TIMER_PORT: u64 = POWER_PORT + 8;
 pub const SCI_GSI: u32 = 3;
-pub const PORT_COUNT: usize = 12;
+pub const GPE0_PORT: u64 = POWER_PORT + 12;
+pub const PORT_COUNT: usize = 14;
 #[cfg(feature = "windows")]
 const TIMER_HZ: u64 = 3_579_545;
 #[cfg(feature = "windows")]
@@ -41,6 +42,25 @@ pub struct AcpiPowerState {
     status: u16,
     enable: u16,
     control: u16,
+    gpe_status: u8,
+    gpe_enable: u8,
+}
+
+impl AcpiPowerState {
+    pub(crate) fn validate(&self) -> std::io::Result<()> {
+        if self.status & !1 != 0
+            || self.enable & !1 != 0
+            || self.control & !0x1c00 != 0
+            || self.gpe_status & !1 != 0
+            || self.gpe_enable & !1 != 0
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid ACPI event or control state",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -101,16 +121,25 @@ impl AcpiPower {
         );
     }
 
-    fn update_sci(&mut self) {
-        let pending = self.state.status & self.state.enable & 1 != 0;
-        if pending
-            && !self.sci_asserted
-            && let Err(err) = self.sci_evt.write(1)
-        {
-            error!("Failed to signal ACPI SCI: {err}");
-            return;
+    fn signal_sci(&mut self) -> std::io::Result<()> {
+        let pending = self.state.status & self.state.enable & 1 != 0
+            || self.state.gpe_status & self.state.gpe_enable & 1 != 0;
+        if pending && !self.sci_asserted {
+            self.sci_evt.write(1)?;
         }
         self.sci_asserted = pending;
+        Ok(())
+    }
+
+    fn update_sci(&mut self) {
+        if let Err(err) = self.signal_sci() {
+            error!("Failed to signal ACPI SCI: {err}");
+        }
+    }
+
+    pub(crate) fn notify_vmgenid(&mut self) -> std::io::Result<()> {
+        self.state.gpe_status |= 1;
+        self.signal_sci()
     }
 
     fn arm_timer(&mut self) {
@@ -128,19 +157,13 @@ impl AcpiPower {
     }
 
     pub fn restore(&mut self, state: &AcpiPowerState) -> std::io::Result<()> {
-        if state.status & !1 != 0 || state.enable & !1 != 0 || state.control & !0x1c00 != 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "invalid ACPI PM1 state",
-            ));
-        }
+        state.validate()?;
         self.state = state.clone();
         self.base_ticks = state.ticks;
         self.start = Instant::now();
         self.sci_asserted = false;
         self.arm_timer();
-        self.update_sci();
-        Ok(())
+        self.signal_sci()
     }
 
     fn shutdown(&self, reset: bool) {
@@ -169,6 +192,8 @@ impl BusDevice for AcpiPower {
                 .unwrap()
                 .to_le_bytes(),
         );
+        registers[12] = self.state.gpe_status;
+        registers[13] = self.state.gpe_enable;
         if let Ok(offset) = usize::try_from(offset)
             && let Some(end) = offset.checked_add(data.len())
             && let Some(value) = registers.get(offset..end)
@@ -184,7 +209,7 @@ impl BusDevice for AcpiPower {
         } else if let Ok(offset) = usize::try_from(offset)
             && let Some(end) = offset.checked_add(data.len())
             && offset >= 2
-            && end <= 8
+            && end <= PORT_COUNT
         {
             let mut sleep = false;
             for (address, byte) in (offset..end).zip(data) {
@@ -198,7 +223,9 @@ impl BusDevice for AcpiPower {
                         self.state.control = (self.state.control & !mask) | (value & 0x1c00);
                         sleep |= value & 0x2000 != 0;
                     }
-                    _ => unreachable!(),
+                    12 => self.state.gpe_status &= !(*byte & 1),
+                    13 => self.state.gpe_enable = *byte & 1,
+                    _ => {}
                 }
             }
             if sleep && self.state.control == 0x1400 {
@@ -302,6 +329,103 @@ mod tests {
             restored.lock().unwrap().sci_evt.read().unwrap_err().kind(),
             std::io::ErrorKind::WouldBlock
         );
+    }
+
+    #[test]
+    fn generation_event_latches_masks_and_resamples_both_sources() {
+        for first in [2, 12] {
+            let power = Arc::new(Mutex::new(
+                AcpiPower::new(EventFd::new(libc::EFD_NONBLOCK).unwrap()).unwrap(),
+            ));
+            let mut events = crate::EventManager::new().unwrap();
+            events.add_subscriber(power.clone());
+            {
+                let mut power = power.lock().unwrap();
+                power.notify_vmgenid().unwrap();
+                let mut gpe = [0; 2];
+                power.read(POWER_PORT, 12, &mut gpe);
+                assert_eq!(gpe, [1, 0]);
+                assert_eq!(
+                    power.sci_evt.read().unwrap_err().kind(),
+                    std::io::ErrorKind::WouldBlock
+                );
+                power.write(POWER_PORT, 13, &[0xff]);
+                assert_eq!(power.sci_evt.read().unwrap(), 1);
+                power.advance_to(TIMER_HALF_PERIOD);
+                power.write(POWER_PORT, 4, &[1]);
+                power.write(POWER_PORT, first, &[1]);
+                power.resample_evt.write(1).unwrap();
+            }
+            events.run_with_timeout(1000).unwrap();
+            {
+                let mut power = power.lock().unwrap();
+                assert_eq!(power.sci_evt.read().unwrap(), 1);
+                power.write(POWER_PORT, if first == 2 { 12 } else { 2 }, &[1]);
+                power.resample_evt.write(1).unwrap();
+            }
+            events.run_with_timeout(1000).unwrap();
+            let mut power = power.lock().unwrap();
+            assert_eq!(
+                power.sci_evt.read().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+            let mut gpe = [0; 2];
+            power.read(POWER_PORT, 12, &mut gpe);
+            assert_eq!(gpe, [0, 1]);
+        }
+    }
+
+    #[test]
+    fn disabled_generation_event_survives_restore_until_enabled() {
+        let mut source = AcpiPower::new(EventFd::new(libc::EFD_NONBLOCK).unwrap()).unwrap();
+        source.notify_vmgenid().unwrap();
+        let mut restored = AcpiPower::new(EventFd::new(libc::EFD_NONBLOCK).unwrap()).unwrap();
+        restored.restore(&source.save()).unwrap();
+        assert_eq!(
+            restored.sci_evt.read().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        restored.write(POWER_PORT, 13, &[1]);
+        assert_eq!(restored.sci_evt.read().unwrap(), 1);
+        let mut gpe = [0; 2];
+        restored.read(POWER_PORT, 12, &mut gpe);
+        assert_eq!(gpe, [1, 1]);
+    }
+
+    #[test]
+    fn generation_register_bounds_and_restore() {
+        let mut power = AcpiPower::new(EventFd::new(libc::EFD_NONBLOCK).unwrap()).unwrap();
+        power.write(POWER_PORT, 12, &[0xff, 0xff]);
+        power.notify_vmgenid().unwrap();
+        assert_eq!(power.sci_evt.read().unwrap(), 1);
+        power.write(POWER_PORT, 13, &[0, 0xff]);
+        let mut gpe = [0; 2];
+        power.read(POWER_PORT, 12, &mut gpe);
+        assert_eq!(gpe, [1, 1]);
+        let saved = power.save();
+        let mut restored = AcpiPower::new(EventFd::new(libc::EFD_NONBLOCK).unwrap()).unwrap();
+        restored.restore(&saved).unwrap();
+        assert_eq!(restored.sci_evt.read().unwrap(), 1);
+        restored.write(POWER_PORT, 12, &[1, 0]);
+        restored.read(POWER_PORT, 12, &mut gpe);
+        assert_eq!(gpe, [0, 0]);
+        for state in [
+            AcpiPowerState {
+                gpe_status: 2,
+                ..Default::default()
+            },
+            AcpiPowerState {
+                gpe_enable: 2,
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(
+                restored.restore(&state).unwrap_err().kind(),
+                std::io::ErrorKind::InvalidData
+            );
+        }
+        assert_eq!(restored.save().gpe_status, 0);
+        assert_eq!(restored.save().gpe_enable, 0);
     }
 
     #[test]
