@@ -60,9 +60,9 @@ pub struct VmInfo {
     pub boot_source: BootSourceConfig,
     /// Huge page configuration
     pub huge_pages: HugePageConfig,
-    /// Page-aligned physical ranges of the boot kernel executable segments.
+    /// Page-aligned physical ranges of the boot kernel code and read-only data.
     #[cfg(target_arch = "x86_64")]
-    pub kernel_executable_ranges: Vec<std::ops::Range<u64>>,
+    pub kernel_prefault_ranges: Vec<std::ops::Range<u64>>,
 }
 
 impl From<&VmResources> for VmInfo {
@@ -74,7 +74,7 @@ impl From<&VmResources> for VmInfo {
             boot_source: value.boot_source.config.clone(),
             huge_pages: value.machine_config.huge_pages,
             #[cfg(target_arch = "x86_64")]
-            kernel_executable_ranges: Vec::new(),
+            kernel_prefault_ranges: Vec::new(),
         }
     }
 }
@@ -89,7 +89,7 @@ impl From<&Vmm> for VmInfo {
             boot_source: value.boot_source_config.clone(),
             huge_pages: machine_config.huge_pages,
             #[cfg(target_arch = "x86_64")]
-            kernel_executable_ranges: value.kernel_executable_ranges.clone(),
+            kernel_prefault_ranges: value.kernel_prefault_ranges.clone(),
         }
     }
 }
@@ -841,7 +841,7 @@ mod tests {
             vm_info: VmInfo {
                 mem_size_mib: 1u64,
                 #[cfg(target_arch = "x86_64")]
-                kernel_executable_ranges: vec![0x1000..0x3000, 0x8000..0x9000],
+                kernel_prefault_ranges: vec![0x1000..0x3000, 0x8000..0x9000],
                 ..Default::default()
             },
             #[cfg(target_arch = "aarch64")]

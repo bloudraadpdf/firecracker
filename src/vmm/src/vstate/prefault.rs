@@ -21,8 +21,8 @@ use super::memory::GuestMemoryMmap;
 
 ioctl_iowr_nr!(KVM_PRE_FAULT_MEMORY, KVMIO, 0xd5, kvm_pre_fault_memory);
 
-pub(crate) fn kernel_executable_ranges(file: &File) -> io::Result<Vec<Range<u64>>> {
-    use linux_loader::elf::{Elf64_Ehdr, Elf64_Phdr, PF_X, PT_LOAD};
+pub(crate) fn kernel_prefault_ranges(file: &File) -> io::Result<Vec<Range<u64>>> {
+    use linux_loader::elf::{Elf64_Ehdr, Elf64_Phdr, PF_R, PF_W, PF_X, PT_LOAD};
 
     let mut magic = [0; 4];
     file.read_exact_at(&mut magic, 0)?;
@@ -50,7 +50,9 @@ pub(crate) fn kernel_executable_ranges(file: &File) -> io::Result<Vec<Range<u64>
             })?;
         let mut segment = Elf64_Phdr::default();
         file.read_exact_at(segment.as_mut_slice(), offset)?;
-        if segment.p_type != PT_LOAD || segment.p_flags & PF_X == 0 || segment.p_filesz == 0 {
+        let executable = segment.p_flags & PF_X != 0;
+        let read_only = segment.p_flags & (PF_R | PF_W) == PF_R;
+        if segment.p_type != PT_LOAD || segment.p_filesz == 0 || !(executable || read_only) {
             continue;
         }
         let end = segment
@@ -68,7 +70,7 @@ pub(crate) fn kernel_executable_ranges(file: &File) -> io::Result<Vec<Range<u64>
 pub(crate) fn prepare(
     vcpu: &VcpuFd,
     memory: &GuestMemoryMmap,
-    executable_ranges: &[Range<u64>],
+    prefault_ranges: &[Range<u64>],
 ) -> io::Result<()> {
     for region in memory.iter() {
         let Some(backing) = region.file_offset() else {
@@ -81,9 +83,9 @@ pub(crate) fn prepare(
         for slot in region.plugged_slots() {
             let guest_start = slot.guest_addr.raw_value();
             let guest_end = guest_start + slot.slice.len() as u64;
-            for executable in executable_ranges {
-                let start = executable.start.max(guest_start);
-                let end = executable.end.min(guest_end);
+            for range in prefault_ranges {
+                let start = range.start.max(guest_start);
+                let end = range.end.min(guest_end);
                 if start >= end {
                     continue;
                 }
@@ -179,25 +181,28 @@ mod tests {
     }
 
     #[test]
-    fn executable_ranges_use_physical_file_backed_segments() {
-        use linux_loader::elf::{Elf64_Ehdr, Elf64_Phdr, PF_X, PT_LOAD};
+    fn prefault_ranges_select_code_and_read_only_data() {
+        use linux_loader::elf::{Elf64_Ehdr, Elf64_Phdr, PF_R, PF_W, PF_X, PT_LOAD};
 
         let file = sparse_file();
         let header = Elf64_Ehdr {
             e_ident: [0x7f, b'E', b'L', b'F', 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             e_phoff: size_of::<Elf64_Ehdr>() as u64,
             e_phentsize: size_of::<Elf64_Phdr>() as u16,
-            e_phnum: 3,
+            e_phnum: 6,
             ..Default::default()
         };
         file.write_all_at(header.as_slice(), 0).unwrap();
-        for (index, flags) in [PF_X, 0, PF_X].into_iter().enumerate() {
+        for (index, flags) in [PF_X, PF_R, PF_R | PF_W, 0, PF_X | PF_W, PF_X]
+            .into_iter()
+            .enumerate()
+        {
             let segment = Elf64_Phdr {
                 p_type: PT_LOAD,
                 p_flags: flags,
                 p_paddr: 0x1001 + index as u64 * 0x10000,
                 p_vaddr: 0xffff_ffff_8000_0000,
-                p_filesz: if index == 2 { 0 } else { 4096 },
+                p_filesz: if index == 5 { 0 } else { 4096 },
                 p_memsz: 3 * 4096,
                 ..Default::default()
             };
@@ -207,13 +212,16 @@ mod tests {
             )
             .unwrap();
         }
-        assert_eq!(kernel_executable_ranges(&file).unwrap(), [0x1000..0x3000]);
+        assert_eq!(
+            kernel_prefault_ranges(&file).unwrap(),
+            [0x1000..0x3000, 0x11000..0x13000, 0x41000..0x43000]
+        );
         file.write_all_at(&[0, 0, 0, 0], 0).unwrap();
-        assert!(kernel_executable_ranges(&file).unwrap().is_empty());
+        assert!(kernel_prefault_ranges(&file).unwrap().is_empty());
         file.write_all_at(header.as_slice(), 0).unwrap();
         file.write_all_at(&[1], 5).unwrap();
         file.set_len(8).unwrap();
-        assert!(kernel_executable_ranges(&file).is_err());
+        assert!(kernel_prefault_ranges(&file).is_err());
     }
 
     #[test]

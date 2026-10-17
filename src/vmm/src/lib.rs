@@ -303,7 +303,7 @@ pub struct Vmm {
     pub machine_config: MachineConfig,
     boot_source_config: BootSourceConfig,
     #[cfg(target_arch = "x86_64")]
-    kernel_executable_ranges: Vec<std::ops::Range<u64>>,
+    kernel_prefault_ranges: Vec<std::ops::Range<u64>>,
     shutdown_exit_code: Option<FcExitCode>,
 
     /// VM object.
@@ -534,7 +534,7 @@ impl Vmm {
 
         #[cfg(target_arch = "x86_64")]
         let vm_info = VmInfo {
-            kernel_executable_ranges: self.kernel_executable_ranges.clone(),
+            kernel_prefault_ranges: self.kernel_prefault_ranges.clone(),
             ..vm_info.clone()
         };
         #[cfg(target_arch = "aarch64")]
