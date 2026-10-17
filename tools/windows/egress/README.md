@@ -450,4 +450,7 @@ reads the installed reader again from the stopped OS volume and writes
 `generation-verification.json` beside the ordinary results. It requires two
 equal nonzero IDs per stage, three different stage IDs, matching phase order and
 all normal TAP checks. The XP network path remains HTTP, DNS and TCP; this mode
-does not add TLS support. The rebuilt polling matrix needs guest qualification.
+does not add TLS support. The
+[validation record](../../../docs/windows-validation.md#current-windows-xp-reference)
+records the scoped format-33 TAP and CONNECT results. A new reader build needs
+its own guest and restore qualification.

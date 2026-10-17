@@ -4,9 +4,9 @@ The optional console provides a private display/input endpoint without guest
 networking or vsock. The AMD64 profile adds VGA/VBE graphics, a PS/2 keyboard, a
 USB HID pointer and optional read-only ATAPI installation media. The ARM64
 profile adds an MMIO display and one combined virtio keyboard/absolute pointer.
-The recorded AMD64 results are historical; see the matrix below and the
-[current validation boundary](windows-validation.md#current-integration-candidate).
-ARM64 guest qualification remains pending.
+See the [validation record](windows-validation.md#current-integration-candidate)
+for the scoped current XP input baseline and historical AMD64 results. ARM64
+guest qualification remains pending.
 
 The AMD64 device path is:
 
@@ -350,10 +350,17 @@ are also opt-in.
 The conventional PC platform exposes serial, RTC, i8042, VM Generation ID and
 VMClock. Generation notifications use its existing SCI/GPE hardware, without a
 separate GED device. Default Linux and ARM hardware retain GED. XP and Windows 7
-do not bind drivers to all these ACPI features. XP also retains a VGA device
-warning while its basic display works. These limitations are separate from the
-keyboard and pointer drivers; do not report a completely clean device inventory
-for those guests.
+do not bind drivers to all these ACPI features. The pre-installation XP baseline
+uses VgaSave and retains the unconfigured VGA device at Code 1 and AWS VMClock
+(`ACPI\AMZNC10C`) at Code 28; VGEN reports Code 0 with service `gencounter`. A
+later isolated VGA driver installation completed its wizard but its display
+remained black after a cold boot. Display-driver acceptance remains open. The
+modern signed AWS recognition package does not cover the XP x86 and legacy
+Windows 7 hardware-ID cases. No legacy VMClock recognition installation is
+qualified. Recognition alone would not establish clock use. These limits are
+separate from the recorded raw console CLI keyboard and pointer baseline; do not
+report a clean device inventory or full display-driver acceptance for these
+guests.
 
 The bridge uses the guest keyboard LEDs to preserve printable ASCII case and
 punctuation with Caps Lock and Num Lock. It waits at most 100 ms for a pending

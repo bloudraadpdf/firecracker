@@ -257,5 +257,7 @@ The prior ID stays in the original process memory across snapshots. The final
 guest transcript and sealed proxy stage watermarks bind these records to the
 normal three allowed bidirectional transfers and three zero-byte denials. There
 are no prearmed requests in this XP mode. Existing commands without the option
-retain their ordinary behaviour; the rebuilt reader still needs actual guest and
-current-format restore qualification.
+retain their ordinary behaviour. The
+[validation record](../../../docs/windows-validation.md#current-windows-xp-reference)
+identifies the qualified format-33 CONNECT run and its exact reader and host
+inputs. A new build or changed input needs its own guest and restore checks.
