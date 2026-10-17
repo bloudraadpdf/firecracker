@@ -9,6 +9,15 @@ guest=${WINDOWS_GUEST_ADDRESS:-172.30.254.2}
 offset=${WINDOWS_PARTITION_OFFSET:?Set partition byte offset}
 disk=${WINDOWS_CHECK_DISK:-$base/windows.raw}
 encoding=${WINDOWS_TRANSCRIPT_ENCODING:-UTF-8}
+generation=${WINDOWS_GENERATION_CHECKS:-0}
+if [[ "$generation" != 0 && "$generation" != 1 ]]; then
+    echo 'WINDOWS_GENERATION_CHECKS must be 0 or 1' >&2
+    exit 1
+fi
+if [[ "$generation" = 1 && "$tag" = XP ]]; then
+    echo 'XP does not support prearmed generation notifications' >&2
+    exit 1
+fi
 mkdir -p "$base/mnt"
 if mountpoint -q "$base/mnt"; then exit 1; fi
 bash "$(dirname "$0")/assert-disk-closed.sh" "$disk"
@@ -63,4 +72,9 @@ else
     printf '%s  %s\n' "$expected" "$run/final-data.bin" | sha256sum -c -
     test "$(stat -c %s "$run/final-data.bin")" = 65536
     grep -E "PASS ${tag}_|HTTPS|HTTP status" "$run/final-guest.txt"
+    if [[ "$generation" = 1 ]]; then
+        python3 "$(dirname "$0")/../generation/verify.py" "$run" --tag "$tag" \
+            --collect-from "$base/mnt/Users/Public/fc-gencounter-events" \
+            > "$run/generation-verification.json"
+    fi
 fi
