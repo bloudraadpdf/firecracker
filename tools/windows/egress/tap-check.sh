@@ -9,6 +9,13 @@ tag=${WINDOWS_GUEST_TAG:-WIN7}
 limit=${WINDOWS_WAIT_SECONDS:-240}
 [[ "$base" = /* && "$tag" =~ ^[A-Z0-9_-]+$ ]]
 run=$base/${WINDOWS_CHECK_RUN:-run1}
+generation=${WINDOWS_GENERATION_CHECKS:-0}
+[[ "$generation" = 0 || "$generation" = 1 ]]
+if [[ "$generation" = 1 && "$tag" = XP ]]; then
+    export WINDOWS_GENERATION_READER_GUARD=${WINDOWS_GENERATION_READER_GUARD:-$(realpath "$(dirname "$0")/../generation/check-reader.sh")}
+    export WINDOWS_GENERATION_READER_VERIFY=${WINDOWS_GENERATION_READER_VERIFY:-$(realpath "$(dirname "$0")/../generation/verify.py")}
+    export WINDOWS_GENERATION_MOUNT_HELPER=${WINDOWS_GENERATION_MOUNT_HELPER:-$(realpath "$(dirname "$0")/mount-state.sh")}
+fi
 if [[ ${WINDOWS_CHECK_RUNNING:-} != 1 ]]; then
     mkdir "$run"
     cp "$0" "$run/controller.sh"
@@ -16,6 +23,15 @@ if [[ ${WINDOWS_CHECK_RUNNING:-} != 1 ]]; then
     cp "$WINDOWS_DISK_GUARD" "$run/assert-disk-closed.sh"
     chmod 400 "$run/controller.sh" "$run/secure-state.sh" "$run/assert-disk-closed.sh"
     export WINDOWS_SECURE_HELPER=$run/secure-state.sh WINDOWS_DISK_GUARD=$run/assert-disk-closed.sh
+    if [[ "$generation" = 1 && "$tag" = XP ]]; then
+        cp "$WINDOWS_GENERATION_READER_GUARD" "$run/check-reader.sh"
+        cp "$WINDOWS_GENERATION_READER_VERIFY" "$run/verify-generation.py"
+        cp "$WINDOWS_GENERATION_MOUNT_HELPER" "$run/mount-state.sh"
+        chmod 400 "$run/check-reader.sh" "$run/verify-generation.py" "$run/mount-state.sh"
+        export WINDOWS_GENERATION_READER_GUARD=$run/check-reader.sh
+        export WINDOWS_GENERATION_READER_VERIFY=$run/verify-generation.py
+        export WINDOWS_GENERATION_MOUNT_HELPER=$run/mount-state.sh
+    fi
     export WINDOWS_CHECK_RUNNING=1
     exec bash "$run/controller.sh"
 fi
@@ -26,37 +42,78 @@ namespace=${WINDOWS_CHECK_NAMESPACE:?Set an existing network namespace}
 address=${WINDOWS_CHECK_ADDRESS:?Set the host IPv4 listen address}
 test -x "$snapshot_editor"
 sudo bash "$WINDOWS_DISK_GUARD" --config "$base/config.json"
+if [[ "$generation" = 1 && "$tag" = XP ]]; then
+    reader_identity=$(sudo env WINDOWS_DISK_GUARD="$WINDOWS_DISK_GUARD" \
+        WINDOWS_GENERATION_READER_VERIFY="$WINDOWS_GENERATION_READER_VERIFY" \
+        WINDOWS_GENERATION_MOUNT_HELPER="$WINDOWS_GENERATION_MOUNT_HELPER" \
+        bash "$WINDOWS_GENERATION_READER_GUARD" "$base/config.json" "${WINDOWS_CHECK_DISK:?Set the XP OS disk}" \
+        "${WINDOWS_PARTITION_OFFSET:?Set the XP OS partition offset}" restore-probe.exe \
+        "${WINDOWS_GENERATION_PROBE_SHA256:?Set the staged XP reader SHA256}")
+    printf '%s\n' "$reader_identity" > "$run/generation-reader-before.json"
+fi
 # shellcheck source=secure-state.sh
 source "$WINDOWS_SECURE_HELPER"
 child=
 echo_child=
 stop() {
+    local result=0 code pid signal
     if [[ -n "$child" ]]; then
-        if kill -0 "$child" 2>/dev/null; then sudo kill -TERM "$(sudo cat "$run/pid")"; fi
-        for retry in {1..100}; do
+        for signal in TERM KILL; do
             if ! kill -0 "$child" 2>/dev/null; then break; fi
-            sleep 0.1
+            code=0
+            pid=$(sudo cat "$run/pid") || code=$?
+            if [[ "$code" == 0 && ! "$pid" =~ ^[1-9][0-9]*$ ]]; then code=1; fi
+            if [[ "$code" == 0 ]]; then sudo kill -"$signal" "$pid" || code=$?; fi
+            if [[ "$code" != 0 ]] && kill -0 "$child" 2>/dev/null; then
+                printf 'TAP VMM %s failed (%s)\n' "$signal" "$code" >&2 || true
+                if [[ "$result" == 0 ]]; then result=$code; fi
+            fi
+            if [[ "$signal" == KILL && "$result" == 0 ]]; then result=1; fi
+            if secure_wait_stopped "$child"; then break; fi
         done
         if kill -0 "$child" 2>/dev/null; then
-            sudo kill -KILL "$(sudo cat "$run/pid")"
-            wait "$child" || true
+            if [[ "$result" == 0 ]]; then result=1; fi
+        else
+            code=0
+            wait "$child" || code=$?
+            if [[ "$code" != 0 && "$code" != 143 && "$result" == 0 ]]; then result=$code; fi
             child=
-            return 1
+            sudo rm -f "$base/console.sock" || { code=$?; if [[ "$result" == 0 ]]; then result=$code; fi; }
         fi
-        local result=0
-        wait "$child" || result=$?
-        if [[ "$result" != 0 && "$result" != 143 ]]; then return "$result"; fi
-        child=
-        sudo rm -f "$base/console.sock"
     fi
+    return "$result"
+}
+cleanup_failed() {
+    local code=$1
+    printf 'TAP cleanup failed: %s (%s)\n' "$2" "$code" >&2 || true
+    if [[ "$result" == 0 ]]; then result=$code; fi
 }
 cleanup() {
-    local result=$?
+    local result=$? code
     trap - EXIT
-    stop || result=$?
-    secure_stop || result=$?
-    if [[ "$result" != 0 ]]; then secure_discard; fi
-    if [[ -n "$echo_child" ]]; then kill "$echo_child" 2>/dev/null || true; wait "$echo_child" || true; fi
+    trap '' INT TERM
+    stop || cleanup_failed $? VMM
+    secure_stop || cleanup_failed $? secure-helpers
+    if [[ "$result" != 0 ]]; then secure_discard || cleanup_failed $? secure-state; fi
+    if [[ -n "$echo_child" ]]; then
+        code=0
+        kill -TERM "$echo_child" 2>/dev/null || code=$?
+        if [[ "$code" != 0 ]] && kill -0 "$echo_child" 2>/dev/null; then cleanup_failed "$code" echo-TERM; fi
+        if ! secure_wait_stopped "$echo_child"; then
+            code=0
+            kill -KILL "$echo_child" 2>/dev/null || code=$?
+            if [[ "$code" != 0 ]] && kill -0 "$echo_child" 2>/dev/null; then cleanup_failed "$code" echo-KILL; fi
+            cleanup_failed 1 echo-forced-stop
+        fi
+        if secure_wait_stopped "$echo_child"; then
+            code=0
+            wait "$echo_child" || code=$?
+            if [[ "$code" != 0 && "$code" != 143 ]]; then cleanup_failed "$code" echo-wait; fi
+            echo_child=
+        else
+            cleanup_failed 1 echo-still-live
+        fi
+    fi
     exit "$result"
 }
 trap cleanup EXIT

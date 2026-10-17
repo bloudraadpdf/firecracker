@@ -6,6 +6,14 @@ set -euo pipefail
 script=$(realpath "$0")
 export WINDOWS_DISK_GUARD=${WINDOWS_DISK_GUARD:-$(realpath "$(dirname "$script")/../egress/assert-disk-closed.sh")}
 export WINDOWS_SECURE_HELPER=${WINDOWS_SECURE_HELPER:-$(realpath "$(dirname "$WINDOWS_DISK_GUARD")/secure-state.sh")}
+generation=${WINDOWS_GENERATION_CHECKS:-0}
+[[ "$generation" = 0 || "$generation" = 1 ]]
+if [[ "$generation" = 1 ]]; then
+ test "${WINDOWS_CONNECT_TAG:-LEGACY}" = XPLEGACY
+ export WINDOWS_GENERATION_READER_GUARD=${WINDOWS_GENERATION_READER_GUARD:-$(realpath "$(dirname "$script")/../generation/check-reader.sh")}
+ export WINDOWS_GENERATION_READER_VERIFY=${WINDOWS_GENERATION_READER_VERIFY:-$(realpath "$(dirname "$script")/../generation/verify.py")}
+ export WINDOWS_GENERATION_MOUNT_HELPER=${WINDOWS_GENERATION_MOUNT_HELPER:-$(realpath "$(dirname "$script")/../egress/mount-state.sh")}
+fi
 cd "${WINDOWS_CONNECT_BASE:?Set the test directory containing config.json}"
 if [[ ${WINDOWS_CONNECT_RUNNING:-} != 1 ]]; then
  mkdir run
@@ -14,6 +22,15 @@ if [[ ${WINDOWS_CONNECT_RUNNING:-} != 1 ]]; then
  cp "$WINDOWS_DISK_GUARD" run/assert-disk-closed.sh
  chmod 400 run/controller.sh run/secure-state.sh run/assert-disk-closed.sh
  export WINDOWS_SECURE_HELPER=$PWD/run/secure-state.sh WINDOWS_DISK_GUARD=$PWD/run/assert-disk-closed.sh
+ if [[ "$generation" = 1 ]]; then
+  cp "$WINDOWS_GENERATION_READER_GUARD" run/check-reader.sh
+  cp "$WINDOWS_GENERATION_READER_VERIFY" run/verify-generation.py
+  cp "$WINDOWS_GENERATION_MOUNT_HELPER" run/mount-state.sh
+  chmod 400 run/check-reader.sh run/verify-generation.py run/mount-state.sh
+  export WINDOWS_GENERATION_READER_GUARD=$PWD/run/check-reader.sh
+  export WINDOWS_GENERATION_READER_VERIFY=$PWD/run/verify-generation.py
+  export WINDOWS_GENERATION_MOUNT_HELPER=$PWD/run/mount-state.sh
+ fi
  export WINDOWS_CONNECT_RUNNING=1
  exec bash "$PWD/run/controller.sh"
 fi
@@ -28,6 +45,15 @@ gid=${WINDOWS_CONNECT_GID:-$(id -g)}
 tag=${WINDOWS_CONNECT_TAG:-LEGACY}
 limit=${WINDOWS_CONNECT_ATTEMPTS:-2400}
 sudo bash "$WINDOWS_DISK_GUARD" --config config.json
+if [[ "$generation" = 1 ]]; then
+ reader_identity=$(sudo env WINDOWS_DISK_GUARD="$WINDOWS_DISK_GUARD" \
+     WINDOWS_GENERATION_READER_VERIFY="$WINDOWS_GENERATION_READER_VERIFY" \
+     WINDOWS_GENERATION_MOUNT_HELPER="$WINDOWS_GENERATION_MOUNT_HELPER" \
+     bash "$WINDOWS_GENERATION_READER_GUARD" "$PWD/config.json" "${WINDOWS_CONNECT_DISK:?Set the XP OS disk}" \
+     "${WINDOWS_CONNECT_OFFSET:?Set the XP OS partition offset}" xp-connect.exe \
+     "${WINDOWS_GENERATION_PROBE_SHA256:?Set the staged XP reader SHA256}")
+ printf '%s\n' "$reader_identity" > run/generation-reader-before.json
+fi
 run=run
 # shellcheck source=../egress/secure-state.sh
 source "$WINDOWS_SECURE_HELPER"
@@ -45,41 +71,75 @@ setsid "${run_as[@]}" "$proxy" "$proxy_root" "$sidecar" "$PWD/vsock.sock_4750" 1
 proxy_child=$!
 child=
 remove_sockets() {
- rm -f vsock.sock
- if [[ -S console.sock ]]; then unlink console.sock; fi
+ local result=0 code
+ rm -f vsock.sock || result=$?
+ if [[ -S console.sock ]]; then
+  unlink console.sock || { code=$?; if [[ "$result" == 0 ]]; then result=$code; fi; }
+ fi
+ return "$result"
 }
 wait_for_exit() {
- local pid=$1
- for retry in {1..100}; do
-  if ! kill -0 "$pid" 2>/dev/null; then wait "$pid"; return; fi
-  sleep 0.1
- done
- kill -KILL "$pid" 2>/dev/null || true
+ local pid=$1 code
+ if ! secure_wait_stopped "$pid"; then
+  kill -KILL "$pid" 2>/dev/null || {
+   code=$?
+   if kill -0 "$pid" 2>/dev/null; then return "$code"; fi
+  }
+  if ! secure_wait_stopped "$pid"; then return 1; fi
+ fi
  wait "$pid"
 }
 stop_vm() {
+ local result=0 code=0
  if [[ -n "$child" ]]; then
-  if kill -0 "$child" 2>/dev/null; then kill -TERM "$child"; fi
+  if kill -0 "$child" 2>/dev/null; then
+   kill -TERM "$child" || {
+    code=$?
+    if kill -0 "$child" 2>/dev/null; then result=$code; fi
+   }
+  fi
   code=0
   wait_for_exit "$child" || code=$?
-  child=
-  remove_sockets
-  if [[ "$code" != 0 && "$code" != 143 ]]; then return "$code"; fi
+  if [[ "$code" != 0 && "$code" != 143 && "$result" == 0 ]]; then result=$code; fi
+  if kill -0 "$child" 2>/dev/null; then
+   if [[ "$result" == 0 ]]; then result=1; fi
+  else
+   child=
+   remove_sockets || { code=$?; if [[ "$result" == 0 ]]; then result=$code; fi; }
+  fi
  fi
+ return "$result"
+}
+cleanup_failed() {
+ printf 'CONNECT cleanup failed: %s (exit=%s)\n' "$1" "$2" >&2 || true
+ if [[ "$result" == 0 ]]; then result=$2; fi
 }
 cleanup() {
- result=$?
+ local result=$? code signal
  trap - EXIT
- stop_vm || result=$?
- secure_stop || result=$?
- if [[ "$result" != 0 ]]; then secure_discard; fi
+ trap '' INT TERM
+ stop_vm || cleanup_failed stop-vm "$?"
+ secure_stop || cleanup_failed secure-stop "$?"
+ if [[ "$result" != 0 ]]; then secure_discard || cleanup_failed secure-discard "$?"; fi
  if kill -0 "$proxy_child" 2>/dev/null; then
-  printf '\n' >&3
+  printf '\n' >&3 || cleanup_failed close-proxy-input "$?"
  fi
- wait_for_exit "$proxy_child" || result=$?
- kill -TERM -- "-$proxy_child" 2>/dev/null || true
- kill -KILL -- "-$proxy_child" 2>/dev/null || true
- rm -f run/proxy-input
+ wait_for_exit "$proxy_child" || cleanup_failed wait-proxy "$?"
+ for signal in TERM KILL; do
+  if kill -0 -- "-$proxy_child" 2>/dev/null; then
+   if kill -"$signal" -- "-$proxy_child" 2>/dev/null; then
+    if [[ "$signal" == KILL ]]; then cleanup_failed forced-proxy-group-stop 1; fi
+   else
+    code=$?
+    if kill -0 -- "-$proxy_child" 2>/dev/null; then cleanup_failed "proxy-group-$signal" "$code"; fi
+   fi
+  fi
+ done
+ if kill -0 "$proxy_child" 2>/dev/null || kill -0 -- "-$proxy_child" 2>/dev/null; then
+  cleanup_failed live-proxy 1
+ else
+  rm -f run/proxy-input || cleanup_failed remove-proxy-input "$?"
+ fi
  exit "$result"
 }
 trap 'cleanup' EXIT

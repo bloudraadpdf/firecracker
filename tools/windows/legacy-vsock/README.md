@@ -97,16 +97,18 @@ It does not replace the proxy implementation.
 ## Guest probes
 
 The Rust programs have no standard-library dependency. Keep the sibling
-`egress/win32.rs` source when copying `connect.rs`; it shares the small Win32
-import declarations with the HTTP probes. Select the required XP x86 or Windows
-7 x64 profile and prepare `windows_rustflags` using the
+`egress/win32.rs`, `egress/device.rs`, `generation/counter.rs` and
+`generation/polling.rs` sources when copying `connect.rs`. The readers share
+Win32 declarations and the generation-counter implementation. Select the
+required XP x86 or Windows 7 x64 profile and prepare `windows_rustflags` using
+the
 [shared compatibility-library procedure](../README.md#windows-probe-linking).
 Run the following from the repository root in that Bash session:
 
 ```sh
 mkdir -p build/windows/legacy-vsock
 rustc --edition 2024 "${windows_rustflags[@]}" \
-  --check-cfg 'cfg(xp_matrix)' -D warnings \
+  --check-cfg 'cfg(test)' --check-cfg 'cfg(xp_matrix)' -D warnings \
   tools/windows/legacy-vsock/connect.rs -o build/windows/legacy-vsock/legacy-connect.exe
 ```
 
@@ -189,8 +191,12 @@ use the relative console path `console.sock`; cleanup removes its stale socket
 only after the owned VMM has stopped. User and group IDs default to the invoking
 user. When changing identity, it initialises that user's supplementary groups.
 API requests have time limits. On exit it allows each child ten seconds to stop,
-then kills a child that does not exit. The proxy uses a separate process group
-so cleanup also stops a stalled sidecar. A forced stop fails the run.
+then sends KILL if the child remains live. After a successful KILL it polls for
+up to another ten seconds. It leaves a live VMM's sockets in place. The proxy
+uses a separate process group so cleanup also attempts to stop a stalled
+sidecar. A forced stop fails the run. Allow the
+[cleanup time](../egress/README.md) in any outer watchdog and confirm that owned
+processes have stopped before reusing the disk or helper state.
 
 Require three guest pass markers, six sealed proxy accounting entries (three
 allowed 2 MiB transfers, three denied requests with zero payload),
@@ -206,3 +212,50 @@ shared offline verifier and the separate TAP regression procedure.
 
 The tested profiles and evidence are in the
 [Windows validation record](../../../docs/windows-validation.md).
+
+## XP generation polling
+
+The optional XP matrix uses the same synchronous generation-counter query as
+`generation/probe.rs`. It does not spawn another executable or issue an
+unsupported XP notification request. Build `xp-connect.exe` with
+`--cfg xp_matrix` and the XP compatibility profile above; the ordinary
+single-transfer build is not the three-stage matrix. Record its actual SHA-256
+before staging:
+
+```sh
+sha256sum build/windows/legacy-vsock/xp-connect.exe
+```
+
+On the closed disposable OS volume, stage it as `C:\xp-connect.exe` and call the
+maintained CMD from exactly one Startup launcher:
+
+```bat
+call C:\xp-matrix.cmd GenerationChecks ACTUAL_64_DIGIT_SHA256
+```
+
+Use `WINDOWS_CONNECT_TAG=XPLEGACY`, and set `WINDOWS_GENERATION_CHECKS=1` plus
+`WINDOWS_GENERATION_PROBE_SHA256` to the host-recorded digest for the controller
+and offline verifier. Set `WINDOWS_CONNECT_DISK` to the canonical OS image
+containing `C:\xp-connect.exe` and `WINDOWS_CONNECT_OFFSET` to its NTFS offset
+in bytes. This must be the explicit writable OS drive in `config.json`, not a
+separate data drive. Before starting any host network helper, check the actual
+reader:
+
+```sh
+sudo bash tools/windows/generation/check-reader.sh \
+  "$WINDOWS_CONNECT_BASE/config.json" "$WINDOWS_CONNECT_DISK" \
+  "$WINDOWS_CONNECT_OFFSET" xp-connect.exe \
+  "$WINDOWS_GENERATION_PROBE_SHA256"
+```
+
+The public controller repeats this check before the FIFO, proxy, sidecar or VM
+starts. Its per-run copy retains the generation helper sources. Keep the two
+generation variables through `sudo` when running `egress/connect-verify.sh`.
+That verifier rehashes the reader on the read-only OS volume and checks two
+equal nonzero IDs in each of the three stages, with a new ID after each restore.
+The prior ID stays in the original process memory across snapshots. The final
+guest transcript and sealed proxy stage watermarks bind these records to the
+normal three allowed bidirectional transfers and three zero-byte denials. There
+are no prearmed requests in this XP mode. Existing commands without the option
+retain their ordinary behaviour; the rebuilt reader still needs actual guest and
+current-format restore qualification.

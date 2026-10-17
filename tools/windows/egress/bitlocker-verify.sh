@@ -17,19 +17,24 @@ bash "$scripts/assert-disk-closed.sh" "$disk"
 umask 077
 mkdir -m 700 "$state"
 mkdir "$state/bde"
-source_loop=
+# shellcheck source=mount-state.sh
+source "$scripts/mount-state.sh"
+windows_mount_directory=$state/bde
 cleanup() {
     local result=$?
     trap - EXIT
-    if mountpoint -q "$state/bde"; then fusermount -u "$state/bde" || { if [[ "$result" = 0 ]]; then result=1; fi; }; fi
-    if [[ -n "$source_loop" ]]; then losetup -d "$source_loop" || { if [[ "$result" = 0 ]]; then result=1; fi; }; fi
+    trap '' INT TERM
+    if [[ "$windows_mount_attempted" == 1 ]]; then
+        windows_mount_unmount "$state/bde" fusermount -u || { if [[ "$result" = 0 ]]; then result=1; fi; }
+        windows_mount_detach || { if [[ "$result" = 0 ]]; then result=1; fi; }
+    fi
     exit "$result"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-source_loop=$(losetup --read-only --find --show --offset "$offset" --sizelimit "$size" "$disk")
-"$bdemount" -u -X ro "$source_loop" "$state/bde" > "$state/mount.log" 2>&1
+windows_mount_attach "$disk" "$offset" "$size"
+"$bdemount" -u -X ro "$windows_mount_loop" "$state/bde" > "$state/mount.log" 2>&1
 for ((retry = 0; retry < 50; retry++)); do
     if mountpoint -q "$state/bde"; then break; fi
     sleep 0.1
