@@ -1,8 +1,9 @@
 # Windows generation-counter probe
 
-`probe.rs` reads the guest's actual Windows generation-counter device. It uses
-Rust `core` and the existing Windows probe compatibility inputs. It does not
-install a driver or provide a replacement generation counter.
+`probe.rs` reads the guest's actual Windows generation-counter device. It can
+also wait for a generation change on supported guests. It uses Rust `core` and
+the existing Windows probe compatibility inputs. It does not install a driver or
+provide a replacement generation counter.
 
 ## Build
 
@@ -40,11 +41,11 @@ and
 `VM_GENCOUNTER`: two unsigned 64-bit fields, `GenerationCount` then
 `GenerationCountHigh`. The Rust layout and size are checked at compile time.
 
-Run the matching executable as Administrator or SYSTEM. It opens
-`\\.\VmGenerationCounter` for read/write access, issues the polling request with
-no input buffer, and requires exactly 16 output bytes. The owned device handle
-closes on success and failure. A successful invocation exits zero and prints one
-line:
+Run the matching executable as Administrator or SYSTEM. With no arguments, it
+opens `\\.\VmGenerationCounter` for read/write access, issues the polling
+request with no input buffer, and requires exactly 16 output bytes. The owned
+device handle closes on success and failure. A successful invocation exits zero
+and prints one line:
 
 ```text
 VMGENID=0123456789abcdef0123456789abcdef
@@ -53,14 +54,70 @@ VMGENID=0123456789abcdef0123456789abcdef
 The line contains the high field followed by the low field, each as 16 lowercase
 hex digits. The example is not a recorded guest result. API failures print the
 operation and Win32 error in hex. Error 5 also reports the elevation
-requirement. An unexpected output size fails. Exit 1 indicates query failure, 2
-indicates an output failure, and 99 indicates a Rust panic.
+requirement. An unexpected output size fails. Exit 1 indicates a query, wait or
+argument failure, 2 indicates an output failure, and 99 indicates a Rust panic.
 
 Microsoft documents the
 [polling interface and guest prerequisites](https://learn.microsoft.com/en-us/windows/win32/hyperv_v2/virtual-machine-generation-identifier).
 Win7 SP1 and XP SP3 need compatible integration-service drivers; compiling for
 those OS versions does not install them. Polling is supported by that documented
-legacy interface. This probe does not wait for events or qualify GED delivery.
+legacy interface. Event-driven requests require Vista SP2/Server 2008 SP2 or
+later; the documented interface returns `ERROR_NOT_SUPPORTED` (50) on earlier
+systems, including XP. XP qualification uses polling, not notification.
+
+## Prearmed notification
+
+On Win7, supply the current ID from a successful poll, in the same high-then-low
+hex order. The ID must be exactly 32 hex digits and nonzero. The timeout must be
+1 to 600000 milliseconds, with one to six decimal digits. The option order is
+fixed; missing, extra or invalid arguments fail before opening the device.
+Windows `CommandLineToArgvW` handles a quoted executable path. For example, in
+an elevated command prompt, substitute the actual current ID:
+
+```bat
+"C:\Users\Public\vmgenid.exe" --wait 0123456789abcdef0123456789abcdef --timeout-ms 300000
+```
+
+The probe opens an overlapped handle and submits `IOCTL_VMGENCOUNTER_READ` with
+that **16-byte current ID as input** and a separate 16-byte output buffer.
+Microsoft documents that this request completes when the generation differs. A
+zero-length input would poll and cannot establish notification. Only a
+submission that returns `ERROR_IO_PENDING` (997) prints:
+
+```text
+ARMED VMGENID=0123456789abcdef0123456789abcdef
+```
+
+An immediate completion fails without `ARMED`: the input could already be stale.
+A pending request can complete before the marker is observed, so the marker
+alone is insufficient. Require the process to remain pending until the planned
+snapshot/restore boundary. After notification, success requires exactly 16
+output bytes and a different ID, prints `VMGENID=<new-ID>`, and exits zero.
+Compare that ID with fresh polls in the restored guest.
+
+On timeout or wait failure, the issuing thread calls the XP-compatible
+[`CancelIo`](https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-cancelio)
+and allows up to five further seconds for completion. It checks the result with
+[`GetOverlappedResult`](https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-getoverlappedresult)
+without an unbounded wait. Timeout remains a failure even if completion races
+with cancellation. Device and event handles close after completion or drained
+cancellation. If cancellation cannot be drained, the probe reports failure and
+calls `ExitProcess` without unwinding, keeping request storage live until
+process teardown. Output failure and panic also terminate the process directly.
+Neither a timeout nor process termination qualifies notification.
+
+Argument tests follow the existing standalone probe test pattern. From the
+repository root:
+
+```sh
+mkdir -p build/windows/generation
+rustc +1.98.1 --edition 2024 --test -D warnings tools/windows/generation/probe.rs \
+  -o build/windows/generation/probe-tests
+build/windows/generation/probe-tests
+```
+
+These tests cover option parsing and field order. They do not execute Windows
+I/O or qualify driver completion, cancellation or SCI delivery.
 
 ## Win7 driver servicing
 
@@ -126,21 +183,103 @@ remain unqualified.
 
 ## Cold, full and differential checks
 
-Invoke the probe within the existing guest stage action, before its
-corresponding pass marker. Preserve the exact exit code and output. For example,
-in elevated Windows PowerShell:
+Use the [maintained TAP workflow](../egress/README.md#tap) with a private Win7
+SP1 x64 image whose signed generation-counter driver has passed the servicing
+checks above. Build the matching probe first. On the Linux controller host,
+record its actual digest before staging:
 
-```powershell
-& C:\Users\Public\vmgenid.exe
-if ($LASTEXITCODE -ne 0) { throw 'VMGenID query failed' }
+```sh
+sha256sum build/windows/generation/win7-x64.exe
 ```
 
-Require stable identity for repeated reads within one running stage and a fresh
-identity after each full and differential restore. Keep all three actual values
-and phase boundaries. Execute through the real serviced guest driver; reading
-host snapshot data does not establish Windows polling behaviour.
+Keep that executable, digest, Firecracker and snapshot-editor hashes, firmware
+hash and snapshot format with the results. With the guest shut down, use the
+existing closed-disk staging route to copy the executable as
+`C:\Users\Public\vmgenid.exe`, the maintained `egress/tap.ps1` as
+`C:\Users\Public\fc-network.ps1`, and the HTTPS probe beside it. Configure
+exactly one elevated startup action as described by the TAP workflow. Supply the
+recorded 64-digit SHA-256 value; do not compute the expected value from the
+guest copy. For example, with the actual lab addresses and digest assigned:
 
-Only after those checks pass can a polling-only profile claim restore detection
-without GED. A changed identity does not by itself prove entropy reseeding or
-application recovery. Driver servicing, real legacy queries and the full restore
-matrix remain separate from compile/link checks.
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File C:\Users\Public\fc-network.ps1 `
+  -HostAddress $hostAddress -DnsAddress $dnsAddress -Label WIN7 `
+  -GenerationChecks -GenerationProbeSha256 $probeSha256
+```
+
+`-GenerationChecks` is optional. It requires `-GenerationProbeSha256`; supplying
+the digest alone also fails. Before transcript or network changes, the script
+checks these flags, the staged executable's digest and the absence of
+`C:\Users\Public\fc-gencounter-events`. Generation mode also refuses an existing
+`C:\Users\Public\fc-network.log`; it creates the event directory only after
+starting a fresh transcript. A preflight or transcript-start failure prints its
+error on the console and requests S5 without opening a report connection;
+earlier evidence remains intact. Ordinary TAP runs need neither the generation
+probe nor these flags.
+
+Before staging a fresh disposable clone, preserve its earlier transcript and
+event directory through the closed, read-only collection route. Remove both
+`fc-network.log` and `fc-gencounter-events` from the fresh clone while it is
+shut down. Keep the original evidence unchanged. Do not use append or overwrite
+to combine separate runs.
+
+For each stage, the script polls twice and requires the same nonzero current ID.
+Before the cold and full PASS reports, it starts one pending `--wait` request
+with that ID, checks its exact `ARMED` output and requires that same child
+process to remain alive. The existing TAP controller pauses on each PASS and
+captures that pending request in the full or differential snapshot. After
+restore, the original child must exit zero with a different ID that agrees with
+two fresh polls. Starting a replacement waiter after restore cannot satisfy
+these checks. The three stage IDs must differ.
+
+Run the existing `tap-check.sh` with the documented environment and outer
+timeout. No new controller or host network setting is needed. After the final S5
+and Firecracker exit zero, enable the optional check in the existing offline
+verifier. Use the same absolute base, run, tag, disk and partition offset as the
+TAP run; Win7's transcript encoding is UTF-16LE:
+
+```sh
+export WINDOWS_GENERATION_CHECKS=1
+export WINDOWS_TRANSCRIPT_ENCODING=UTF-16LE
+sudo --preserve-env=WINDOWS_CHECK_BASE,WINDOWS_CHECK_RUN,WINDOWS_GUEST_TAG \
+  --preserve-env=WINDOWS_CHECK_DISK,WINDOWS_PARTITION_OFFSET,WINDOWS_GUEST_ADDRESS \
+  --preserve-env=WINDOWS_TRANSCRIPT_ENCODING,WINDOWS_GENERATION_CHECKS \
+  timeout --signal=TERM --kill-after=10s 120 \
+  unshare --mount --propagation private \
+  bash tools/windows/egress/tap-verify.sh
+```
+
+The optional verifier needs Python 3.10 or later. The existing read-only mount
+supplies exactly five bounded regular files: `reports.log` and stdout/stderr for
+each of the two child requests. The guest closes each UTF-8 report append before
+sending that same message to the host. These raw records do not depend on
+PowerShell transcript width or encoding. Collection creates a new `events/`
+directory in the run directory; an existing directory fails instead of replacing
+evidence. The verifier requires exact guest/host report equality, received
+timestamps, event order, child PIDs and output, and controller phase watermarks.
+It writes `generation-verification.json` beside the ordinary TAP results and
+records hashes of the parsed bytes. It does not replace the TAP verifier's
+independent egress, storage, shutdown and exit checks.
+
+Keep `echo.log`, `stages.log`, the five collected files and both verification
+results. Recheck the copied generation evidence without remounting or replacing
+it:
+
+```sh
+python3 tools/windows/generation/verify.py "$WINDOWS_CHECK_BASE/${WINDOWS_CHECK_RUN:-run1}" \
+  --tag "${WINDOWS_GUEST_TAG:-WIN7}"
+```
+
+The verifier's pure evidence tests use the existing pytest suite:
+
+```sh
+tools/devtool -y test -- integration_tests/build/test_windows_generation.py
+```
+
+The maintained opt-in path still needs an actual guest run before it can be
+qualified. Polling qualifies identity changes separately from prearmed
+notification. XP supports polling only and cannot use `-GenerationChecks`.
+Neither a changed ID nor a completed request proves entropy reseeding or
+application recovery. Driver servicing, real guest queries and the restore
+matrix remain separate from compile/link and pure-verifier checks.
