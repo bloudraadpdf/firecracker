@@ -2,6 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{CloseHandle, CreateFileW, WriteFile, number, output, ptr, require};
+#[path = "../generation/counter.rs"]
+mod counter;
+#[path = "../generation/polling.rs"]
+mod polling;
 
 #[link(name = "kernel32")]
 unsafe extern "system" {
@@ -103,7 +107,17 @@ fn storage(iteration: u8) {
 }
 
 pub fn run() {
+    let enabled = polling::enabled().unwrap_or_else(|error| generation_failure(error));
+    let mut previous = [0u8; 32];
     for iteration in 1..=3 {
+        if enabled {
+            previous = polling::read(
+                iteration,
+                if iteration == 1 { &[] } else { &previous },
+                output,
+            )
+            .unwrap_or_else(|error| generation_failure(error));
+        }
         storage(iteration);
         super::run();
         output(b"XPLEGACY_PASS iteration=");
@@ -114,4 +128,10 @@ pub fn run() {
             unsafe { Sleep(60000) };
         }
     }
+}
+
+fn generation_failure(error: polling::Failure) -> ! {
+    polling::report(error, output, number);
+    // SAFETY: ExitProcess takes no pointers and never returns.
+    unsafe { super::ExitProcess(1) }
 }

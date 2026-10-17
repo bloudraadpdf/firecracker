@@ -25,6 +25,56 @@ def require(condition, message):
         raise ValueError(message)
 
 
+def read_regular(path, limit):
+    """Read one bounded canonical regular file without accepting changed evidence."""
+    info = path.lstat()
+    require(
+        path.resolve() == path and stat.S_ISREG(info.st_mode),
+        f"Not a regular evidence file: {path}",
+    )
+    require(info.st_size <= limit, f"Evidence too large: {path}")
+    fields = (
+        "st_dev",
+        "st_ino",
+        "st_mode",
+        "st_nlink",
+        "st_size",
+        "st_mtime_ns",
+        "st_ctime_ns",
+    )
+    before = tuple(getattr(info, name) for name in fields)
+    with path.open("rb") as source:
+        require(
+            tuple(getattr(os.fstat(source.fileno()), name) for name in fields)
+            == before,
+            f"Evidence changed: {path}",
+        )
+        raw = source.read(limit + 1)
+        require(
+            tuple(getattr(os.fstat(source.fileno()), name) for name in fields)
+            == before,
+            f"Evidence changed: {path}",
+        )
+    require(
+        len(raw) == info.st_size
+        and tuple(getattr(path.lstat(), name) for name in fields) == before,
+        f"Evidence changed: {path}",
+    )
+    return raw
+
+
+def check_reader(path, expected):
+    """Bind the executable that makes the inline reads, not a separate probe."""
+    require(
+        re.fullmatch(r"[0-9a-fA-F]{64}", expected) is not None,
+        "Expected the reader SHA256 as 64 hex digits",
+    )
+    raw = read_regular(path, 16 * 1024 * 1024)
+    digest = hashlib.sha256(raw).hexdigest()
+    require(digest == expected.lower(), "Unexpected generation reader executable")
+    return {"bytes": len(raw), "sha256": digest}
+
+
 def read_evidence(directory):
     """Capture bounded regular files once for both parsing and hashes."""
     require(
@@ -35,18 +85,10 @@ def read_evidence(directory):
         {path.name for path in directory.iterdir()} == set(EVENT_FILES),
         "Unexpected evidence files",
     )
-    contents = {}
-    for name, limit in EVENT_FILES.items():
-        path = directory / name
-        info = path.lstat()
-        require(
-            path.resolve() == path and stat.S_ISREG(info.st_mode),
-            f"Not a regular evidence file: {name}",
-        )
-        require(info.st_size <= limit, f"Evidence too large: {name}")
-        with path.open("rb") as source:
-            contents[name] = source.read(limit + 1)
-        require(len(contents[name]) == info.st_size, f"Evidence changed: {name}")
+    contents = {
+        name: read_regular(directory / name, limit)
+        for name, limit in EVENT_FILES.items()
+    }
     return contents
 
 
@@ -281,22 +323,208 @@ def verify(root, tag):
     }
 
 
+def polling_records(raw, iterations):
+    """Check exact inline read records before each existing XP pass."""
+    lines = raw.splitlines()
+    require(
+        not any(b"FAIL VMGENID" in line for line in lines), "Generation reader failed"
+    )
+    actual = [
+        (index, line) for index, line in enumerate(lines) if line.startswith(b"VMGENID")
+    ]
+    require(len(actual) == 4 * len(iterations), "Unexpected XP polling record count")
+    ids = []
+    for offset, iteration in enumerate(iterations):
+        records = actual[4 * offset : 4 * offset + 4]
+        pattern = (
+            rb"VMGENID_READ iteration="
+            + str(iteration).encode()
+            + rb" read=1 value=([0-9a-f]{32})"
+        )
+        match = re.fullmatch(pattern, records[0][1])
+        require(match is not None, "Invalid first XP generation read")
+        value = match[1]
+        require(value != b"0" * 32, "Zero XP generation ID")
+        expected = [
+            b"VMGENID_READ iteration=%d read=1 value=" % iteration + value,
+            b"VMGENID_READ iteration=%d read=2 value=" % iteration + value,
+            b"VMGENID_STAGE iteration=%d value=" % iteration + value,
+            b"VMGENID=" + value,
+        ]
+        require(
+            [line for _, line in records] == expected,
+            "XP running reads or stage ID differ",
+        )
+        ids.append(
+            {
+                "iteration": iteration,
+                "id": value.decode("ascii"),
+                "first_index": records[0][0],
+                "last_index": records[-1][0],
+            }
+        )
+    return ids, lines
+
+
+def verify_xp(root, mode, reader, expected):
+    """Verify polling only; ordinary egress/storage/accounting stays separate."""
+    identity = check_reader(reader, expected)
+    files = {}
+
+    def read(name, limit=16 * 1024 * 1024):
+        raw = read_regular(root / name, limit)
+        files[name] = {"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+        return raw
+
+    require(
+        json.loads(read("generation-reader-before.json", 1024)) == identity,
+        "Prelaunch and collected generation reader differ",
+    )
+    stages = read("stages.log").decode("ascii").splitlines()
+    phases = ["cold", "full", "diff"]
+    watermarks = {}
+    for phase, iteration, count in [("cold", 1, 2), ("full", 2, 2), ("diff", 3, 1)]:
+        marks = [
+            re.fullmatch(rf"\S+ phase={phase} watermark=([0-9]+)", line)
+            for line in stages
+        ]
+        marks = [match for match in marks if match]
+        require(len(marks) == 1, f"Expected one {phase} watermark")
+        watermarks[phase] = int(marks[0][1])
+        require(
+            sum(
+                re.fullmatch(rf"\S+ phase={phase} completed={iteration}", line)
+                is not None
+                for line in stages
+            )
+            == count,
+            f"Unexpected {phase} completion count",
+        )
+    require(
+        watermarks["cold"] < watermarks["full"] < watermarks["diff"],
+        "XP stage watermarks are not increasing",
+    )
+    ids = []
+    if mode == "tap":
+        for iteration, phase in enumerate(phases, 1):
+            values, lines = polling_records(read(phase + ".log"), [iteration])
+            passes = [
+                index
+                for index, line in enumerate(lines)
+                if re.fullmatch(rb"XP_CHECK iteration=%d ?" % iteration, line)
+            ]
+            require(
+                len(passes) == 1 and values[0]["last_index"] < passes[0],
+                "XP polling must precede its TAP pass",
+            )
+            ids += values
+        final, _ = polling_records(read("final-guest.txt"), [3])
+        require(final[0]["id"] == ids[-1]["id"], "Final guest TAP polling differs")
+        host = read("echo.log").splitlines()
+        completed = [
+            index
+            for index, line in enumerate(host)
+            if line.startswith(b"echo:") and line.endswith(b" bytes=2097152")
+        ]
+    else:
+        require(mode == "connect", "Invalid XP polling mode")
+        ids, lines = polling_records(read("guest-transcript.txt"), [1, 2, 3])
+        for value in ids:
+            iteration = value["iteration"]
+            passes = [
+                index
+                for index, line in enumerate(lines)
+                if line == b"XPLEGACY_PASS iteration=%d" % iteration
+            ]
+            require(
+                len(passes) == 1 and value["last_index"] < passes[0],
+                "XP polling must precede its CONNECT pass",
+            )
+            if iteration < 3:
+                require(
+                    passes[0] < ids[iteration]["first_index"],
+                    "XP generation stage order differs",
+                )
+        host = read("proxy.log").splitlines()
+        completed = [
+            index
+            for index, line in enumerate(host)
+            if b"egress CONNECT rejected" in line
+        ]
+    require(len(completed) == 3, "Expected three host XP egress completions")
+    for index, phase in enumerate(phases):
+        require(
+            watermarks[phase] <= completed[index],
+            f"XP {phase} completion precedes watermark",
+        )
+        if index < 2:
+            require(
+                completed[index] < watermarks[phases[index + 1]],
+                f"XP {phase} completion crosses next watermark",
+            )
+    values = [item["id"] for item in ids]
+    require(len(set(values)) == 3, "XP cold/full/diff IDs must differ")
+    return {
+        "scope": "XP inline polling only; ordinary egress/storage/S5 require the maintained verifier separately",
+        "mode": mode,
+        "generation_ids": values,
+        "reads": 6,
+        "reader": identity,
+        "raw_evidence": files,
+        "phase_watermarks": watermarks,
+        "notifications_qualified": False,
+    }
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("run", type=Path)
-    parser.add_argument(
-        "--tag", required=True, help="WINDOWS_GUEST_TAG used by the TAP run"
-    )
+    parser.add_argument("--tag", help="WINDOWS_GUEST_TAG used by the TAP run")
     parser.add_argument(
         "--collect-from",
         type=Path,
         help="Closed evidence directory on the read-only guest mount",
     )
+    parser.add_argument("--xp-mode", choices=["tap", "connect"])
+    parser.add_argument("--reader", type=Path)
+    parser.add_argument("--probe-sha256")
+    parser.add_argument(
+        "--check-reader",
+        help="Hash this positional reader before launching any guest helpers",
+    )
     args = parser.parse_args()
     try:
-        require(re.fullmatch(r"[A-Za-z0-9_-]+", args.tag), "Invalid guest tag")
-        if args.collect_from is not None:
-            collect(args.collect_from, args.run)
-        print(json.dumps(verify(args.run, args.tag), indent=2))
+        if args.check_reader is not None:
+            require(
+                args.tag is None
+                and args.xp_mode is None
+                and args.collect_from is None
+                and args.reader is None
+                and args.probe_sha256 is None,
+                "Reader preflight cannot verify a run",
+            )
+            result = check_reader(args.run, args.check_reader)
+        elif args.xp_mode is not None:
+            require(
+                args.tag == ("XP" if args.xp_mode == "tap" else "XPLEGACY")
+                and args.reader is not None
+                and args.probe_sha256 is not None
+                and args.collect_from is None,
+                "XP polling needs its actual reader/tag/SHA256",
+            )
+            result = verify_xp(args.run, args.xp_mode, args.reader, args.probe_sha256)
+        else:
+            require(
+                args.tag is not None and re.fullmatch(r"[A-Za-z0-9_-]+", args.tag),
+                "Invalid guest tag",
+            )
+            require(
+                args.reader is None and args.probe_sha256 is None,
+                "Reader options require XP polling mode",
+            )
+            if args.collect_from is not None:
+                collect(args.collect_from, args.run)
+            result = verify(args.run, args.tag)
+        print(json.dumps(result, indent=2))
     except (OSError, UnicodeError, ValueError) as error:
         parser.exit(1, f"Generation verification failed: {error}\n")
