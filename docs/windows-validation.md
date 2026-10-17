@@ -12,31 +12,31 @@ the default build rejects Windows configuration before opening its backends.
 Ordinary Linux snapshots must restore between the two builds.
 
 The current correction adds conventional PC GPE status/enable state and routes
-VM Generation ID notification through the existing SCI. It has not yet been
-built or qualified. The results below apply to the preceding format-32
-implementation, not the new source or format-33 snapshots.
+VM Generation ID notification through the existing SCI. Default and Windows
+release builds pass. The following checks used Rust 1.98.1 on native AMD64
+Linux/KVM.
 
-### Last tested format-32 implementation
+### Current host checks
 
-The following checks used Rust 1.98.1 on native AMD64 Linux/KVM. The unit,
-standalone-tool and static results cover the same VMM, variable-helper and
-console-helper implementation inputs of that format-32 candidate. The functional
-checks use its release VMMs.
+The full unit suites used the current production source. Subsequent changes were
+confined to test configuration and error assertions; both affected tests pass on
+the final source. Standalone-tool results cover unchanged implementation inputs.
+The functional checks use the current release VMMs.
 
 | Check                                                  | Result                                          |
 | ------------------------------------------------------ | ----------------------------------------------- |
 | Default VMM unit suite                                 | 891 passed; none ignored                        |
-| Windows VMM unit suite                                 | 1,092 passed; none ignored                      |
+| Windows VMM unit suite                                 | 1,098 passed; none ignored                      |
 | Privileged jailer mount and retained-namespace parents | Both passed, including their child protocols    |
-| Variable helper                                        | 67 passed; none ignored                         |
-| Console helper                                         | 31 passed; none ignored                         |
+| Variable helper (unchanged inputs)                     | 67 passed; none ignored                         |
+| Console helper (unchanged inputs)                      | 31 passed; none ignored                         |
 | Strict workspace Clippy                                | Default and all features, GNU and musl          |
 | Strict ARM64 cross-Clippy                              | Default and all features, GNU; compilation only |
 | Standalone tool Clippy and Rust/Markdown style gates   | Passed                                          |
 | Platform devices                                       | 7 passed                                        |
 | Selected API and boot tests                            | 65 passed; 2 empty CPU-template skips           |
 | Selected basic Linux snapshot tests                    | 36 passed                                       |
-| Selected Linux snapshot-cycle tests                    | 12 passed cumulatively across two runs          |
+| Selected Linux snapshot-cycle tests                    | 12 passed in one invocation                     |
 
 The VMM suites execute the real swtpm restore, ACPICA evaluation and maximum
 optional-buffer snapshot-reader tests. The console backlog regression passes;
@@ -47,22 +47,59 @@ required privileges; they invoke the children. These results do not imply that
 every ignored documentation example was executed.
 
 The selected API/boot tests have 65 passes and two empty CPU-template skips; no
-custom CPU-template coverage is claimed. The 12 selected cycle cases are covered
-cumulatively across two runs, not by a single passing 12-case invocation.
+custom CPU-template coverage is claimed. All 12 selected cycle cases pass in one
+invocation with unchanged test thresholds. An earlier cycle run failed on a
+2,317 ms pause API call. Its cause remains unresolved. Diagnostic tracing of the
+passing run recorded no owned Firecracker executions and provides no usable
+trace; the pass does not establish a scheduler or storage-latency bound.
 
-On the format-32 implementation, an installed Windows 7 Enterprise SP1 x64
-reference retains the installed SSU and SHA-2 updates after a normal restart.
-NetKVM 61.77.104.17200 and Microsoft's generation-counter driver 6.3.9600.18080
-retain device Code 0, `IsSigned=True`, the pinned selected INF/SYS and running
-services. The KMDF runtime is running. Two actual driver queries return the same
-nonzero 16-byte generation ID, followed by normal shutdown. These checks do not
-qualify notification, TAP, CONNECT or restore. Cold driver retention and polling
-must also be repeated for the format-33 implementation.
+### Current Windows 7 reference
 
-Current Windows installation, graphical input, security, TAP and CONNECT egress,
-and performance qualification remain open. The historical results below use
-format 31 and their matching binaries. They do not qualify formats 32 or 33. Do
-not load an older saved state with the candidate.
+On the current format-33 implementation, an installed Windows 7 Enterprise SP1
+x64 reference retains the installed SSU and SHA-2 updates after a normal
+restart. NetKVM 61.77.104.17200 and Microsoft's generation-counter driver
+6.3.9600.18080 retain device Code 0, `IsSigned=True`, the pinned selected
+INF/SYS and running services. The KMDF runtime is running. Two actual driver
+queries return the same nonzero 16-byte generation ID, followed by normal
+shutdown.
+
+This installed reference also passes the maintained optional TAP generation
+checks on PowerShell 2 through cold boot, full restore and differential restore
+with format-33 snapshots under normal Windows driver policy. The SYSTEM startup
+task invokes the public `tools/windows/egress/tap.ps1` directly with
+`-GenerationChecks`. Each phase checks DNS, certificate-validated TLS 1.2 HTTPS,
+a 2 MiB equal TCP echo in each direction and matching storage hashes. Before
+each snapshot, an owned child reports ARMED while alive; after restore, that
+same child PID completes with a changed generation ID matching two fresh driver
+queries. The public verifier accepts seven matching guest/host reports, three
+distinct nonzero IDs and both original child completions.
+
+On this reference, an incorrect probe digest, an existing event directory and an
+existing transcript are each rejected. All three checks leave the NIC
+configuration, earlier transcript and storage unchanged, preserve existing event
+files where present, send no reports and request normal S5.
+
+The cold and full source instances stop at the normal controller snapshot
+boundaries. The final differential instance requests S5 and the VMM exits zero.
+Host process, mount, loop and network closure checks pass. These TAP results
+qualify only this installed reference and route.
+
+A separate clone of this installed reference passes format-33 cold, full-restore
+and differential-restore CONNECT checks using the documented external
+test-signed Viosock package. It retains the isolated test-signing policy without
+an integrity-check bypass. A SYSTEM startup task opens fresh connections through
+the real Tokoloshe HTTP CONNECT proxy over vsock, with no guest NIC. Each phase
+passes a 2 MiB equal transfer in each direction and an HTTP 403 policy denial
+with no payload. Accounting seals three allowed and three denied entries; the
+final disk file matches its guest SHA-256. Both states report v33.0.0. Cold/full
+instances stop at snapshot boundaries; the final instance requests S5 and the
+VMM exits zero. Host process, mount and loop closure checks pass. This qualifies
+only the installed Win7 test-signing profile and fresh connections.
+
+Current Windows installation, graphical input, security, the other guests' TAP
+routes and performance qualification remain open. The historical results below
+use format 31 and their matching binaries. They do not qualify formats 32 or 33.
+Do not load an older saved state with the candidate.
 
 The variable helper is Rust and reuses the upstream AWS-LC versions and
 checksums: `aws-lc-rs` 1.18.0 and `aws-lc-sys` 0.44.0. Their existing backend
@@ -94,16 +131,17 @@ accounting and offline disk checks bind the results to the three phases. All
 listed runs finish with clean guest S5 and VMM exit zero.
 
 XP and Windows 7 use the documented external test-signed Viosock packages. The
-format-31 Windows 7 inventory retains three ACPI Code 28 devices. Current legacy
-generation-counter driver binding, polling and restore qualification remain
-open. XP's original signed package and compatible KMDF preparation have
-static/build checks only; guest binding and queries remain unqualified. VMClock
-recognition on modern Windows establishes enumeration only. These installed
-references do not establish fresh XP, Windows 7, Windows 10 or IoT installation,
-or every graphical input path. Process/snapshot cache checks do not establish
-host power-loss durability. XP HTTP does not establish TLS support.
+format-31 Windows 7 inventory retains three ACPI Code 28 devices. Current
+Windows 7 generation-counter binding, polling and TAP restore results are
+described above. XP's original signed package and compatible KMDF preparation
+have static/build checks only; guest binding and queries remain unqualified.
+VMClock recognition on modern Windows establishes enumeration only. These
+installed references do not establish fresh XP, Windows 7, Windows 10 or IoT
+installation, or every graphical input path. Process/snapshot cache checks do
+not establish host power-loss durability. XP HTTP does not establish TLS
+support.
 
-The fresh Enterprise run uses variable helper SHA-256
+The historical format-31 Enterprise run uses variable helper SHA-256
 `0b2b94dbd74f84d9befa0f2747d812f580fc01e760843676b46b4a0373d45f3c` for the
 protected runtime checks, and secure firmware SHA-256
 `370a2a969758d361008decb59bdf59072664e273c3402f9b4f931d7511515e43`. Setup stages
@@ -153,12 +191,12 @@ success.
 
 ## Open qualification
 
-Standard Windows 11 Pro, Server Core and Desktop, the remaining fresh
-installations and the current format-33 guest matrix remain unqualified. The
-earlier memory comparison against fork baseline `658ff27e` exceeded the normal
-performance gates. The final candidate must pass unchanged gates against the
-registered consumer base `c6655e5`, with default and Windows builds measured
-separately.
+Standard Windows 11 Pro, Server Core and Desktop, and the remaining fresh
+installations remain unqualified. The current format-33 guest matrix is
+incomplete. The earlier memory comparison against fork baseline `658ff27e`
+exceeded the normal performance gates. The final candidate must pass unchanged
+gates against the registered consumer base `c6655e5`, with default and Windows
+builds measured separately.
 
 The native AMD64 host runs Linux 7.0.0-60009-generic. Its results do not qualify
 the supported host-kernel matrix. [ARM64 results](windows-arm64.md) are

@@ -277,9 +277,14 @@ The verifier's pure evidence tests use the existing pytest suite:
 tools/devtool -y test -- integration_tests/build/test_windows_generation.py
 ```
 
-The maintained opt-in path still needs an actual guest run before it can be
-qualified. Polling qualifies identity changes separately from prearmed
-notification. XP supports polling only and cannot use `-GenerationChecks`.
-Neither a changed ID nor a completed request proves entropy reseeding or
-application recovery. Driver servicing, real guest queries and the restore
-matrix remain separate from compile/link and pure-verifier checks.
+The maintained opt-in workflow passes cold boot, full restore and differential
+restore on the installed Win7 SP1 x64 reference with PowerShell 2 and format-33
+snapshots. The public verifier accepts seven matching reports, three distinct
+IDs and both original child completions. See the
+[current Win7 validation](../../../docs/windows-validation.md#current-windows-7-reference)
+for the tested rejection cases and scope. Other Windows versions still need
+runtime qualification. Polling qualifies identity changes separately from
+prearmed notification. XP supports polling only and cannot use
+`-GenerationChecks`. Neither a changed ID nor a completed request proves entropy
+reseeding or application recovery. Driver servicing, real guest queries and the
+restore matrix remain separate from compile/link and pure-verifier checks.
