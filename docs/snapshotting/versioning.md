@@ -83,17 +83,19 @@ The current implementation relies on the
 
 ## Snapshot compatibility
 
-This fork uses format33.0.0. The x86 PIT state is optional and records whether
-the timer exists; restore uses that saved hardware choice. The format also
-contains optional virtio-input state, the ARM64 console/security topology and
-the optional AMD64 VGA expansion ROM. The input device owns its pending frames,
-accepted and delivered keys, position and guest/pending lock LEDs. Console
-restore reuses that saved PCI backend. The AMD64 display saves two MMIO mappings
-and a typed optional ROM containing its bytes, mapping and PCI ROM BAR state; an
-absent ROM has no mapping or ROM BAR. The console's saved configuration also
-records the optional ROM path. Format29.0.0 through format32.0.0 files require
-their matching older binaries; format33 does not decode them. Snapshot state
-remains specific to its CPU architecture.
+This fork uses format34.0.0. VMClock state is optional and records actual device
+presence; restore reconstructs the machine configuration from that presence
+without allocating or notifying an absent clock. The x86 PIT state is optional
+and records whether the timer exists; restore uses that saved hardware choice.
+The format also contains optional virtio-input state, the ARM64 console/security
+topology and the optional AMD64 VGA expansion ROM. The input device owns its
+pending frames, accepted and delivered keys, position and guest/pending lock
+LEDs. Console restore reuses that saved PCI backend. The AMD64 display saves two
+MMIO mappings and a typed optional ROM containing its bytes, mapping and PCI ROM
+BAR state; an absent ROM has no mapping or ROM BAR. The console's saved
+configuration also records the optional ROM path. Format29.0.0 through
+format33.0.0 files require their matching older binaries; format34 does not
+decode them. Snapshot state remains specific to its CPU architecture.
 
 The conventional PC event state also saves GPE0 status and enable bits. Its VM
 Generation ID notification uses that group's shared SCI and a GPE method,
@@ -101,7 +103,7 @@ without a separate GED interrupt or allocation. Restore uses the saved complete
 PC hardware pair, validates its route before constructing devices, writes the
 new generation ID, then latches the event before vCPUs resume. Default Linux and
 ARM hardware retain the dedicated GED route. Both Cargo builds use the same
-format33 schema; no format32 decoder or migration is provided.
+format34 schema; no format33 decoder or migration is provided.
 
 ### Host kernel
 
@@ -143,10 +145,10 @@ To successfully restore a microVM one should check that:
 
 Firecracker microVMs snapshot functionality is available for Intel/AMD/ARM64 CPU
 models that support the hardware virtualizations extensions, more details are
-available [here](../../README.md#supported-platforms). Snapshots are not
-compatible across CPU architectures and even across CPU models of the same
-architecture. They are only compatible if the CPU features exposed to the guest
-are an invariant when saving and restoring the snapshot. The trivial scenario is
+available [here](../../README.md#tested-platforms). Snapshots are not compatible
+across CPU architectures and even across CPU models of the same architecture.
+They are only compatible if the CPU features exposed to the guest are an
+invariant when saving and restoring the snapshot. The trivial scenario is
 creating and restoring snapshots on hosts that have the same CPU model.
 
 Restoring from an Intel snapshot on AMD (or vice-versa) is not supported.

@@ -213,10 +213,14 @@ impl fmt::Debug for MMIODevManagerConstructorArgs<'_> {
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct ACPIDeviceManagerState {
     vmgenid: VMGenIDState,
-    vmclock: VmClockState,
+    vmclock: Option<VmClockState>,
 }
 
 impl ACPIDeviceManagerState {
+    pub(crate) fn has_vmclock(&self) -> bool {
+        self.vmclock.is_some()
+    }
+
     #[cfg(target_arch = "x86_64")]
     pub(super) fn validate_pc_route(&self, pc_enabled: bool) -> Result<(), ACPIDeviceError> {
         self.vmgenid.validate_pc_route(pc_enabled)?;
@@ -243,7 +247,7 @@ impl<'a> Persist<'a> for ACPIDeviceManager {
     fn save(&self) -> Self::State {
         ACPIDeviceManagerState {
             vmgenid: self.vmgenid().save(),
-            vmclock: self.vmclock().save(),
+            vmclock: self.vmclock().map(VmClock::save),
         }
     }
 
@@ -257,7 +261,11 @@ impl<'a> Persist<'a> for ACPIDeviceManager {
                 },
                 &state.vmgenid,
             )?,
-            VmClock::restore((), &state.vmclock)?,
+            state
+                .vmclock
+                .as_ref()
+                .map(|state| VmClock::restore((), state))
+                .transpose()?,
         );
 
         acpi_devices.replay_gsi_allocations(vm)?;
