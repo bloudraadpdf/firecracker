@@ -190,6 +190,27 @@ build/windows/prepare-nt6 win11-enterprise-26h2 windows11-enterprise.iso virtio-
   build/windows/windows11-enterprise-media build/windows/windows11-enterprise/Autounattend.xml
 ```
 
+For the pinned standard Windows 11 Pro 26H2 English AMD64 media, the verified
+Professional image is index 6:
+
+```sh
+build/windows/prepare client build/windows/windows11-pro-26h2 6
+build/windows/prepare-nt6 win11-pro-26h2 windows11-pro.iso virtio-win.iso \
+  build/windows/windows11-pro-26h2-media build/windows/windows11-pro-26h2/Autounattend.xml
+```
+
+The Pro profile retains the existing trust policy and 2023 boot-file recipe.
+When an answer file is supplied, only this profile selects the original
+`DVD_EX/EFI/en-US/efisys_noprompt_EX.bin` from boot.wim index 1, copied to the
+existing `efi/microsoft/boot/efisys_ex.bin` catalogue target. The alternate
+loader's boot behaviour, current firmware and Setup acceptance still need
+qualification. Graphical Pro and the other five profiles retain their previous
+boot-image selection. Microsoft's reference script selects `efisys_EX.bin`, not
+the no-prompt alternative. Pro installation and current-format runtime checks
+remain unqualified. The source install.wim reference-count warning and
+boot-chain limits are recorded in the
+[secure media procedure](../../resources/firmware/cloudhv-secureboot/README.md#current-windows-installation-media).
+
 The client profile creates the local `Firecracker` account in Administrators.
 The server profile sets the built-in `Administrator` password. Neither profile
 enables automatic logon. These are Microsoft's supported
@@ -232,7 +253,7 @@ rustc --edition 2024 -D warnings --test tools/windows/prepare-nt6.rs \
 build/windows/prepare-nt6-tests --test-threads=1
 ```
 
-The four tests include synthetic `7z` driver archives. They need `7z` and
+The five tests include synthetic `7z` driver archives. They need `7z` and
 `sha256sum`, but no Windows ISO. They check selected driver bytes, automatic
 storage/network paths with and without an answer file, profile pins and output
 cleanup. These standalone Rust tests are separate from the Cargo workspace

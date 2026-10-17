@@ -94,7 +94,15 @@ The official Windows 11 Enterprise evaluation ISO 26300.9457 has SHA-256
 image still uses the revoked 2011 CA. The source WIM also contains the
 corresponding 2023-signed boot files.
 
-`prepare-nt6 win11-enterprise-26h2` follows Microsoft's
+The official standard Windows 11 26H2 English AMD64 multi-edition ISO has
+SHA-256 `bd4307df32bc8af33b39ccecb1174aeb345386630f89a2b86c7a4e36b55ea650`,
+checked against Microsoft's
+[download verification](https://www.microsoft.com/software-download/windows11).
+Its actual Professional image is install.wim index 6, build 26300.9457. Select
+`prepare-nt6 win11-pro-26h2`; `win11` continues to select IoT Enterprise LTSC.
+
+`prepare-nt6 win11-enterprise-26h2` and graphical `prepare-nt6 win11-pro-26h2`
+follow Microsoft's
 [Make2023BootableMedia procedure](https://support.microsoft.com/en-us/servicing/os/windows/2025/02/updating-windows-bootable-media-to-use-the-pca2023-signed-boot-manager):
 read boot.wim index 1, copy EFI_EX/bootmgfw_EX.efi, the optional bootmgr_EX.efi,
 DVD_EX efisys_EX.bin, FONTS_EX and boot.stl, and select efisys_EX.bin in the El
@@ -103,11 +111,41 @@ does not modify boot.wim or install.wim, remove revocations, disable Secure Boot
 or bypass Windows hardware requirements. The other media profiles retain their
 original boot images.
 
+Only Pro with an answer file selects the original
+`DVD_EX/EFI/en-US/efisys_noprompt_EX.bin`, copied to the same
+`efi/microsoft/boot/efisys_ex.bin` catalogue target. Microsoft's reference
+script does not select this alternative. Its actual 1,118,000-byte embedded EFI
+loader has SHA-256
+`03a07689dd54201a69d38e0b62898509267f80f8f078ba8e84aff231b649873d`. The unique
+Microsoft Windows leaf matches the prompting CD loader. Isolated
+CA2023/code-signing verification with time checks disabled passed; PCA2011 was
+rejected, and separate PE-region digest/PKCS7 verification passed. These checks
+do not establish current-time, timestamp, firmware or installation acceptance.
+The leaf expired in May 2026; PK/KEK/db/dbx remain unchanged.
+
+The Pro boot.wim index 1 contains Windows PE 26100.9457 and the required EX boot
+manager, EX EFI CD image, fonts and boot.stl. The EFI catalogue selects
+efisys_ex.bin; its FAT image contains EFI/BOOT/BOOTX64.EFI. The external
+efi/boot/bootx64.efi is replaced by bootmgfw_EX.efi. The optional bootmgr_EX.efi
+is absent, so the original root bootmgr.efi remains unchanged. This follows the
+reference procedure's optional-copy rule; it does not prove that the root file
+is reached, or that the complete boot chain passes current firmware policy. Keep
+PK/KEK/db/dbx unchanged. The EX CD loader's certificate expired in May 2026;
+time-disabled chain checks do not qualify firmware or timestamp policy.
+
+Pro preparation and installation remain experimental. The original install.wim
+listing reported "Some files have incorrect reference count". Retained XML and
+small boot-file reads do not qualify install-image integrity or resolve that
+warning. A successful byte-exact media rebuild is not an installation result.
+Source-image integrity, fresh Secure Boot/TPM state, actual installed boot files
+and drivers, and current-format runtime checks remain separate acceptance gates.
+
 The reference procedure is pinned to `scripts/windows/Make2023BootableMedia.ps1`
 at Microsoft secureboot_objects revision
 `daa32713651f2ffe97b18df5aaf93ffe238aa464`. The Rust preparer uses existing
-7-Zip extraction to perform the same file copies on Linux, then verifies every
-file in the rebuilt UDF image against the prepared tree.
+7-Zip extraction for these file copies and the explicit unattended Pro
+alternative on Linux, then verifies every file in the rebuilt UDF image against
+the prepared tree.
 
 The EFI probe runs before ExitBootServices. It does not substitute for Windows
 runtime-variable checks after virtual-address conversion.
