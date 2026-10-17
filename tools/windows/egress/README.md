@@ -129,6 +129,17 @@ variables to absolute paths before running `bash tap-check.sh`:
 | `WINDOWS_CHECK_RUN`             | New result directory name; default `run1`       |
 | `WINDOWS_CHECK_INPUT`           | Optional serial input FIFO; default `/dev/null` |
 
+To add generation-counter checks on a serviced Win7 guest, follow the
+[generation probe workflow](../generation/README.md#cold-full-and-differential-checks).
+Pass both `-GenerationChecks` and the expected `-GenerationProbeSha256` to the
+guest script. After the ordinary controller finishes, set
+`WINDOWS_GENERATION_CHECKS=1` for `tap-verify.sh`. The optional Python verifier
+collects bounded raw UTF-8 guest reports and child output from the same
+read-only mount. It checks prearmed requests across both restores as well as the
+ordinary TAP checks. The default is `0`; other values fail. XP cannot use these
+notification checks. This maintained opt-in path has not yet been qualified in a
+guest run.
+
 The controller applies differential memory through the
 [snapshot editor](../../../docs/snapshotting/snapshot-editor.md).
 
