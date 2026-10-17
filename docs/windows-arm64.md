@@ -41,6 +41,12 @@ SHA-256 is:
 3dcdba9c9c0aa0430d4332b60c9afcb3cd613d648a49cbba2d4ef7b5978f32e8
 ```
 
+The current preparer has a separate `win11-iot-arm64` staging profile for the
+Toets OEM ARM64 ISO, whose hash differs from the historical Evaluation ISO
+above. It creates an extracted payload tree and stages ARM64 drivers; it does
+not service `boot.wim` or build a bootable installer. See the
+[ARM64 staging procedure](../tools/windows/README.md#arm64-installation).
+
 The earlier disk was prepared under QEMU/AAVMF. That result is historical; the
 QEMU preparation generator has been removed. There is no qualified direct
 Firecracker ARM64 installation procedure. Use an authorised, already-installed
