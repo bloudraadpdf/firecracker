@@ -1,10 +1,12 @@
 # Prepare a Windows test disk
 
 `prepare.rs` creates a private output directory, a sparse 64 GiB raw disk and a
-Windows client or Server answer file. `prepare-nt6.rs` adds that file and the
-signed storage and network drivers to the installation ISO. Installation runs
-directly in Firecracker. No QEMU binary or library is required. Existing output
-directories are rejected so preparation cannot overwrite a previous disk.
+Windows client or Server answer file. For AMD64, `prepare-nt6.rs` adds that file
+and the signed storage and network drivers to the installation ISO; installation
+runs directly in Firecracker. The ARM64 profile stages files for later servicing
+and does not create bootable media. No QEMU binary or library is required.
+Existing output directories are rejected so preparation cannot overwrite a
+previous disk.
 
 ## Build prerequisites
 
@@ -253,11 +255,12 @@ rustc --edition 2024 -D warnings --test tools/windows/prepare-nt6.rs \
 build/windows/prepare-nt6-tests --test-threads=1
 ```
 
-The five tests include synthetic `7z` driver archives. They need `7z` and
-`sha256sum`, but no Windows ISO. They check selected driver bytes, automatic
-storage/network paths with and without an answer file, profile pins and output
-cleanup. These standalone Rust tests are separate from the Cargo workspace
-checks. They do not qualify Windows Setup or installed-driver persistence.
+The six tests include synthetic `7z` driver archives and ARM64 PE headers. They
+need `7z` and `sha256sum`, but no Windows ISO. They check selected driver bytes,
+automatic storage/network/input paths for each architecture with and without an
+answer file, profile pins, fallback-loader architecture and output cleanup.
+These standalone Rust tests are separate from the Cargo workspace checks. They
+do not qualify Windows Setup or installed-driver persistence.
 
 Test XP media readback from the repository root with the same pinned toolchain:
 
@@ -307,7 +310,45 @@ see the [validation record](../../docs/windows-validation.md).
 
 ## ARM64 installation
 
-The former QEMU installation generator has been removed. The separate
-[ARM64 guide](../../docs/windows-arm64.md) retains the provenance of earlier
-prepared-disk tests. A direct Firecracker ARM64 installer is not qualified; the
-AMD64 console and installation procedure do not establish ARM64 support.
+`client-arm64` creates a sparse target and an answer file with ARM64 components.
+It enables EMS through the firmware SPCR table and leaves the PC COM1 override
+unset, following Microsoft's
+[UEFI EMS procedure](https://learn.microsoft.com/en-us/windows-hardware/drivers/devtest/boot-parameters-to-enable-ems-redirection#enabling-ems-on-a-computer-with-uefi-firmware).
+
+`win11-iot-arm64` stages the Toets Windows 11 IoT Enterprise LTSC 2024 ARM64
+media and matching `w11/ARM64` viostor, NetKVM, vioinput and viosock packages.
+The viosock package includes its native Winsock provider; staging does not
+install or register it. The pinned source is
+`X23-81950_26100.1742.240906-0331.ge_release_svc_refresh_CLIENT_ENTERPRISES_OEM_A64FRE_en-us.iso`,
+SHA-256 `f8f068cdc90c894a55d8c8530db7c193234ba57bb11d33b71383839ac41246b4`. Use
+an authorised copy of that exact source and the pinned virtio-win ISO. This
+profile does not select standard Windows 11 Pro or Enterprise ARM64 media.
+
+```sh
+build/windows/prepare client-arm64 build/windows/arm64 1
+build/windows/prepare-nt6 win11-iot-arm64 windows11-iot-arm64.iso virtio-win.iso \
+  build/windows/arm64-staging build/windows/arm64/Autounattend.xml
+```
+
+The result is `arm64-staging/tree/` and `files.sha256-sizes`. The tool verifies
+the source hashes and ARM64 fallback PE machine, then copies the driver packages
+and optional answer. It preserves the source `boot.wim`; it does not inject
+WinPE drivers, change boot policy, build an ISO or create a GPT/FAT installer.
+Do not pass the staged tree or original optical ISO as an ARM console device.
+
+ARM uses a read-only virtio installer disk. WinPE must contain its signed ARM64
+storage and input drivers before boot, because it cannot read external virtio
+media to load its own storage driver. Service the staged WIM using Microsoft's
+DISM in an existing AMD64 Windows technician environment with the matching ADK
+and WinPE add-on. Microsoft documents
+[ARM image servicing on AMD64](https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/arm64-device-manufacturing)
+and
+[WinPE driver injection](https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/winpe-mount-and-customize).
+Provision installed-OS drivers separately, preserve signed ARM boot files and
+handle FAT32's file-size limit. Prove the writable target's identity before
+using an answer that wipes DiskID 0.
+
+A direct Firecracker ARM64 installer and standard ARM64 Windows 11 remain
+unqualified. The [ARM64 guide](../../docs/windows-arm64.md) retains historical
+prepared-disk provenance and current host requirements. The AMD64 console and
+installation procedure do not establish ARM64 support.
