@@ -1,6 +1,9 @@
 // Copyright 2024 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+#[cfg(all(target_arch = "x86_64", feature = "windows"))]
+use std::sync::{Arc, Mutex};
+
 use acpi_tables::{Aml, aml};
 use aws_lc_rs::rand;
 use serde::{Deserialize, Serialize};
@@ -39,6 +42,26 @@ pub enum VmGenIdError {
     WriteGuestMemory(#[from] GuestMemoryError),
     /// Could not notify guest: {0}
     NotifyGuest(std::io::Error),
+    /// Invalid generation-ID interrupt routing: {0}
+    InvalidInterrupt(u32),
+}
+
+#[derive(Debug)]
+enum VmGenIdInterrupt {
+    Ged {
+        event: EventFdTrigger,
+        gsi: u32,
+    },
+    #[cfg(all(target_arch = "x86_64", feature = "windows"))]
+    Gpe(Arc<Mutex<crate::devices::legacy::acpi::AcpiPower>>),
+}
+
+/// Existing platform interrupt owner used when reconstructing VMGenID.
+#[derive(Debug, Default)]
+pub struct VmGenIdRestoreArgs {
+    #[cfg(all(target_arch = "x86_64", feature = "windows"))]
+    /// Conventional PC event hardware; absent for the dedicated GED route.
+    pub power: Option<Arc<Mutex<crate::devices::legacy::acpi::AcpiPower>>>,
 }
 
 /// Virtual Machine Generation ID device
@@ -53,12 +76,9 @@ pub enum VmGenIdError {
 pub struct VmGenId {
     /// Current generation ID of guest VM
     pub gen_id: u128,
-    /// Interrupt line for notifying the device about generation ID changes
-    pub interrupt_evt: EventFdTrigger,
+    interrupt: VmGenIdInterrupt,
     /// Guest physical address where VMGenID data lives.
     pub guest_address: GuestAddress,
-    /// GSI number for the device
-    pub gsi: u32,
 }
 
 impl VmGenId {
@@ -76,9 +96,11 @@ impl VmGenId {
 
         Ok(Self {
             gen_id,
-            interrupt_evt,
+            interrupt: VmGenIdInterrupt::Ged {
+                event: interrupt_evt,
+                gsi,
+            },
             guest_address,
-            gsi,
         })
     }
 
@@ -89,14 +111,49 @@ impl VmGenId {
         let gsi = resource_allocator
             .allocate_gsi_legacy(1)
             .map_err(VmGenIdError::AllocateGsi)?[0];
-        // The generation ID needs to live in an 8-byte aligned buffer
-        let addr = resource_allocator
+        Self::from_parts(Self::allocate_address(resource_allocator)?, gsi)
+    }
+
+    fn allocate_address(
+        resource_allocator: &mut ResourceAllocator,
+    ) -> Result<GuestAddress, VmGenIdError> {
+        resource_allocator
             .system_memory
             .allocate(VMGENID_MEM_SIZE, 8, vm_allocator::AllocPolicy::LastMatch)
-            .map_err(VmGenIdError::AllocateMemory)?
-            .start();
+            .map(|range| GuestAddress(range.start()))
+            .map_err(VmGenIdError::AllocateMemory)
+    }
 
-        Self::from_parts(GuestAddress(addr), gsi)
+    #[cfg(all(target_arch = "x86_64", feature = "windows"))]
+    pub(crate) fn new_with_gpe(
+        resource_allocator: &mut ResourceAllocator,
+        power: Arc<Mutex<crate::devices::legacy::acpi::AcpiPower>>,
+    ) -> Result<Self, VmGenIdError> {
+        Ok(Self {
+            gen_id: Self::make_genid(),
+            interrupt: VmGenIdInterrupt::Gpe(power),
+            guest_address: Self::allocate_address(resource_allocator)?,
+        })
+    }
+
+    pub(crate) fn interrupt(&self) -> Option<(&EventFdTrigger, u32)> {
+        match &self.interrupt {
+            VmGenIdInterrupt::Ged { event, gsi } => Some((event, *gsi)),
+            #[cfg(all(target_arch = "x86_64", feature = "windows"))]
+            VmGenIdInterrupt::Gpe(_) => None,
+        }
+    }
+
+    pub(crate) fn uses_gpe(&self) -> bool {
+        self.interrupt().is_none()
+    }
+
+    pub(crate) fn gsi(&self) -> u32 {
+        match &self.interrupt {
+            VmGenIdInterrupt::Ged { gsi, .. } => *gsi,
+            #[cfg(all(target_arch = "x86_64", feature = "windows"))]
+            VmGenIdInterrupt::Gpe(_) => crate::devices::legacy::acpi::SCI_GSI,
+        }
     }
 
     // Create a 16-bytes random number
@@ -115,9 +172,14 @@ impl VmGenId {
         notification: VmGenIdRestoreNotification,
     ) -> Result<(), VmGenIdError> {
         if notification == VmGenIdRestoreNotification::Interrupt {
-            self.interrupt_evt
-                .trigger()
-                .map_err(VmGenIdError::NotifyGuest)?;
+            match &self.interrupt {
+                VmGenIdInterrupt::Ged { event, .. } => event.trigger(),
+                #[cfg(all(target_arch = "x86_64", feature = "windows"))]
+                VmGenIdInterrupt::Gpe(power) => {
+                    power.lock().expect("Poisoned lock").notify_vmgenid()
+                }
+            }
+            .map_err(VmGenIdError::NotifyGuest)?;
             debug!("vmgenid: notifying guest about new generation ID");
         }
         Ok(())
@@ -147,19 +209,45 @@ pub struct VMGenIDState {
     pub addr: u64,
 }
 
+impl VMGenIDState {
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) fn validate_pc_route(&self, pc_enabled: bool) -> Result<(), VmGenIdError> {
+        let valid = if pc_enabled {
+            self.gsi == crate::devices::legacy::acpi::SCI_GSI
+        } else {
+            (crate::arch::GSI_LEGACY_START..=crate::arch::GSI_LEGACY_END).contains(&self.gsi)
+        };
+        if !valid {
+            return Err(VmGenIdError::InvalidInterrupt(self.gsi));
+        }
+        Ok(())
+    }
+}
+
 impl<'a> Persist<'a> for VmGenId {
     type State = VMGenIDState;
-    type ConstructorArgs = ();
+    type ConstructorArgs = VmGenIdRestoreArgs;
     type Error = VmGenIdError;
 
     fn save(&self) -> Self::State {
         VMGenIDState {
-            gsi: self.gsi,
+            gsi: self.gsi(),
             addr: self.guest_address.0,
         }
     }
 
-    fn restore(_: Self::ConstructorArgs, state: &Self::State) -> Result<Self, Self::Error> {
+    fn restore(_args: Self::ConstructorArgs, state: &Self::State) -> Result<Self, Self::Error> {
+        #[cfg(all(target_arch = "x86_64", feature = "windows"))]
+        if let Some(power) = _args.power {
+            state.validate_pc_route(true)?;
+            return Ok(Self {
+                gen_id: Self::make_genid(),
+                interrupt: VmGenIdInterrupt::Gpe(power),
+                guest_address: GuestAddress(state.addr),
+            });
+        }
+        #[cfg(target_arch = "x86_64")]
+        state.validate_pc_route(false)?;
         Self::from_parts(GuestAddress(state.addr), state.gsi)
     }
 }
@@ -204,6 +292,93 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(target_arch = "x86_64", feature = "windows"))]
+    fn pc_restore_writes_id_before_signalling_shared_sci() {
+        use crate::devices::legacy::acpi::{AcpiPower, POWER_PORT, SCI_GSI};
+        use crate::vstate::bus::BusDevice;
+        use vmm_sys_util::eventfd::EventFd;
+        let power = std::sync::Arc::new(std::sync::Mutex::new(
+            AcpiPower::new(vmm_sys_util::eventfd::EventFd::new(libc::EFD_NONBLOCK).unwrap())
+                .unwrap(),
+        ));
+        let mut allocator = ResourceAllocator::new();
+        let device = VmGenId::new_with_gpe(&mut allocator, power.clone()).unwrap();
+        assert!(device.interrupt().is_none());
+        assert_eq!(device.save().gsi, SCI_GSI);
+        assert_eq!(
+            allocator.allocate_gsi_legacy(1).unwrap(),
+            [crate::arch::GSI_LEGACY_START]
+        );
+        let mem = single_region_mem(u64_to_usize(arch::SYSTEM_MEM_START + arch::SYSTEM_MEM_SIZE));
+        device.activate(&mem).unwrap();
+        let saved = device.save();
+        power.lock().unwrap().write(POWER_PORT, 13, &[1]);
+        let restored = VmGenId::restore(
+            super::VmGenIdRestoreArgs {
+                power: Some(power.clone()),
+            },
+            &saved,
+        )
+        .unwrap();
+        restored.activate(&mem).unwrap();
+        restored
+            .do_post_restore(VmGenIdRestoreNotification::Disabled)
+            .unwrap();
+        assert_eq!(
+            power.lock().unwrap().sci_evt.read().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        let value: u128 = mem.read_obj(restored.guest_address).unwrap();
+        assert_eq!(value, restored.gen_id);
+        assert_ne!(value, device.gen_id);
+        restored
+            .do_post_restore(VmGenIdRestoreNotification::Interrupt)
+            .unwrap();
+        assert_eq!(power.lock().unwrap().sci_evt.read().unwrap(), 1);
+        let mut registers = [0; 2];
+        power.lock().unwrap().read(POWER_PORT, 12, &mut registers);
+        assert_eq!(registers, [1, 1]);
+        let saved_power = power.lock().unwrap().save();
+        let mut restored_power = AcpiPower::new(EventFd::new(libc::EFD_NONBLOCK).unwrap()).unwrap();
+        restored_power.restore(&saved_power).unwrap();
+        assert_eq!(restored_power.sci_evt.read().unwrap(), 1);
+        let restored_power = std::sync::Arc::new(std::sync::Mutex::new(restored_power));
+        let disabled = VmGenId::restore(
+            super::VmGenIdRestoreArgs {
+                power: Some(restored_power.clone()),
+            },
+            &saved,
+        )
+        .unwrap();
+        disabled.activate(&mem).unwrap();
+        disabled
+            .do_post_restore(VmGenIdRestoreNotification::Disabled)
+            .unwrap();
+        let mut power_state = restored_power.lock().unwrap();
+        power_state.read(POWER_PORT, 12, &mut registers);
+        assert_eq!(registers, [1, 1]);
+        assert_eq!(
+            power_state.sci_evt.read().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        drop(power_state);
+        assert!(matches!(
+            VmGenId::restore(Default::default(), &saved),
+            Err(super::VmGenIdError::InvalidInterrupt(gsi)) if gsi == SCI_GSI
+        ));
+        assert!(matches!(
+            VmGenId::restore(
+                super::VmGenIdRestoreArgs { power: Some(power) },
+                &super::VMGenIDState {
+                    gsi: crate::arch::GSI_LEGACY_START,
+                    ..saved
+                }
+            ),
+            Err(super::VmGenIdError::InvalidInterrupt(gsi)) if gsi == crate::arch::GSI_LEGACY_START
+        ));
+    }
+
+    #[test]
     fn test_device_restore_without_notification() {
         let vmgenid = default_vmgenid();
         let mem = single_region_mem(
@@ -212,14 +387,20 @@ mod tests {
         vmgenid.activate(&mem).unwrap();
 
         let state = vmgenid.save();
-        let restored = VmGenId::restore((), &state).unwrap();
+        let restored = VmGenId::restore(Default::default(), &state).unwrap();
         restored.activate(&mem).unwrap();
         restored
             .do_post_restore(VmGenIdRestoreNotification::Disabled)
             .unwrap();
 
         assert_eq!(
-            restored.interrupt_evt.read().unwrap_err().raw_os_error(),
+            restored
+                .interrupt()
+                .unwrap()
+                .0
+                .read()
+                .unwrap_err()
+                .raw_os_error(),
             Some(libc::EAGAIN)
         );
         let guest_data: u128 = mem.read_obj(VMGENID_TEST_GUEST_ADDR).unwrap();

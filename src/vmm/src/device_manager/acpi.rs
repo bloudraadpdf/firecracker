@@ -39,7 +39,18 @@ impl ACPIDeviceManager {
         }
     }
 
-    pub fn attach_vmgenid(&mut self, vm: &KvmVm) -> Result<(), ACPIDeviceError> {
+    pub fn attach_vmgenid(
+        &mut self,
+        vm: &KvmVm,
+        #[cfg(all(target_arch = "x86_64", feature = "windows"))] power: Option<
+            std::sync::Arc<std::sync::Mutex<crate::devices::legacy::acpi::AcpiPower>>,
+        >,
+    ) -> Result<(), ACPIDeviceError> {
+        #[cfg(all(target_arch = "x86_64", feature = "windows"))]
+        if let Some(power) = power {
+            self.vmgenid = Some(VmGenId::new_with_gpe(&mut vm.resource_allocator(), power)?);
+            return Ok(());
+        }
         self.vmgenid = Some(VmGenId::new(&mut vm.resource_allocator())?);
         Ok(())
     }
@@ -58,7 +69,9 @@ impl ACPIDeviceManager {
     }
 
     pub fn activate_vmgenid(&self, vm: &KvmVm) -> Result<(), ACPIDeviceError> {
-        vm.register_irq(&self.vmgenid().interrupt_evt, self.vmgenid().gsi)?;
+        if let Some((event, gsi)) = self.vmgenid().interrupt() {
+            vm.register_irq(event, gsi)?;
+        }
         self.vmgenid().activate(vm.guest_memory())?;
         Ok(())
     }
@@ -71,9 +84,11 @@ impl ACPIDeviceManager {
 
     pub fn replay_gsi_allocations(&self, vm: &KvmVm) -> Result<(), ACPIDeviceError> {
         let mut resource_allocator = vm.resource_allocator();
-        resource_allocator
-            .gsi_legacy_allocator
-            .allocate_id_at(self.vmgenid().gsi)?;
+        if let Some((_, gsi)) = self.vmgenid().interrupt() {
+            resource_allocator
+                .gsi_legacy_allocator
+                .allocate_id_at(gsi)?;
+        }
         resource_allocator
             .gsi_legacy_allocator
             .allocate_id_at(self.vmclock().gsi)?;
@@ -118,7 +133,19 @@ impl ACPIDeviceManager {
         // AML for [`VmClock`] device.
         self.vmclock().append_aml_bytes_in_scope(scope, v)?;
 
-        // Create the AML for the GED interrupt handler
+        if self.vmgenid().uses_gpe() {
+            return aml::Method::new(
+                "\\_GPE._E00".try_into()?,
+                0,
+                true,
+                vec![&aml::Notify::new(
+                    &aml::Path::new("\\_SB_.VGEN")?,
+                    &0x80usize,
+                )],
+            )
+            .append_aml_bytes(v);
+        }
+        let (_, gsi) = self.vmgenid().interrupt().unwrap();
         aml::Device::new(
             scope.device_path("GED_")?,
             vec![
@@ -126,11 +153,7 @@ impl ACPIDeviceManager {
                 &aml::Name::new(
                     "_CRS".try_into()?,
                     &aml::ResourceTemplate::new(vec![&aml::Interrupt::new(
-                        true,
-                        true,
-                        false,
-                        false,
-                        self.vmgenid().gsi,
+                        true, true, false, false, gsi,
                     )]),
                 )?,
                 &aml::Method::new(
@@ -145,5 +168,49 @@ impl ACPIDeviceManager {
             ],
         )
         .append_aml_bytes(v)
+    }
+}
+
+#[cfg(test)]
+#[cfg(all(target_arch = "x86_64", feature = "windows"))]
+mod tests {
+    use std::io::Write;
+    use std::process::Command;
+
+    use acpi_tables::{Aml, Sdt};
+    use vm_memory::{Bytes, GuestAddress};
+
+    #[test]
+    fn pc_gpe_executes_generation_notify() {
+        let manager = crate::device_manager::tests::default_device_manager_with_pc();
+        let mut aml = Vec::new();
+        manager.acpi_devices.append_aml_bytes(&mut aml).unwrap();
+        let mut table = acpi_tables::Dsdt::new(*b"FC    ", *b"GPE TEST", 1, aml);
+        let memory =
+            vm_memory::GuestMemoryMmap::<()>::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+        table.write_to_guest(&memory, GuestAddress(0)).unwrap();
+        let mut bytes = vec![0; table.len()];
+        memory.read_slice(&mut bytes, GuestAddress(0)).unwrap();
+        let file = vmm_sys_util::tempfile::TempFile::new_in(std::path::Path::new(".")).unwrap();
+        file.as_file().write_all(&bytes).unwrap();
+        let output = Command::new("acpiexec")
+            .args(["-to", "20", "-b", "execute \\_GPE._E00"])
+            .arg(file.as_path())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let output = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!output.contains("AE_"), "{output}");
+        assert!(
+            output
+                .lines()
+                .any(|line| line.contains("Received a Device Notify on [VGEN]")
+                    && line.contains("Value 0x80")),
+            "{output}"
+        );
     }
 }

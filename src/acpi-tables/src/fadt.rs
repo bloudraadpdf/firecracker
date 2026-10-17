@@ -152,6 +152,13 @@ impl Fadt {
         self.p_lvl3_lat = U16::new(u16::MAX);
     }
 
+    /// Configure the system-I/O GPE0 status and enable block.
+    pub fn set_gpe0_registers(&mut self, address: u32) {
+        self.gpe0_blk = U32::new(address);
+        self.gpe0_blk_len = 2;
+        self.x_gpe0_blk = GenericAddressStructure::new(1, 16, 0, 1, address.into());
+    }
+
     /// Set the firmware control pointer in the supported address width.
     pub fn set_facs(&mut self, addr: u64) {
         self.firmware_control = U32::new(u32::try_from(addr).unwrap_or(0));
@@ -217,6 +224,21 @@ mod tests {
     use vm_memory::GuestMemoryMmap;
 
     use super::*;
+
+    #[test]
+    fn conventional_gpe_block() {
+        let mut table = Fadt::new(*b"TESTVM", *b"TESTFADT", 0);
+        table.set_gpe0_registers(0x60c);
+        assert_eq!(table.gpe0_blk.get(), 0x60c);
+        assert_eq!(table.gpe0_blk_len, 2);
+        assert_eq!(table.gpe1_blk.get(), 0);
+        assert_eq!(table.gpe1_blk_len, 0);
+        assert_eq!(table.gpe1_base, 0);
+        assert_eq!(
+            table.x_gpe0_blk.as_bytes(),
+            GenericAddressStructure::new(1, 16, 0, 1, 0x60c).as_bytes()
+        );
+    }
 
     #[test]
     fn hardware_reduced_power_registers() {

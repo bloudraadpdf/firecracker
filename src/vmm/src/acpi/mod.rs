@@ -314,12 +314,7 @@ mod tests {
     #[cfg(feature = "windows")]
     fn pc_vmm() -> crate::Vmm {
         let mut vmm = default_vmm();
-        vmm.device_manager.legacy_devices.as_mut().unwrap().pc = Some(
-            crate::device_manager::legacy::PcDevices::new(
-                vmm.vm.as_kvm().unwrap().vcpus_exit_evt(),
-            )
-            .unwrap(),
-        );
+        vmm.device_manager = crate::device_manager::tests::default_device_manager_with_pc();
         vmm
     }
 
@@ -352,18 +347,25 @@ mod tests {
             ),
         ] {
             for pc_enabled in [false, true] {
-                vmm.device_manager.legacy_devices.as_mut().unwrap().pc = pc_enabled.then(|| {
-                    crate::device_manager::legacy::PcDevices::new(
-                        vmm.vm.as_kvm().unwrap().vcpus_exit_evt(),
-                    )
-                    .unwrap()
-                });
+                let mut fixture = if pc_enabled {
+                    crate::device_manager::tests::default_device_manager_with_pc()
+                } else {
+                    crate::device_manager::tests::default_device_manager()
+                };
+                vmm.device_manager.legacy_devices.as_mut().unwrap().pc =
+                    fixture.legacy_devices.as_mut().unwrap().pc.take();
+                vmm.device_manager.acpi_devices = fixture.acpi_devices;
                 let mut bytes = Vec::new();
                 vmm.device_manager.append_aml_bytes(&mut bytes).unwrap();
                 super::setup_arch_dsdt(&mut bytes, &vmm.device_manager).unwrap();
-                for (name, irq) in [(b"VCLK", 6u32), (b"GED_", 5), (b"COM1", 4), (b"PS2_", 1)]
-                    .into_iter()
-                    .chain(pc_enabled.then_some((b"RTC0", 8)))
+                for (name, irq) in [
+                    (b"VCLK", if pc_enabled { 5u32 } else { 6 }),
+                    (b"COM1", 4),
+                    (b"PS2_", 1),
+                ]
+                .into_iter()
+                .chain((!pc_enabled).then_some((b"GED_", 5)))
+                .chain(pc_enabled.then_some((b"RTC0", 8)))
                 {
                     let path = [parent, name].concat();
                     let start = bytes
@@ -385,6 +387,8 @@ mod tests {
                     let resource = [&[0x89, 6, 0, 3, 1][..], &irq.to_le_bytes()].concat();
                     assert!(body.windows(resource.len()).any(|value| value == resource));
                 }
+                assert_eq!(bytes.windows(4).any(|value| value == b"GED_"), !pc_enabled);
+                assert_eq!(bytes.windows(4).any(|value| value == b"_E00"), pc_enabled);
                 let notify = b"\x86\\\x2e_SB_VGEN\x0a\x80";
                 assert!(bytes.windows(notify.len()).any(|value| value == notify));
                 for name in [b"RTC0", b"PRES", b"_S5_"] {
@@ -468,6 +472,9 @@ mod tests {
         assert_eq!(&table[36..40], &[0; 4]);
         assert_eq!(&table[46..48], &[0; 2]);
         assert_eq!(&table[56..80], &[0; 24]);
+        assert_eq!(&table[80..88], &[0; 8]);
+        assert_eq!(&table[92..95], &[0; 3]);
+        assert_eq!(&table[220..244], &[0; 24]);
         assert_eq!(&table[132..140], &[0; 8]);
     }
 
@@ -502,6 +509,9 @@ mod tests {
         assert_eq!(u32::from_le_bytes(table[64..68].try_into().unwrap()), 0x606);
         assert_eq!(u32::from_le_bytes(table[76..80].try_into().unwrap()), 0x608);
         assert_eq!(&table[88..92], &[4, 2, 0, 4]);
+        assert_eq!(u32::from_le_bytes(table[80..84].try_into().unwrap()), 0x60c);
+        assert_eq!(&table[92..95], &[2, 0, 0]);
+        assert_eq!(&table[220..232], &[1, 16, 0, 1, 0x0c, 6, 0, 0, 0, 0, 0, 0]);
         let facs_address = u64::from(u32::from_le_bytes(table[36..40].try_into().unwrap()));
         assert_ne!(facs_address, 0);
         assert_eq!(facs_address % 64, 0);
