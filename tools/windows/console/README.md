@@ -231,12 +231,14 @@ that is waiting for keyboard input:
 cargo run --locked --manifest-path tools/windows/console/Cargo.toml --example probe -- 127.0.0.1:5901 /run/vm/console.token http://127.0.0.1:6080
 ```
 
-The diagnostic ISO test passed through the real Firecracker Unix socket and
-WebSocket bridge: a 720x400 frame was received and `w` appeared in both the
-guest serial log and the captured display. This establishes the transport/input
-path; it is not a Windows installation result.
+The historical console diagnostic ISO test passed through the real Firecracker
+Unix socket and WebSocket bridge: a 720x400 frame was received and `w` appeared
+in both the guest serial log and the captured display. This establishes the
+transport/input path; it is not a Windows installation or Windows PE storage/API
+probe result. The [validation record](../../../docs/windows-validation.md)
+separates current checks from historical binaries and snapshot formats.
 
-The vendored noVNC application was also tested in Chrome against Windows 10
-Setup through an SSH-forwarded WebSocket bridge. Its screen refreshed after
+The vendored noVNC application was historically tested in Chrome against Windows
+10 Setup through an SSH-forwarded WebSocket bridge. Its screen refreshed after
 guest activity, and physical browser key events executed `echo browser` in the
 guest command prompt. Closing the test tab left the VM running.
