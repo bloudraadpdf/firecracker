@@ -13,7 +13,7 @@ use zerocopy::IntoBytes;
 
 use crate::arch::x86_64::layout;
 use crate::devices::legacy::acpi::{
-    PM1_CONTROL_PORT, PM1_EVENT_PORT, POWER_PORT, SCI_GSI, TIMER_PORT,
+    GPE0_PORT, PM1_CONTROL_PORT, PM1_EVENT_PORT, POWER_PORT, SCI_GSI, TIMER_PORT,
 };
 
 #[inline(always)]
@@ -54,6 +54,7 @@ pub(crate) fn setup_arch_fadt(fadt: &mut Fadt, devices: &crate::device_manager::
         PM1_CONTROL_PORT.try_into().unwrap(),
         TIMER_PORT.try_into().unwrap(),
     );
+    fadt.set_gpe0_registers(GPE0_PORT.try_into().unwrap());
 }
 
 #[inline(always)]

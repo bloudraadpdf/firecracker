@@ -336,7 +336,7 @@ fn create_vmgenid_node(fdt: &mut FdtWriter, vmgenid: &VmGenId) -> Result<(), Fdt
     fdt.property_array_u64("reg", &[vmgenid.guest_address.0, VMGENID_MEM_SIZE])?;
     fdt.property_array_u32(
         "interrupts",
-        &[GIC_FDT_IRQ_TYPE_SPI, vmgenid.gsi, IRQ_TYPE_EDGE_RISING],
+        &[GIC_FDT_IRQ_TYPE_SPI, vmgenid.gsi(), IRQ_TYPE_EDGE_RISING],
     )?;
     fdt.end_node(vmgenid_node)?;
     Ok(())

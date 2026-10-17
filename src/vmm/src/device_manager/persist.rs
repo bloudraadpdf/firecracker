@@ -16,7 +16,9 @@ use crate::EventManager;
 use crate::device_manager::DevicePersistError;
 use crate::device_manager::acpi::ACPIDeviceError;
 use crate::devices::acpi::vmclock::{VmClock, VmClockRestoreNotification, VmClockState};
-use crate::devices::acpi::vmgenid::{VMGenIDState, VmGenId, VmGenIdRestoreNotification};
+use crate::devices::acpi::vmgenid::{
+    VMGenIDState, VmGenId, VmGenIdRestoreArgs, VmGenIdRestoreNotification,
+};
 #[cfg(target_arch = "aarch64")]
 use crate::devices::legacy::RTCDevice;
 use crate::devices::virtio::balloon::Balloon;
@@ -214,6 +216,14 @@ pub struct ACPIDeviceManagerState {
     vmclock: VmClockState,
 }
 
+impl ACPIDeviceManagerState {
+    #[cfg(target_arch = "x86_64")]
+    pub(super) fn validate_pc_route(&self, pc_enabled: bool) -> Result<(), ACPIDeviceError> {
+        self.vmgenid.validate_pc_route(pc_enabled)?;
+        Ok(())
+    }
+}
+
 /// Holds the states of the non-virtio (platform) devices connected over the MMIO transport.
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct MMIOPlatformDevicesState {
@@ -240,7 +250,13 @@ impl<'a> Persist<'a> for ACPIDeviceManager {
     fn restore(args: Self::ConstructorArgs, state: &Self::State) -> Result<Self, Self::Error> {
         let vm = args.vm;
         let mut acpi_devices = ACPIDeviceManager::new(
-            VmGenId::restore((), &state.vmgenid)?,
+            VmGenId::restore(
+                VmGenIdRestoreArgs {
+                    #[cfg(all(target_arch = "x86_64", feature = "windows"))]
+                    power: args.power,
+                },
+                &state.vmgenid,
+            )?,
             VmClock::restore((), &state.vmclock)?,
         );
 
@@ -258,6 +274,8 @@ impl<'a> Persist<'a> for ACPIDeviceManager {
 
 #[derive(Debug)]
 pub struct ACPIDeviceRestoreArgs<'a> {
+    #[cfg(all(target_arch = "x86_64", feature = "windows"))]
+    pub power: Option<Arc<Mutex<crate::devices::legacy::acpi::AcpiPower>>>,
     pub vm: &'a KvmVm,
     pub vmgenid_notification: VmGenIdRestoreNotification,
     pub vmclock_notification: VmClockRestoreNotification,
@@ -759,6 +777,64 @@ mod tests {
     use crate::vmm_config::net::NetworkInterfaceConfig;
     use crate::vmm_config::pmem::PmemConfig;
     use crate::vmm_config::vsock::VsockDeviceConfig;
+
+    #[test]
+    #[cfg(all(target_arch = "x86_64", feature = "windows"))]
+    fn invalid_pc_events_fail_before_constructing_legacy_devices() {
+        use crate::device_manager::{DeviceManager, DeviceManagerPersistError, DeviceRestoreArgs};
+        use crate::devices::legacy::acpi::POWER_PORT;
+        use crate::resources::VmResources;
+        use crate::utils::mib_to_bytes;
+        use crate::vstate::vm::tests::setup_vm_with_memory;
+
+        let mut vm = setup_vm_with_memory(mib_to_bytes(128));
+        vm.setup_irqchip(true).unwrap();
+        let vm = Arc::new(vm);
+        let allocated = vm.resource_allocator().gsi_legacy_allocator.clone();
+        let mut events = EventManager::new().unwrap();
+        let mut resources = VmResources::default();
+        for malformed in ["route", "gpe_status", "gpe_enable"] {
+            let mut state = device_manager::tests::default_device_manager_with_pc()
+                .save()
+                .unwrap();
+            if malformed == "route" {
+                state.acpi_state.vmgenid.gsi = crate::arch::GSI_LEGACY_START;
+            } else {
+                let mut value = serde_json::to_value(state.power_state.as_ref().unwrap()).unwrap();
+                value[malformed] = 2.into();
+                state.power_state = Some(serde_json::from_value(value).unwrap());
+            }
+            for _ in 0..3 {
+                let error = DeviceManager::restore(
+                    DeviceRestoreArgs {
+                        mem: vm.guest_memory(),
+                        vm: &vm,
+                        event_manager: &mut events,
+                        vm_resources: &mut resources,
+                        instance_id: "pc-invalid",
+                        vcpus_exit_evt: vm.vcpus_exit_evt(),
+                        vmgenid_notification: Default::default(),
+                        vmclock_notification: Default::default(),
+                    },
+                    &state,
+                )
+                .unwrap_err();
+                if malformed == "route" {
+                    assert!(matches!(
+                        error,
+                        DeviceManagerPersistError::AcpiRestore(ACPIDeviceError::VmGenId(_))
+                    ));
+                } else {
+                    assert!(matches!(
+                        error,
+                        DeviceManagerPersistError::InvalidPcState(_)
+                    ));
+                }
+                assert_eq!(vm.resource_allocator().gsi_legacy_allocator, allocated);
+                assert!(vm.pio_bus.read(POWER_PORT, &mut [0]).is_err());
+            }
+        }
+    }
 
     impl<T> PartialEq for VirtioDeviceState<T> {
         fn eq(&self, other: &VirtioDeviceState<T>) -> bool {

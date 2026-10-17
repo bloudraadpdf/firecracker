@@ -353,7 +353,13 @@ impl DeviceManager {
     }
 
     pub(crate) fn attach_vmgenid_device(&mut self, vm: &KvmVm) -> Result<(), AttachDeviceError> {
-        self.acpi_devices.attach_vmgenid(vm)?;
+        #[cfg(all(target_arch = "x86_64", feature = "windows"))]
+        let power = self.pc_devices().map(|pc| pc.acpi_power.clone());
+        self.acpi_devices.attach_vmgenid(
+            vm,
+            #[cfg(all(target_arch = "x86_64", feature = "windows"))]
+            power,
+        )?;
         self.acpi_devices.activate_vmgenid(vm)?;
         Ok(())
     }
@@ -773,6 +779,9 @@ pub enum DeviceManagerPersistError {
     /// PC timer snapshot must contain both RTC and ACPI power state.
     #[cfg(target_arch = "x86_64")]
     IncompletePcState,
+    /// Invalid saved PC event state: {0}
+    #[cfg(target_arch = "x86_64")]
+    InvalidPcState(std::io::Error),
     /// Console restore failed: {0}
     Console(#[from] std::io::Error),
     /// TPM restore failed: {0}
@@ -957,6 +966,14 @@ impl DeviceManager {
             (None, None) => false,
             _ => return Err(DeviceManagerPersistError::IncompletePcState),
         };
+        #[cfg(target_arch = "x86_64")]
+        state.acpi_state.validate_pc_route(pc_enabled)?;
+        #[cfg(target_arch = "x86_64")]
+        if let Some(power) = &state.power_state {
+            power
+                .validate()
+                .map_err(DeviceManagerPersistError::InvalidPcState)?;
+        }
         // Setup legacy devices in case of x86
         #[cfg(target_arch = "x86_64")]
         let serial_state: Option<vm_superio::serial::SerialState> =
@@ -1013,6 +1030,8 @@ impl DeviceManager {
         // Restore ACPI devices
         let acpi_devices = ACPIDeviceManager::restore(
             persist::ACPIDeviceRestoreArgs {
+                #[cfg(all(target_arch = "x86_64", feature = "windows"))]
+                power: legacy_devices.pc.as_ref().map(|pc| pc.acpi_power.clone()),
                 vm: constructor_args.vm,
                 vmgenid_notification: constructor_args.vmgenid_notification,
                 vmclock_notification: constructor_args.vmclock_notification,
@@ -1173,6 +1192,12 @@ pub(crate) mod tests {
         let mut manager = default_device_manager();
         let exit = EventFd::new(libc::EFD_NONBLOCK).unwrap();
         manager.legacy_devices.as_mut().unwrap().pc = Some(PcDevices::new(&exit).unwrap());
+        let power = manager.pc_devices().unwrap().acpi_power.clone();
+        let mut allocator = ResourceAllocator::new();
+        manager.acpi_devices = ACPIDeviceManager::new(
+            VmGenId::new_with_gpe(&mut allocator, power).unwrap(),
+            VmClock::new(&mut allocator).unwrap(),
+        );
         manager
     }
 

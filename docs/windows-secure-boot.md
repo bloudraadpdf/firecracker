@@ -1,7 +1,7 @@
 # Standard Windows 11 platform
 
 Standard Windows 11 Pro and Enterprise are in the acceptance scope. Historical
-Enterprise Evaluation tests passed installation, Secure Boot, TPM,
+format-31 Enterprise Evaluation tests passed installation, Secure Boot, TPM,
 cold/full/differential restore and both egress paths on the recorded build. The
 [validation record](windows-validation.md#current-integration-candidate)
 separates those results from current qualification. Support is experimental. The
@@ -67,7 +67,7 @@ update.
 
 ## Checkpoints
 
-Snapshot format 32.0.0 includes complete TPM and variable-service state,
+Snapshot format 33.0.0 includes complete TPM and variable-service state,
 physical-presence registers and the firmware profile/system UUID. Earlier
 snapshots require the matching earlier VMM; there is no implicit conversion.
 Display memory, TPM state and variables fit the bounded 32 MiB snapshot reader.
@@ -110,13 +110,14 @@ A software TPM and host-managed variables do not protect against the host owner.
 ## Validation
 
 The [validation matrix](windows-validation.md) records the exact installed
-Windows edition, build and snapshot format. Standard Enterprise Evaluation
-passes Secure Boot, Get-Tpm readiness, public TBS GetRandom, PCR 7 and existing
-persistent-object identity checks after cold boot and both restore types.
-Installation uses Microsoft's CA2023 boot files with the current revocation
-database and a signed viostor driver, without hardware-check bypasses or forced
-unsigned drivers. Public TPM baselines also match across the cold boot between
-TAP and CONNECT runs.
+Windows edition, build and snapshot format. The historical format-31 Standard
+Enterprise Evaluation run passed Secure Boot, Get-Tpm readiness, public TBS
+GetRandom, PCR 7 and existing persistent-object identity checks after cold boot
+and both restore types. Its installation used Microsoft's CA2023 boot files with
+the recorded revocation database and a signed viostor driver, without
+hardware-check bypasses or forced unsigned drivers. Public TPM baselines also
+matched across the cold boot between TAP and CONNECT runs. These results do not
+qualify the current format-33 platform.
 
 BitLocker automatically encrypted the guest volume. The recorded volume is
 unlocked, protection is off and no key protectors are configured. Read-only
@@ -129,10 +130,11 @@ Host and firmware regressions cover real swtpm startup, PCR extension,
 export/import; bounded variable frames, deadlines and DMA; RESET isolation;
 signed updates, tamper, replay and policy; staged restore failure; and helper
 disconnection. A signed EFI probe verifies Secure Boot, unsigned-image
-rejection, TPM discovery and the event log. Persistent variables survive cold
-boot and isolated full/differential restores. Unauthenticated PK deletion and
-writes to derived Secure Boot state are rejected. Runtime Windows checks
-exercise services after `ExitBootServices`, separately from the EFI probe.
+rejection, TPM discovery and the event log. In the historical format-31 runtime
+checks, persistent variables survived cold boot and isolated full/differential
+restores. Unauthenticated PK deletion and writes to derived Secure Boot state
+were rejected. Windows checks exercised services after `ExitBootServices`,
+separately from the EFI probe.
 
 ## Physical presence
 
@@ -147,8 +149,9 @@ security boundary.
 
 Malformed calls, helper failure, busy snapshots and request persistence have
 host regressions. Disposable firmware tests retain an owner NV index after
-refused clear and remove it after confirmed clear. Windows Get-Tpm and WMI
-transition queries pass. See [the validation record](windows-validation.md).
+refused clear and remove it after confirmed clear. Historical format-31 Windows
+Get-Tpm and WMI transition queries passed. See
+[the validation record](windows-validation.md).
 
 References:
 
