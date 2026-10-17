@@ -9,6 +9,8 @@ pub mod interrupts;
 pub mod kvm;
 /// Module with GuestMemory implementation.
 pub mod memory;
+#[cfg(target_arch = "x86_64")]
+pub(crate) mod prefault;
 /// Resource manager for devices.
 pub mod resources;
 /// Module with Vcpu implementation.

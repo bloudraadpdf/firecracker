@@ -112,6 +112,15 @@ The Firecracker snapshot create/resume performance depends on the memory size,
 vCPU count and emulated devices count. The Firecracker CI runs snapshot tests on
 all [supported platforms](../../README.md#tested-platforms).
 
+On x86_64, snapshot format 13 records the physical ranges of the boot kernel's
+file-backed executable ELF segments. When KVM supports `KVM_PRE_FAULT_MEMORY`,
+restore prepares read-only stage-2 mappings for allocated tmpfs pages in those
+ranges before vCPU threads start. This preserves copy-on-write and sparse holes.
+It shifts kernel instruction faults into restore preparation; other memory pages
+remain demand-faulted. Disk, userfaultfd and non-ELF boot sources retain demand
+faults. Hosts without the capability and unsupported vCPU modes do the same.
+See the [KVM API](https://docs.kernel.org/virt/kvm/api.html#kvm-pre-fault-memory).
+
 ### Developer preview status
 
 Diff snapshots are still in developer preview while we are diving deep into how

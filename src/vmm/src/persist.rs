@@ -60,6 +60,9 @@ pub struct VmInfo {
     pub boot_source: BootSourceConfig,
     /// Huge page configuration
     pub huge_pages: HugePageConfig,
+    /// Page-aligned physical ranges of the boot kernel executable segments.
+    #[cfg(target_arch = "x86_64")]
+    pub kernel_executable_ranges: Vec<std::ops::Range<u64>>,
 }
 
 impl From<&VmResources> for VmInfo {
@@ -70,6 +73,8 @@ impl From<&VmResources> for VmInfo {
             cpu_template: StaticCpuTemplate::from(&value.machine_config.cpu_template),
             boot_source: value.boot_source.config.clone(),
             huge_pages: value.machine_config.huge_pages,
+            #[cfg(target_arch = "x86_64")]
+            kernel_executable_ranges: Vec::new(),
         }
     }
 }
@@ -83,6 +88,8 @@ impl From<&Vmm> for VmInfo {
             cpu_template: StaticCpuTemplate::from(&machine_config.cpu_template),
             boot_source: value.boot_source_config.clone(),
             huge_pages: machine_config.huge_pages,
+            #[cfg(target_arch = "x86_64")]
+            kernel_executable_ranges: value.kernel_executable_ranges.clone(),
         }
     }
 }
@@ -166,7 +173,7 @@ pub enum CreateSnapshotError {
 }
 
 /// Snapshot version
-pub const SNAPSHOT_VERSION: Version = Version::new(12, 0, 0);
+pub const SNAPSHOT_VERSION: Version = Version::new(13, 0, 0);
 
 /// Creates a Microvm snapshot.
 pub fn create_snapshot(
@@ -833,6 +840,8 @@ mod tests {
             kvm_state: Default::default(),
             vm_info: VmInfo {
                 mem_size_mib: 1u64,
+                #[cfg(target_arch = "x86_64")]
+                kernel_executable_ranges: vec![0x1000..0x3000, 0x8000..0x9000],
                 ..Default::default()
             },
             #[cfg(target_arch = "aarch64")]

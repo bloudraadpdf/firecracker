@@ -302,6 +302,8 @@ pub struct Vmm {
     /// Machine config
     pub machine_config: MachineConfig,
     boot_source_config: BootSourceConfig,
+    #[cfg(target_arch = "x86_64")]
+    kernel_executable_ranges: Vec<std::ops::Range<u64>>,
     shutdown_exit_code: Option<FcExitCode>,
 
     /// VM object.
@@ -530,8 +532,15 @@ impl Vmm {
             }
         };
 
+        #[cfg(target_arch = "x86_64")]
+        let vm_info = VmInfo {
+            kernel_executable_ranges: self.kernel_executable_ranges.clone(),
+            ..vm_info.clone()
+        };
+        #[cfg(target_arch = "aarch64")]
+        let vm_info = vm_info.clone();
         Ok(MicrovmState {
-            vm_info: vm_info.clone(),
+            vm_info,
             kvm_state,
             vm_state,
             vcpu_states,

@@ -101,6 +101,9 @@ pub enum StartMicrovmError {
     LoadCommandline(linux_loader::loader::Error),
     /// Cannot start microvm without kernel configuration.
     MissingKernelConfig,
+    /// Cannot read kernel executable ranges: {0}
+    #[cfg(target_arch = "x86_64")]
+    KernelExecutableRanges(std::io::Error),
     /// Cannot start microvm without guest mem_size config.
     MissingMemSizeConfig,
     /// No seccomp filter for thread category: {0}
@@ -212,6 +215,10 @@ pub fn build_microvm_for_boot(
 
     let guest_memory = kvm_vm.guest_memory();
     let entry_point = load_kernel(&boot_config.kernel_file, guest_memory)?;
+    #[cfg(target_arch = "x86_64")]
+    let kernel_executable_ranges =
+        crate::vstate::prefault::kernel_executable_ranges(&boot_config.kernel_file)
+            .map_err(StartMicrovmError::KernelExecutableRanges)?;
     let initrd = InitrdConfig::from_config(boot_config, guest_memory)?;
 
     if !vm_resources.pci_enabled {
@@ -324,6 +331,8 @@ pub fn build_microvm_for_boot(
         instance_info: instance_info.clone(),
         machine_config: vm_resources.machine_config.clone(),
         boot_source_config: vm_resources.boot_source.config.clone(),
+        #[cfg(target_arch = "x86_64")]
+        kernel_executable_ranges,
         shutdown_exit_code: None,
         vm,
         device_manager,
@@ -415,6 +424,9 @@ pub enum BuildMicrovmFromSnapshotError {
     RestoreVcpus(#[from] VcpuError),
     /// Failed to restore devices: {0}
     RestoreDevices(#[from] DeviceManagerPersistError),
+    #[cfg(target_arch = "x86_64")]
+    /// Failed to prepare restored snapshot memory: {0}
+    PrefaultMemory(io::Error),
     /// clock_realtime is not supported on aarch64.
     UnsupportedClockRealtime,
 }
@@ -489,6 +501,25 @@ pub fn build_microvm_from_snapshot(
     // Restore the boot source config paths.
     vm_resources.boot_source.config = microvm_state.vm_info.boot_source;
 
+    #[cfg(target_arch = "x86_64")]
+    if uffd.is_none()
+        && vm
+            .kvm()
+            .fd
+            .check_extension_raw(u64::from(kvm_bindings::KVM_CAP_PRE_FAULT_MEMORY))
+            != 0
+        && let Err(error) = crate::vstate::prefault::prepare(
+            &vcpus[0].kvm_vcpu.fd,
+            vm.guest_memory(),
+            &microvm_state.vm_info.kernel_executable_ranges,
+        )
+    {
+        if error.raw_os_error() != Some(libc::EOPNOTSUPP) {
+            return Err(BuildMicrovmFromSnapshotError::PrefaultMemory(error));
+        }
+        debug!("Snapshot memory prefault is unavailable in this vCPU mode");
+    }
+
     vm.set_uffd(uffd);
 
     let kvm_vm = Arc::new(vm);
@@ -515,6 +546,8 @@ pub fn build_microvm_from_snapshot(
         instance_info: instance_info.clone(),
         machine_config: vm_resources.machine_config.clone(),
         boot_source_config: vm_resources.boot_source.config.clone(),
+        #[cfg(target_arch = "x86_64")]
+        kernel_executable_ranges: microvm_state.vm_info.kernel_executable_ranges,
         shutdown_exit_code: None,
         vm,
         device_manager,
@@ -853,6 +886,8 @@ pub(crate) mod tests {
             instance_info: InstanceInfo::default(),
             machine_config: MachineConfig::default(),
             boot_source_config: BootSourceConfig::default(),
+            #[cfg(target_arch = "x86_64")]
+            kernel_executable_ranges: Vec::new(),
             shutdown_exit_code: None,
             vm: Vm::Kvm(Arc::new(vm)),
             device_manager: default_device_manager(),
@@ -860,23 +895,9 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn default_vmm_with_pci() -> Vmm {
-        let mut vm = setup_vm_with_memory(mib_to_bytes(128));
-
-        let _ = vm
-            .create_vcpus(&crate::vmm_config::machine_config::MachineConfig::default())
-            .unwrap();
-
-        let vm = Arc::new(vm);
-        let device_manager = default_device_manager_with_pci(&vm);
-
-        Vmm {
-            instance_info: InstanceInfo::default(),
-            machine_config: MachineConfig::default(),
-            boot_source_config: BootSourceConfig::default(),
-            shutdown_exit_code: None,
-            vm: Vm::Kvm(vm),
-            device_manager,
-        }
+        let mut vmm = default_vmm();
+        vmm.device_manager = default_device_manager_with_pci(vmm.vm.as_kvm().unwrap());
+        vmm
     }
 
     pub(crate) fn insert_block_devices(
