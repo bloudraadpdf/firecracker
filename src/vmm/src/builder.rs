@@ -389,6 +389,7 @@ pub fn build_microvm_for_boot(
         &kvm_vm,
         event_manager,
         &mut boot_cmdline,
+        entry_point.protocol,
         vm_resources.serial_output.as_ref(),
         vm_resources.serial_rate_limiter(),
     )?;
