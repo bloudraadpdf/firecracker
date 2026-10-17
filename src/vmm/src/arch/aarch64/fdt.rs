@@ -111,7 +111,9 @@ pub fn create_fdt(
     #[cfg(feature = "windows")]
     create_uefi_vars_node(&mut fdt_writer, device_manager.uefi_vars.is_some())?;
     create_vmgenid_node(&mut fdt_writer, device_manager.acpi_devices.vmgenid())?;
-    create_vmclock_node(&mut fdt_writer, device_manager.acpi_devices.vmclock())?;
+    if let Some(vmclock) = device_manager.acpi_devices.vmclock() {
+        create_vmclock_node(&mut fdt_writer, vmclock)?;
+    }
     if let Some(pci_devices) = device_manager.pci_devices() {
         create_pci_nodes(&mut fdt_writer, pci_devices.pci_segment())?;
     }
@@ -693,10 +695,10 @@ mod tests {
         let kvm = Kvm::new(vec![]).unwrap();
         let vm = KvmVm::new(kvm).unwrap();
         let gic = create_gic(vm.fd(), 1, None).unwrap();
-        let initrd = InitrdConfig {
+        let initrd = Some(InitrdConfig {
             address: GuestAddress(0x1000_0000),
             size: 0x1000,
-        };
+        });
 
         let mut cmdline = Cmdline::new(4096).unwrap();
         cmdline.insert("console", "/dev/tty0").unwrap();
@@ -723,19 +725,22 @@ mod tests {
             )
             .unwrap();
 
-        let dtb_bytes = create_fdt(
-            &mem,
-            &super::super::CpuTopology {
-                mpidrs: vec![0],
-                pmu_irq: None,
-            },
-            CString::new("console=tty0").unwrap(),
-            &device_manager,
-            &gic,
-            &Some(initrd),
-            super::super::BootProtocol::LinuxBoot,
-        )
-        .unwrap();
+        let render = |manager: &DeviceManager| {
+            create_fdt(
+                &mem,
+                &super::super::CpuTopology {
+                    mpidrs: vec![0],
+                    pmu_irq: None,
+                },
+                CString::new("console=tty0").unwrap(),
+                manager,
+                &gic,
+                &initrd,
+                super::super::BootProtocol::LinuxBoot,
+            )
+            .unwrap()
+        };
+        let dtb_bytes = render(&device_manager);
         let generated_fdt = device_tree::DeviceTree::load(&dtb_bytes).unwrap();
 
         let expected_root_nodes = [
@@ -759,5 +764,19 @@ mod tests {
             .map(|c| &c.name)
             .collect();
         assert_eq!(&generated_root_names, &expected_root_nodes);
+        let mut allocator = crate::vstate::resources::ResourceAllocator::new();
+        device_manager.acpi_devices = crate::device_manager::acpi::ACPIDeviceManager::new(
+            crate::devices::acpi::vmgenid::VmGenId::new(&mut allocator).unwrap(),
+            None,
+        );
+        let dtb_bytes = render(&device_manager);
+        let without_clock = device_tree::DeviceTree::load(&dtb_bytes).unwrap();
+        let names: Vec<_> = without_clock
+            .root
+            .children
+            .iter()
+            .map(|child| &child.name)
+            .collect();
+        assert_eq!(names, expected_root_nodes[..expected_root_nodes.len() - 1]);
     }
 }

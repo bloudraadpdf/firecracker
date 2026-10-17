@@ -195,7 +195,7 @@ pub enum CreateSnapshotError {
 }
 
 /// Snapshot version
-pub const SNAPSHOT_VERSION: Version = Version::new(33, 0, 0);
+pub const SNAPSHOT_VERSION: Version = Version::new(34, 0, 0);
 
 /// Creates a Microvm snapshot.
 pub fn create_snapshot(
@@ -496,6 +496,7 @@ pub fn restore_from_snapshot(
     vm_resources
         .update_machine_config(&MachineConfigUpdate {
             pci_transport: Some(microvm_state.vm_state.resource_allocator.pci_transport),
+            vmclock: Some(microvm_state.device_states.acpi_state.has_vmclock()),
             vcpu_count: Some(vcpu_count),
             mem_size_mib: Some(u64_to_usize(microvm_state.vm_info.mem_size_mib)),
             smt: Some(microvm_state.vm_info.smt),

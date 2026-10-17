@@ -1541,6 +1541,14 @@ definitions:
       # gdb_socket_path:
       #   type: string
       #   description: Path to the GDB socket. Requires the gdb feature to be enabled.
+      vmclock:
+        type: boolean
+        default: true
+        description: >-
+          Expose the VMClock interface. False omits its page allocation, interrupt
+          and ACPI/device-tree node. VM Generation ID remains available. Configure
+          before boot; snapshots retain the actual device choice. The default true
+          value is omitted from configuration responses.
       pit:
         type: boolean
         default: true

@@ -4,9 +4,10 @@ The optional console provides a private display/input endpoint without guest
 networking or vsock. The AMD64 profile adds VGA/VBE graphics, a PS/2 keyboard, a
 USB HID pointer and optional read-only ATAPI installation media. The ARM64
 profile adds an MMIO display and one combined virtio keyboard/absolute pointer.
-See the [validation record](windows-validation.md#current-integration-candidate)
-for the scoped current XP input baseline and historical AMD64 results. ARM64
-guest qualification remains pending.
+See the
+[validation record](windows-validation.md#recorded-format33-integration-candidate)
+for the recorded XP input baseline and historical AMD64 results. ARM64 guest
+qualification remains pending.
 
 The AMD64 device path is:
 
@@ -274,7 +275,7 @@ would otherwise select installation media again.
 AMD64 console snapshots contain display memory and registers, keyboard/mouse
 queues, held input, pending releases, keyboard LEDs and pending lock updates,
 USB controller/HID state, PCI state, optical transfer state and media identity.
-The current snapshot format is 33.0.0. Display state adds about 16 MiB; the
+The current snapshot format is 34.0.0. Display state adds about 16 MiB; the
 bounded snapshot reader accepts at most 32 MiB. The guest disk remains a
 separate artifact, as with ordinary Firecracker snapshots.
 
@@ -283,8 +284,8 @@ state in the PCI device manager. The console reuses that backend on restore; it
 does not save a second held-key or LED state. Pending frames, partial-frame
 cursor, position, held releases and guest/pending lock LEDs travel with Input.
 Missing, stray or mismatched console/input topology is rejected before backend
-attachment. Format29 through format32 snapshots require their matching older
-binaries; format33 has no decoder for them. Snapshots do not move between AMD64
+attachment. Format29 through format33 snapshots require their matching older
+binaries; format34 has no decoder for them. Snapshots do not move between AMD64
 and ARM64.
 
 The historical format31 Windows 11 test edition was IoT Enterprise LTSC 2024. It
@@ -292,7 +293,7 @@ passed Setup's hardware check without registry bypasses. The optional
 [secure platform](windows-secure-boot.md) adds TPM and protected firmware
 variables. The recorded Standard Windows 11 Enterprise Evaluation secure matrix
 also used format31. See [current validation](windows-validation.md) for the
-current source and format; those historical results do not qualify format33 or
+current source and format; those historical results do not qualify format34 or
 other editions.
 
 The console reserves the VGA aperture at `0xa0000..0xbffff` and platform table
@@ -347,10 +348,12 @@ not leave an empty CD-ROM attached. Disk, network and vsock devices remain
 separate explicit configuration choices. TPM and protected firmware variables
 are also opt-in.
 
-The conventional PC platform exposes serial, RTC, i8042, VM Generation ID and
-VMClock. Generation notifications use its existing SCI/GPE hardware, without a
-separate GED device. Default Linux and ARM hardware retain GED. XP and Windows 7
-do not bind drivers to all these ACPI features. The pre-installation XP baseline
+The graphical AMD64 profile exposes serial, RTC, i8042 and VM Generation ID. Set
+`"vmclock": false` in `machine-config` to omit VMClock, its reserved memory,
+interrupt and ACPI description. VM Generation ID remains present. Generation
+notifications use the existing SCI/GPE hardware, without a separate GED device.
+Default Linux and ARM hardware retain GED. XP and Windows 7 do not bind drivers
+to all these ACPI features. The recorded format33 pre-installation XP baseline
 uses VgaSave and retains the unconfigured VGA device at Code 1 and AWS VMClock
 (`ACPI\AMZNC10C`) at Code 28; VGEN reports Code 0 with service `gencounter`. A
 later isolated VGA driver installation completed its wizard but its display

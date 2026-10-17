@@ -181,7 +181,7 @@ normal restart before checking the selected signed package, device Code 0 and
 running service. Do not edit an INF, substitute a catalogue or disable signing
 checks. Neither the Win7 CAB nor a correct MSI reconstruction proves XP binding.
 The installed XP SP3 x86 reference has separate
-[current cold-query evidence](../../../docs/windows-validation.md#current-windows-xp-reference).
+[recorded cold-query evidence](../../../docs/windows-validation.md#recorded-windows-xp-reference).
 That evidence does not qualify a rebuilt egress reader or restore matrix.
 
 ## Cold, full and differential checks
@@ -284,7 +284,7 @@ The maintained opt-in workflow passes cold boot, full restore and differential
 restore on the installed Win7 SP1 x64 reference with PowerShell 2 and format-33
 snapshots. The public verifier accepts seven matching reports, three distinct
 IDs and both original child completions. See the
-[current Win7 validation](../../../docs/windows-validation.md#current-windows-7-reference)
+[recorded Win7 validation](../../../docs/windows-validation.md#recorded-windows-7-reference)
 for the tested rejection cases and scope. Other Windows versions still need
 runtime qualification. Polling qualifies identity changes separately from
 prearmed notification. XP supports polling only and cannot use the PowerShell
@@ -316,7 +316,7 @@ in `generation-verification.json`. Ordinary egress, storage, shutdown and
 proxy-accounting checks still run independently.
 
 A successful source test or link does not qualify a new reader build. The
-[validation record](../../../docs/windows-validation.md#current-windows-xp-reference)
+[validation record](../../../docs/windows-validation.md#recorded-windows-xp-reference)
 separates the recorded XP TAP and CONNECT polling results from open gates.
 Repeat the matching guest and snapshot-format matrix for changed inputs before
 claiming their restore coverage. Rebuilding the standalone Win7 probe also needs

@@ -42,7 +42,7 @@ workload at that particular point in time.
 ### Supported platforms
 
 The Firecracker snapshot feature is supported on all CPU micro-architectures
-listed in [README](../../README.md#supported-platforms).
+listed in [README](../../README.md#tested-platforms).
 
 ### Overview
 
@@ -662,6 +662,12 @@ replicated across multiple microVMs resumed from the same snapshot. Users need
 to implement mechanisms for ensuring de-duplication of such state, where needed.
 
 ## Userspace notifications of loading snapshots
+
+VMClock is enabled by default. Set `"vmclock": false` in machine-config before
+boot to omit its device page allocation, interrupt and ACPI/FDT node. VM
+Generation ID remains separate and available. Snapshots retain the actual clock
+presence; restore cannot add or remove it. The `vmclock_restore_notification`
+selector has no effect when no clock was saved.
 
 VMClock device
 ([specification](https://uapi-group.org/specifications/specs/vmclock/)) is a

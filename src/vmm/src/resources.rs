@@ -1610,6 +1610,7 @@ mod tests {
         let mut vm_resources = default_vm_resources();
         let mut aux_vm_config = MachineConfigUpdate {
             pci_transport: Some(crate::pci::PciTransportMode::default()),
+            vmclock: Some(true),
             vcpu_count: Some(32),
             mem_size_mib: Some(512),
             smt: Some(false),
