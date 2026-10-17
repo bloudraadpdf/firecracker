@@ -281,6 +281,14 @@ fn prepare_install_files(
             if !entry.file_type()?.is_file() {
                 return Err("unexpected driver package entry".into());
             }
+            if entry
+                .path()
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("pdb"))
+            {
+                continue;
+            }
             fs::copy(entry.path(), destination.join(entry.file_name()))?;
         }
         fs::remove_dir_all(extracted)?;
@@ -297,12 +305,10 @@ fn prepare_install_files(
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).map(PathBuf::from).collect();
     let [profile, source, drivers, output, extra @ ..] = args.as_slice() else {
-        return Err(
-            "usage: prepare-nt6 \
+        return Err("usage: prepare-nt6 \
              win7|win10|win11|win11-enterprise-26h2|win11-pro-26h2|win11-iot-arm64|server2025 \
              WINDOWS_ISO VIRTIO_DRIVER_ISO NEW_OUTPUT_DIRECTORY [ANSWER_XML]"
-                .into(),
-        );
+            .into());
     };
     if extra.len() > 1 {
         return Err("at most one answer file is allowed".into());
@@ -590,11 +596,15 @@ mod tests {
                     .map(|extension| format!("{}.{}", component.to_ascii_lowercase(), extension))
                     .into();
                 let dependencies: &[&str] = match component {
+                    "NetKVM" => &["netkvmco.exe", "netkvmp.exe", "Readme.md"],
                     "vioinput" => &["viohidkmdf.sys"],
                     "viosock" => &["viosocklib.dll", "viosockwspsvc.exe", "vstbridge.exe"],
                     _ => &[],
                 };
                 names.extend(dependencies.iter().map(|name| (*name).to_owned()));
+                for name in ["lower.pdb", "upper.PDB", "mixed.PdB"] {
+                    fs::write(directory.join(name), b"debug symbols").unwrap();
+                }
                 for name in names {
                     let bytes = format!("{component}/{version}/{arch}/{name}").into_bytes();
                     fs::write(directory.join(&name), &bytes).unwrap();
