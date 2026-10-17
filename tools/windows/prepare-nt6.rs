@@ -74,7 +74,7 @@ fn verify_boot_images(source: &Path, tree: &Path) -> Result<()> {
     Ok(())
 }
 
-fn prepare_2023_boot(tree: &Path, output: &Path) -> Result<()> {
+fn prepare_2023_boot(tree: &Path, output: &Path, unattended_pro: bool) -> Result<()> {
     let extracted = output.join("boot-2023");
     extract(
         &tree.join("sources/boot.wim"),
@@ -93,7 +93,12 @@ fn prepare_2023_boot(tree: &Path, output: &Path) -> Result<()> {
             "efi/boot/bootx64.efi".to_owned(),
         ),
         (
-            "DVD_EX/EFI/en-US/efisys_EX.bin".to_owned(),
+            if unattended_pro {
+                "DVD_EX/EFI/en-US/efisys_noprompt_EX.bin"
+            } else {
+                "DVD_EX/EFI/en-US/efisys_EX.bin"
+            }
+            .to_owned(),
             "efi/microsoft/boot/efisys_ex.bin".to_owned(),
         ),
         (
@@ -132,36 +137,51 @@ fn prepare_2023_boot(tree: &Path, output: &Path) -> Result<()> {
     Ok(())
 }
 
-fn profile_config(profile: Option<&str>) -> Result<(&'static str, &'static str, &'static str)> {
+fn profile_config(
+    profile: Option<&str>,
+) -> Result<(&'static str, &'static str, &'static str, bool)> {
     Ok(match profile {
         Some("win7") => (
             "windows7",
             "ee69f3e9b86ff973f632db8e01700c5724ef78420b175d25bae6ead90f6805a7",
             "w7",
+            false,
         ),
         Some("win10") => (
             "windows10",
             "c90a6df8997bf49e56b9673982f3e80745058723a707aef8f22998ae6479597d",
             "w10",
+            false,
         ),
         Some("win11") => (
             "windows11",
             "4f59662a96fc1da48c1b415d6c369d08af55ddd64e8f1c84e0166d9e50405d7a",
             "w11",
+            false,
         ),
         Some("win11-enterprise-26h2") => (
             "windows11-enterprise-26h2",
             "bc3f24086ebadc94489066b5ad78089e2cf5c3491e90e790bb81a2b199c10e38",
             "w11",
+            true,
+        ),
+        Some("win11-pro-26h2") => (
+            "windows11-pro-26h2",
+            "bd4307df32bc8af33b39ccecb1174aeb345386630f89a2b86c7a4e36b55ea650",
+            "w11",
+            true,
         ),
         Some("server2025") => (
             "server2025",
             "7b052573ba7894c9924e3e87ba732ccd354d18cb75a883efa9b900ea125bfd51",
             "2k25",
+            false,
         ),
         _ => {
             return Err(
-                "profile must be win7, win10, win11, win11-enterprise-26h2 or server2025".into(),
+                "profile must be win7, win10, win11, win11-enterprise-26h2, win11-pro-26h2 or \
+                 server2025"
+                    .into(),
             );
         }
     })
@@ -225,15 +245,16 @@ fn prepare_install_files(
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).map(PathBuf::from).collect();
     let [profile, source, drivers, output, extra @ ..] = args.as_slice() else {
-        return Err(
-            "usage: prepare-nt6 win7|win10|win11|win11-enterprise-26h2|server2025 WINDOWS_ISO VIRTIO_DRIVER_ISO NEW_OUTPUT_DIRECTORY [ANSWER_XML]".into(),
-        );
+        return Err("usage: prepare-nt6 \
+                    win7|win10|win11|win11-enterprise-26h2|win11-pro-26h2|server2025 \
+                    WINDOWS_ISO VIRTIO_DRIVER_ISO NEW_OUTPUT_DIRECTORY [ANSWER_XML]"
+            .into());
     };
     if extra.len() > 1 {
         return Err("at most one answer file is allowed".into());
     }
     let answer = extra.first().map(|path| read_answer(path)).transpose()?;
-    let (name, hash, driver) = profile_config(profile.to_str())?;
+    let (name, hash, driver, uses_2023_boot) = profile_config(profile.to_str())?;
     for (path, expected) in [
         (source, hash),
         (
@@ -247,9 +268,12 @@ fn main() -> Result<()> {
     let tree = output.join("tree");
     extract(source, &tree, &[])?;
     verify_boot_images(source, &tree)?;
-    let secure_boot = profile == Path::new("win11-enterprise-26h2");
-    if secure_boot {
-        prepare_2023_boot(&tree, output)?;
+    if uses_2023_boot {
+        prepare_2023_boot(
+            &tree,
+            output,
+            name == "windows11-pro-26h2" && answer.is_some(),
+        )?;
     }
     prepare_install_files(drivers, driver, output, &tree, answer)?;
     let mut expected = BTreeMap::new();
@@ -272,7 +296,7 @@ fn main() -> Result<()> {
             "8",
             "-eltorito-alt-boot",
             "-e",
-            if secure_boot {
+            if uses_2023_boot {
                 "efi/microsoft/boot/efisys_ex.bin"
             } else {
                 "efi/microsoft/boot/efisys.bin"
@@ -320,20 +344,117 @@ mod tests {
 
     #[test]
     fn explicit_profiles_select_matching_driver_and_pin_source() {
-        for (profile, driver) in [
-            ("win7", "w7"),
-            ("win10", "w10"),
-            ("win11", "w11"),
-            ("win11-enterprise-26h2", "w11"),
-            ("server2025", "2k25"),
+        for (profile, expected) in [
+            (
+                "win7",
+                (
+                    "windows7",
+                    "ee69f3e9b86ff973f632db8e01700c5724ef78420b175d25bae6ead90f6805a7",
+                    "w7",
+                    false,
+                ),
+            ),
+            (
+                "win10",
+                (
+                    "windows10",
+                    "c90a6df8997bf49e56b9673982f3e80745058723a707aef8f22998ae6479597d",
+                    "w10",
+                    false,
+                ),
+            ),
+            (
+                "win11",
+                (
+                    "windows11",
+                    "4f59662a96fc1da48c1b415d6c369d08af55ddd64e8f1c84e0166d9e50405d7a",
+                    "w11",
+                    false,
+                ),
+            ),
+            (
+                "win11-enterprise-26h2",
+                (
+                    "windows11-enterprise-26h2",
+                    "bc3f24086ebadc94489066b5ad78089e2cf5c3491e90e790bb81a2b199c10e38",
+                    "w11",
+                    true,
+                ),
+            ),
+            (
+                "win11-pro-26h2",
+                (
+                    "windows11-pro-26h2",
+                    "bd4307df32bc8af33b39ccecb1174aeb345386630f89a2b86c7a4e36b55ea650",
+                    "w11",
+                    true,
+                ),
+            ),
+            (
+                "server2025",
+                (
+                    "server2025",
+                    "7b052573ba7894c9924e3e87ba732ccd354d18cb75a883efa9b900ea125bfd51",
+                    "2k25",
+                    false,
+                ),
+            ),
         ] {
-            let (_, hash, selected) = profile_config(Some(profile)).unwrap();
-            assert_eq!(selected, driver);
-            assert_eq!(hash.len(), 64);
-            assert!(hash.bytes().all(|byte| byte.is_ascii_hexdigit()));
+            assert_eq!(profile_config(Some(profile)).unwrap(), expected);
         }
         assert!(profile_config(Some("windows-server-latest.iso")).is_err());
         assert!(profile_config(None).is_err());
+    }
+
+    #[test]
+    fn original_2023_cd_image_matches_unattended_pro_selection() {
+        let root = std::env::current_dir()
+            .unwrap()
+            .join("build")
+            .join(format!("nt6-boot-fixture-{}", std::process::id()));
+        let _owner = OutputDirectory::create(&root).unwrap();
+        let source = root.join("source");
+        let boot = source.join("1/Windows/Boot");
+        for directory in ["EFI_EX", "DVD_EX/EFI/en-US", "Fonts_EX", "EFI"] {
+            fs::create_dir_all(boot.join(directory)).unwrap();
+        }
+        for (name, bytes) in [
+            ("EFI_EX/bootmgfw_EX.efi", b"manager".as_slice()),
+            ("DVD_EX/EFI/en-US/efisys_EX.bin", b"prompt"),
+            ("DVD_EX/EFI/en-US/efisys_noprompt_EX.bin", b"noprompt"),
+            ("Fonts_EX/fixture_EX.ttf", b"font"),
+            ("EFI/boot.stl", b"list"),
+        ] {
+            fs::write(boot.join(name), bytes).unwrap();
+        }
+        let archive = root.join("boot.zip");
+        run(Command::new("7z")
+            .args(["a", "-tzip", "-bd"])
+            .arg(&archive)
+            .arg("1")
+            .current_dir(&source))
+        .unwrap();
+        for (unattended_pro, expected, selected) in [
+            (false, b"prompt".as_slice(), "efisys_EX.bin"),
+            (true, b"noprompt".as_slice(), "efisys_noprompt_EX.bin"),
+        ] {
+            let output = root.join(selected);
+            let tree = output.join("tree");
+            fs::create_dir_all(tree.join("sources")).unwrap();
+            fs::create_dir_all(tree.join("efi/boot")).unwrap();
+            fs::create_dir_all(tree.join("efi/microsoft/boot/fonts")).unwrap();
+            fs::copy(&archive, tree.join("sources/boot.wim")).unwrap();
+            prepare_2023_boot(&tree, &output, unattended_pro).unwrap();
+            assert_eq!(
+                fs::read(tree.join("efi/microsoft/boot/efisys_ex.bin")).unwrap(),
+                expected
+            );
+            let evidence = fs::read_to_string(output.join("boot-replacements.sha256")).unwrap();
+            assert!(evidence.contains(&format!(
+                "DVD_EX/EFI/en-US/{selected} -> efi/microsoft/boot/efisys_ex.bin"
+            )));
+            assert!(!output.join("boot-2023").exists());
+        }
     }
 
     fn check_automatic_drivers(with_answer: bool) {
