@@ -40,7 +40,8 @@ explicitly selects TLS 1.2. It keeps certificate validation enabled. A fresh
 Windows 7 SP1 image needs the [documented trust root](../../../docs/windows.md).
 XP uses `xp.rs` for HTTP, storage and TCP; this HTTPS executable does not
 establish XP TLS support. Both entry points share `http.rs`; keep the files
-together. Build the XP executable after selecting the XP x86 profile and
+together, along with `generation/counter.rs` and `generation/polling.rs` and
+`device.rs`. Build the XP executable after selecting the XP x86 profile and
 regenerating `windows_rustflags` through the same procedure. Put the reachable
 lab host IPv4 address in `HOST_IPV4` before this block:
 
@@ -136,9 +137,8 @@ guest script. After the ordinary controller finishes, set
 `WINDOWS_GENERATION_CHECKS=1` for `tap-verify.sh`. The optional Python verifier
 collects bounded raw UTF-8 guest reports and child output from the same
 read-only mount. It checks prearmed requests across both restores as well as the
-ordinary TAP checks. The default is `0`; other values fail. XP cannot use these
-notification checks. This maintained opt-in path has not yet been qualified in a
-guest run.
+ordinary TAP checks. The default is `0`; other values fail. XP uses the separate
+polling mode below; it cannot use these notification checks.
 
 The controller applies differential memory through the
 [snapshot editor](../../../docs/snapshotting/snapshot-editor.md).
@@ -148,19 +148,34 @@ limit, including the result directory and `/cold.sock` suffix.
 
 The controller copies itself into the result directory before running, so edits
 for a later test cannot change a live shell's input. It bounds API, startup,
-progress and shutdown waits, and stops owned processes on failure. Run it under
-an outer `timeout --signal=TERM --kill-after=15s 900` as well. It retains logs
-and snapshot files for inspection. Each guest stage verifies a 64 KiB
-write-through file, DNS, validated HTTPS and byte equality for a 2 MiB
+progress and shutdown waits, and attempts to stop owned processes on failure.
+Run it under an outer `timeout --signal=TERM --kill-after=120s 900` as well. It
+retains logs and snapshot files for inspection. Each guest stage verifies a 64
+KiB write-through file, DNS, validated HTTPS and byte equality for a 2 MiB
 bidirectional TCP exchange. The host independently counts echo bytes.
+
+Allow up to 80 seconds of cleanup polling, plus scheduling and external command
+time, after a signal or failure. The outer watchdog must leave this time before
+forcing termination. Cleanup reports errors without replacing an earlier nonzero
+exit status. It retains sockets while their VMM remains live and leaves live
+helper state in place. A forced timeout does not prove that processes have
+stopped; require the closed-volume checks before offline verification or reuse.
 
 After S5 and Firecracker exit zero, run `tap-verify.sh` as root with the same
 base, run and tag, plus `WINDOWS_CHECK_DISK` and `WINDOWS_PARTITION_OFFSET`
 (partition offset in bytes). `WINDOWS_TRANSCRIPT_ENCODING` defaults to UTF-8;
-Windows 7 needs UTF-16LE. Keep `mount-state.sh` beside both offline verifiers.
-Its exit and signal traps attempt unmount and loop detach, report cleanup
-failures, and preserve an existing verification failure. Check all 16 ordinary
-and BitLocker cleanup fixtures from the repository root:
+Windows 7 needs UTF-16LE. Keep `mount-state.sh` beside the offline and BitLocker
+verifiers. The generation reader check also uses this shared helper. It holds an
+exclusive disk lock during verification and rejects prior loop associations. Its
+exit and signal traps recover an interrupted attachment even when `losetup`
+returns no loop name. Cleanup checks the disk identity, read-only mode, offset,
+size limit and partition scan before detaching a unique association. Ambiguous
+or changed associations remain attached for inspection. Mount checks distinguish
+an absent mount from a query error. Cleanup verifies unmount and waits up to
+five seconds for the owned loop association to disappear. A query error or a
+remaining association fails verification and preserves an existing nonzero
+status. Check the ordinary and BitLocker cleanup fixtures from the repository
+root:
 
 ```sh
 bash tools/windows/egress/test-mount-state.sh "$PWD/build/mount-state-test"
@@ -260,14 +275,15 @@ directory before execution. It copies helper state into each phase directory,
 stops the VMM before its helpers, and creates the next copy only after both
 helpers stop. It reads the copied store generation for the explicit restore
 request; it never sends a host TPM startup command. Snapshot creation still uses
-the normal API: the snapshot embeds both checkpoints. A phase, VMM or helper
-failure discards the destination phase state. A later proxy shutdown failure
-returns a nonzero controller status and retains the closed final helper pair.
-That run has not passed. A failed phase must not be resumed. Use a short
-absolute test path: each generated helper directory must be at most 95 bytes so
-its Unix socket paths fit. Run helpers and the CONNECT VMM as the same user.
-Preserve the final disk and final phase stores as a matched set if the secure
-guest will be used again.
+the normal API: the snapshot embeds both checkpoints. Cleanup retains every
+phase's helper state on success or failure: disk writes may already depend on
+that advanced variable store and TPM state. A cleanup failure returns a nonzero
+controller status and retains ownership of any live helper. That run has not
+passed. A failed phase must not be resumed or paired with an older helper copy.
+Use a short absolute test path: each generated helper directory must be at most
+95 bytes so its Unix socket paths fit. Run helpers and the CONNECT VMM as the
+same user. Preserve the final disk and final phase stores as a matched set if
+the secure guest will be used again.
 
 The tracked `network.sh` creates the TAP, namespace, veth pair and exact NAT
 rules used by this test. Host IPv4 forwarding must already be enabled. It
@@ -383,3 +399,55 @@ read-only mode. The existing verifier then checks its plaintext partition at
 offset zero using another read-only loop and NTFS mount. Exit traps remove the
 owned mounts and loops even when verification fails. Preserve compact logs and
 file hashes; no decrypted disk copy is made.
+
+## XP generation polling
+
+First qualify the installed generation-counter driver, selected signed package,
+service and KMDF on a distinct cold boot. Build the XP reader with the actual
+lab host address as shown above. Preserve earlier binaries and guest results.
+Compute the digest on the Linux host before staging:
+
+```sh
+sha256sum build/windows/egress/restore-probe.exe
+```
+
+Copy that executable to `C:\restore-probe.exe` on a closed disposable disk. Use
+one Startup CMD to call the maintained matrix with the recorded digest:
+
+```bat
+call C:\xp-matrix.cmd GenerationChecks ACTUAL_64_DIGIT_SHA256
+```
+
+Keep the CMD outside the Startup folder when a separate launcher calls it; run
+only one matrix. Without arguments the existing ordinary XP workflow remains
+unchanged. The generation option requires an installed polling device and makes
+no wait or notification request.
+
+Set `WINDOWS_GENERATION_CHECKS=1` and `WINDOWS_GENERATION_PROBE_SHA256` to that
+same host-recorded digest for both the controller and offline verifier. Set
+`WINDOWS_CHECK_DISK` to the absolute OS volume image containing
+`C:\restore-probe.exe`, and `WINDOWS_PARTITION_OFFSET` to its NTFS partition
+offset in bytes. The config must list that exact canonical path as one writable
+drive. A separate storage test drive is not the OS volume; the controller never
+selects the first drive on the caller's behalf.
+
+Before calling `network.sh setup`, run the shared closed-volume check with the
+same config, disk and offset:
+
+```sh
+sudo bash tools/windows/generation/check-reader.sh \
+  "$WINDOWS_CHECK_BASE/config.json" "$WINDOWS_CHECK_DISK" \
+  "$WINDOWS_PARTITION_OFFSET" restore-probe.exe \
+  "$WINDOWS_GENERATION_PROBE_SHA256"
+```
+
+`tap-check.sh` repeats this read-only hash check before starting its echo server
+or VM, and keeps `generation-reader-before.json`. Keep the shared generation and
+egress helper paths together when copying this controller; its per-run copy
+freezes the helpers it uses. For offline verification, preserve both generation
+variables as well as the ordinary TAP variables through `sudo`. The verifier
+reads the installed reader again from the stopped OS volume and writes
+`generation-verification.json` beside the ordinary results. It requires two
+equal nonzero IDs per stage, three different stage IDs, matching phase order and
+all normal TAP checks. The XP network path remains HTTP, DNS and TCP; this mode
+does not add TLS support. The rebuilt polling matrix needs guest qualification.

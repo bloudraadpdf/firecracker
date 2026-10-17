@@ -5,21 +5,16 @@
 #![cfg_attr(not(test), no_main)]
 
 #[cfg(not(test))]
+#[path = "../egress/device.rs"]
+mod device;
+#[cfg(not(test))]
 #[path = "../egress/win32.rs"]
 mod win32;
 
-// CTL_CODE(FILE_DEVICE_ACPI, 1, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS).
-const IOCTL_VMGENCOUNTER_READ: u32 = (0x32 << 16) | (3 << 14) | (1 << 2);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(C)]
-struct VmGenCounter {
-    generation_count: u64,
-    generation_count_high: u64,
-}
-
-const _: () = assert!(size_of::<VmGenCounter>() == 16);
-const _: () = assert!(core::mem::offset_of!(VmGenCounter, generation_count_high) == 8);
+mod counter;
+#[cfg(test)]
+mod polling;
+use counter::{IOCTL_VMGENCOUNTER_READ, VmGenCounter};
 
 #[derive(Debug, PartialEq, Eq)]
 enum Request {
@@ -75,10 +70,15 @@ fn parse(args: &[&[u16]]) -> Option<Request> {
 
 #[cfg(not(test))]
 mod windows {
-    use super::*;
-    use crate::win32::{ExitProcess, GetLastError, GetStdHandle, WriteFile};
     use core::ffi::c_void;
     use core::ptr;
+
+    use counter::QueryError;
+    use counter::windows::Handle;
+
+    use super::*;
+    use crate::device::DeviceIoControl;
+    use crate::win32::{ExitProcess, GetLastError, GetStdHandle, WriteFile};
 
     const ERROR_IO_PENDING: u32 = 997;
     const ERROR_IO_INCOMPLETE: u32 = 996;
@@ -98,26 +98,6 @@ mod windows {
 
     #[link(name = "kernel32")]
     unsafe extern "system" {
-        fn CreateFileW(
-            name: *const u16,
-            access: u32,
-            share: u32,
-            security: *const c_void,
-            disposition: u32,
-            attributes: u32,
-            template: usize,
-        ) -> usize;
-        fn DeviceIoControl(
-            handle: usize,
-            code: u32,
-            input: *const c_void,
-            input_len: u32,
-            output: *mut c_void,
-            output_len: u32,
-            returned: *mut u32,
-            overlapped: *mut c_void,
-        ) -> i32;
-        fn CloseHandle(handle: usize) -> i32;
         fn CreateEventW(
             security: *const c_void,
             manual: i32,
@@ -139,15 +119,6 @@ mod windows {
     #[link(name = "shell32")]
     unsafe extern "system" {
         fn CommandLineToArgvW(command: *const u16, count: *mut i32) -> *mut *mut u16;
-    }
-
-    struct Handle(usize);
-
-    impl Drop for Handle {
-        fn drop(&mut self) {
-            // SAFETY: this scope owns the valid handle and all I/O has finished.
-            unsafe { CloseHandle(self.0) };
-        }
     }
 
     enum Failure {
@@ -196,49 +167,19 @@ mod windows {
         ))
     }
 
-    fn open(attributes: u32) -> Result<Handle, Failure> {
-        let name = (*b"\\\\.\\VmGenerationCounter\0").map(u16::from);
-        // SAFETY: name is terminated UTF-16 and remains live for the synchronous open.
-        let raw =
-            unsafe { CreateFileW(name.as_ptr(), 0xc0000000, 3, ptr::null(), 3, attributes, 0) };
-        if raw == usize::MAX {
-            // SAFETY: GetLastError has no arguments; capture before any cleanup can alter it.
-            return Err(Failure::Win32(b"CreateFileW", unsafe { GetLastError() }));
+    fn query_error(error: QueryError) -> Failure {
+        match error {
+            QueryError::Win32(stage, code) => Failure::Win32(stage, code),
+            QueryError::OutputSize(size) => Failure::OutputSize(size),
         }
-        Ok(Handle(raw))
+    }
+
+    fn open(attributes: u32) -> Result<Handle, Failure> {
+        counter::windows::open(attributes).map_err(query_error)
     }
 
     fn query() -> Result<VmGenCounter, Failure> {
-        let handle = open(0)?;
-        let mut counter = VmGenCounter {
-            generation_count: 0,
-            generation_count_high: 0,
-        };
-        let mut returned = 0;
-        // SAFETY: handle is live; both output buffers are writable for their declared sizes.
-        // No input selects polling mode; this synchronous call has no OVERLAPPED object.
-        let ok = unsafe {
-            DeviceIoControl(
-                handle.0,
-                IOCTL_VMGENCOUNTER_READ,
-                ptr::null(),
-                0,
-                (&raw mut counter).cast(),
-                16,
-                &mut returned,
-                ptr::null_mut(),
-            )
-        };
-        if ok == 0 {
-            // SAFETY: GetLastError has no arguments; capture before Handle is dropped.
-            return Err(Failure::Win32(b"DeviceIoControl", unsafe {
-                GetLastError()
-            }));
-        }
-        if returned != 16 {
-            return Err(Failure::OutputSize(returned));
-        }
-        Ok(counter)
+        counter::query().map_err(query_error)
     }
 
     // Do not return, drop handles or release request storage until completion.
@@ -353,8 +294,7 @@ mod windows {
 
     fn print_counter(prefix: &[u8], counter: VmGenCounter) {
         output(prefix);
-        hex(counter.generation_count_high);
-        hex(counter.generation_count);
+        output(&counter.hex());
         output(b"\r\n");
     }
 

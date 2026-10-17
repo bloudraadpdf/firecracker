@@ -14,12 +14,7 @@ if [[ "$generation" != 0 && "$generation" != 1 ]]; then
     echo 'WINDOWS_GENERATION_CHECKS must be 0 or 1' >&2
     exit 1
 fi
-if [[ "$generation" = 1 && "$tag" = XP ]]; then
-    echo 'XP does not support prearmed generation notifications' >&2
-    exit 1
-fi
 mkdir -p "$base/mnt"
-if mountpoint -q "$base/mnt"; then exit 1; fi
 bash "$(dirname "$0")/assert-disk-closed.sh" "$disk"
 if [[ "$tag" = XP ]]; then
     iteration=1
@@ -41,7 +36,7 @@ grep -q 'Firecracker exiting successfully. exit_code=0' "$run/diff.log"
 # shellcheck source=mount-state.sh
 source "$(dirname "$0")/mount-state.sh"
 windows_mount_directory=$base/mnt
-windows_mount_loop=$(losetup --read-only --find --show --offset "$offset" "$disk")
+windows_mount_attach "$disk" "$offset"
 ntfs-3g -o ro "$windows_mount_loop" "$windows_mount_directory"
 test ! -e "$base/mnt/hiberfil.sys"
 if [[ "$tag" = XP ]]; then
@@ -52,6 +47,12 @@ if [[ "$tag" = XP ]]; then
     grep -q '^HTTP status=200$' "$run/final-guest.txt"
     grep -q '^PASS XP_TCP_EQUAL bytes=2097152$' "$run/final-guest.txt"
     sha256sum "$run/final-data.bin"
+    if [[ "$generation" = 1 ]]; then
+        python3 "$(dirname "$0")/../generation/verify.py" "$run" --tag XP --xp-mode tap \
+            --reader "$base/mnt/restore-probe.exe" \
+            --probe-sha256 "${WINDOWS_GENERATION_PROBE_SHA256:?Set the staged XP reader SHA256}" \
+            > "$run/generation-verification.json"
+    fi
 else
     cp "$base/mnt/Users/Public/fc-restore-data.bin" "$run/final-data.bin"
     cat "$base/mnt/Users/Public/fc-network.log" | iconv -f "$encoding" -t UTF-8 > "$run/final-guest.txt"

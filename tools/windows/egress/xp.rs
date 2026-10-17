@@ -4,8 +4,15 @@
 #![no_std]
 #![no_main]
 
-use core::{ffi::c_void, ptr};
+use core::ffi::c_void;
+use core::ptr;
+#[path = "../generation/counter.rs"]
+mod counter;
+mod device;
+use device::CloseHandle;
 mod http;
+#[path = "../generation/polling.rs"]
+mod polling;
 mod xp_pattern;
 use http::{WriteFile, check, number, output};
 use xp_pattern::storage_pattern;
@@ -31,7 +38,6 @@ unsafe extern "system" {
     ) -> i32;
     fn SetFilePointer(handle: usize, distance: i32, high: *mut i32, method: u32) -> u32;
     fn FlushFileBuffers(handle: usize) -> i32;
-    fn CloseHandle(handle: usize) -> i32;
 }
 
 #[panic_handler]
@@ -42,11 +48,31 @@ fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn mainCRTStartup() -> ! {
+    generation().unwrap_or_else(|error| {
+        polling::report(error, output, number);
+        // SAFETY: ExitProcess has no arguments with pointer lifetimes and never returns.
+        unsafe { http::ExitProcess(1) }
+    });
     storage();
     http::get(b"example.com\0", false);
     tcp_echo();
     // SAFETY: ExitProcess has no pointer arguments and does not return.
     unsafe { http::ExitProcess(0) }
+}
+
+fn generation() -> Result<(), polling::Failure> {
+    if !polling::enabled()? {
+        return Ok(());
+    }
+    let mut stage = [0; 2];
+    let length = polling::windows::variable(c"WINDOWS_GENERATION_ITERATION", &mut stage)?;
+    if length != 1 || !(b'1'..=b'3').contains(&stage[0]) {
+        return Err(polling::Failure::Message(b"invalid generation iteration"));
+    }
+    let mut previous = [0; 33];
+    let length = polling::windows::variable(c"WINDOWS_GENERATION_PREVIOUS", &mut previous)?;
+    polling::read(stage[0] - b'0', &previous[..length], output)?;
+    Ok(())
 }
 
 #[link(name = "ws2_32")]

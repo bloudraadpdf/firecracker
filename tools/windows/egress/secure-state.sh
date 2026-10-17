@@ -5,20 +5,46 @@
 secure_pids=()
 secure_current=
 secure_config=
+secure_wait_stopped() {
+    local pid=$1 retry
+    for retry in {1..100}; do
+        if ! kill -0 "$pid" 2>/dev/null; then return 0; fi
+        sleep 0.1
+    done
+    ! kill -0 "$pid" 2>/dev/null
+}
 secure_stop() {
-    local pid code=0 result=0
-    for pid in "${secure_pids[@]}"; do kill -TERM "$pid" 2>/dev/null || true; done
+    local pid code result=0
+    local remaining=()
     for pid in "${secure_pids[@]}"; do
-        for retry in {1..100}; do
-            if ! kill -0 "$pid" 2>/dev/null; then break; fi
-            sleep 0.1
-        done
-        if kill -0 "$pid" 2>/dev/null; then kill -KILL "$pid"; result=1; fi
+        code=0
+        kill -TERM "$pid" 2>/dev/null || code=$?
+        if [[ "$code" != 0 ]] && kill -0 "$pid" 2>/dev/null; then
+            printf 'Secure helper TERM failed: %s (%s)\n' "$pid" "$code" >&2 || true
+            if [[ "$result" == 0 ]]; then result=$code; fi
+        fi
+    done
+    for pid in "${secure_pids[@]}"; do
+        if ! secure_wait_stopped "$pid"; then
+            code=0
+            kill -KILL "$pid" 2>/dev/null || code=$?
+            if [[ "$code" != 0 ]] && kill -0 "$pid" 2>/dev/null; then
+                printf 'Secure helper KILL failed: %s (%s)\n' "$pid" "$code" >&2 || true
+                if [[ "$result" == 0 ]]; then result=$code; fi
+            fi
+            if [[ "$result" == 0 ]]; then result=1; fi
+            if ! secure_wait_stopped "$pid"; then
+                remaining+=("$pid")
+                continue
+            fi
+        fi
         code=0
         wait "$pid" || code=$?
-        if [[ "$code" != 0 && "$code" != 143 ]]; then result=1; fi
+        if [[ "$code" != 0 && "$code" != 143 ]]; then
+            if [[ "$result" == 0 ]]; then result=$code; fi
+        fi
     done
-    secure_pids=()
+    secure_pids=("${remaining[@]}")
     return "$result"
 }
 secure_start() {
@@ -60,11 +86,4 @@ secure_start() {
 secure_load() {
     if [[ -z ${WINDOWS_SECURE_SOURCE:-} ]]; then printf '%s' "$1"; return; fi
     jq -nc --argjson request "$1" --slurpfile helpers "$secure_current/load.json" '$request + $helpers[0]'
-}
-secure_discard() {
-    if [[ -n "$secure_current" ]]; then
-        rm -f "$secure_current/store.json" "$secure_current/store.lock" \
-            "$secure_current/store.json.lock" "$secure_current/store.json.pending"
-        rm -rf "$secure_current/tpm"
-    fi
 }
