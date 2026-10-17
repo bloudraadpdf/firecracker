@@ -130,6 +130,40 @@ WDK 7.1 x86 `CertMgr.exe` in `C:\`. Require installer result zero or 3010, then
 device error code zero after a reboot. Check the installed driver and provider
 against the package before probing.
 
+For the installed Win7 test profile, WMI can report `IsSigned=False` and an
+empty `Signer` while the device reports error code zero. The cause of that
+metadata remains unresolved. After the installer imports the test certificate
+into the local computer's Root and TrustedPublisher stores and the guest reboots
+with test signing enabled, use the official WDK 7.1 x64 SignTool to check the
+selected published INF and each installed binary against the package catalogue:
+
+```powershell
+$signTool = (Get-Command signtool.exe -ErrorAction Stop).Path
+$driver = @(Get-WmiObject Win32_PnPSignedDriver | Where-Object {
+    $_.DeviceID -like 'PCI\VEN_1AF4&DEV_1053*'
+})
+if ($driver.Count -ne 1 -or $driver[0].InfName -notmatch '^oem[0-9]+\.inf$') {
+    throw 'Expected one Viosock driver with a published INF'
+}
+$catalog = 'C:\Drivers\VIOSock\viosock.cat'
+$files = @(
+    "$env:windir\INF\$($driver[0].InfName)",
+    "$env:windir\System32\drivers\viosock.sys",
+    "$env:windir\System32\viosocklib.dll",
+    "$env:windir\SysWOW64\viosocklib.dll"
+)
+foreach ($file in $files) {
+    & $signTool verify /v /pa /c $catalog $file
+    if ($LASTEXITCODE -ne 0) { throw "Catalogue verification failed: $file" }
+}
+```
+
+Microsoft documents this
+[explicit catalogue check](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/verifying-the-signature-of-a-test-signed-catalog-file),
+including the test certificate trust requirement. Keep the catalogue from the
+installed package and require all four commands to return zero. This checks the
+isolated test-signing profile; it does not establish production signing.
+
 Replace the installer startup entry with `xp-matrix.cmd`, or invoke
 `win7-connect.ps1` on Windows 7 with `legacy-connect.exe` in `C:\`. Do not leave
 both installer and probe startup entries enabled.
