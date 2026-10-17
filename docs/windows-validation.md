@@ -125,14 +125,63 @@ consent. These checks do not establish WHQL status or installed catalogue
 registration. The separate default driver-policy signature check fails. The
 original offline collector failed on a trailing-space marker. A separate parser
 accepts the retained actual bytes after the marker correction; the original
-collector remains failed and was not rerun. These results qualify this installed
-reference and TAP route only. Current-format XP CONNECT, generation-change
-notifications and TLS remain unqualified.
+collector remains failed and was not rerun. Those results qualify the TAP route
+on that installed reference.
 
-Current Windows installation, graphical input, security, the other guests' TAP
-routes and performance qualification remain open. The historical results below
-use format 31 and their matching binaries. They do not qualify formats 32 or 33.
-Do not load an older saved state with the candidate.
+A separate installed-reference clone passes format-33 cold, full-restore and
+differential-restore CONNECT checks without a guest NIC. The real Tokoloshe
+proxy connects to the host-loopback echo target. Each stage passes a byte-equal
+2 MiB transfer in each direction and a policy-denied request with status 403 and
+zero payload. Six sealed FetchLog entries bind those transfers and denials to
+the three stages. Six genuine generation-counter polls form three matching pairs
+with distinct nonzero IDs. The unchanged offline verifiers accept the final 2
+MiB storage pattern and normal guest S5 with VMM exit zero.
+
+This run binds source-manifest SHA-256
+`836e743b99a7f62e8013267c4ccd33027f72b029291d9f607e9f44d3261b10aa` and
+build-receipt SHA-256
+`6033bf6a0f48b6aaa36b9501d04528eb2d5b07f38d95b6bbc1aa6cc96a037772` to these
+recorded binaries:
+
+| Input             | SHA-256                                                            |
+| ----------------- | ------------------------------------------------------------------ |
+| VMM               | `c1b1d608138f147c1d8c3314ebdfbf40abad824fb9838412927d9235714cb29f` |
+| Snapshot editor   | `0bbe760cf233d66f27725639c5dba8a9da7fe595b92ff4942cb9aadcb9b7f370` |
+| XP CONNECT reader | `a04d5ecd8d931095e557bcad4339af87f69fed21cb5a1b1d4eb090368d17d0f1` |
+| Host proxy shim   | `0ff7f14d5aca46306347f3ce6d5713cedefe95a0162085a46ad0f0bad6641270` |
+| Tokoloshe sidecar | `5d4cc8b4f7896dfe59dccfe0bb149708b297ed40adc8cf4502d7f80fa3498e78` |
+
+The original runtime observer failed to count the non-dumpable VMM through
+`/proc/<pid>/exe`; its failed main unit and absent result remain unchanged. A
+separate review accepts the actual controller exit zero, launch-chain UID
+inheritance and guest S5. Stopped raw collection and the ordinary verifiers then
+qualify the transfers, accounting, generation polls and stored bytes. This does
+not turn the original observer failure into a pass. The Viosock package remains
+an external test driver; these results establish neither WHQL status nor normal
+production signing. They do not qualify arbitrary Internet targets, TLS,
+generation-change notifications or later changed source, binaries or helpers. XP
+supports generation polling only; its notification request is unsupported.
+
+A pre-installation XP console baseline, with VgaSave running, separately
+verifies the 256x128 bitmap, four pointer-selected pixel changes and a saved
+194-byte file containing all 95 printable ASCII characters with Caps Lock off
+and on. It uses raw console CLI commands and 640x480 frames. The original bitmap
+and staged payloads remain unchanged. This qualifies that installed reference
+and input sequence, not browser or VNC input, every layout, mode, guest or
+restored input path. The baseline's full PnP inventory retains the unconfigured
+VGA device at Code 1 and VMClock at Code 28; VGEN reports Code 0 with service
+`gencounter`.
+
+A later isolated VGA installation completed its normal driver wizard and
+required a restart. The display remained black on the subsequent cold boot; that
+experiment does not qualify the display driver. Legacy VMClock recognition and a
+clean device inventory also remain open.
+
+Current Windows installation, the remaining graphical input and display matrix,
+security, the other guests' TAP routes and performance qualification remain
+open. The historical results below use format 31 and their matching binaries.
+They do not qualify formats 32 or 33. Do not load an older saved state with the
+candidate.
 
 The variable helper is Rust and reuses the upstream AWS-LC versions and
 checksums: `aws-lc-rs` 1.18.0 and `aws-lc-sys` 0.44.0. Their existing backend
@@ -166,14 +215,14 @@ listed runs finish with clean guest S5 and VMM exit zero.
 XP and Windows 7 use the documented external test-signed Viosock packages. The
 format-31 Windows 7 inventory retains three ACPI Code 28 devices. Current
 Windows 7 generation-counter binding, polling and TAP restore results are
-described above. Current XP driver-query and TAP restore results are also
-described above. Those results qualify a separate installed reference and do not
-qualify current-format XP CONNECT or generation-change notifications. Historical
-egress results do not prove six generation reads across restores. VMClock
-recognition on modern Windows establishes enumeration only. These installed
-references do not establish fresh XP, Windows 7, Windows 10 or IoT installation,
-or every graphical input path. Process/snapshot cache checks do not establish
-host power-loss durability. XP HTTP does not establish TLS support.
+described above. Current XP driver-query, TAP and CONNECT restore results are
+also described above, with their separate installed references, tested inputs
+and failure qualifications. XP results establish polling only. Historical egress
+results do not prove six generation reads across restores. VMClock recognition
+on modern Windows establishes enumeration only. These installed references do
+not establish fresh XP, Windows 7, Windows 10 or IoT installation, or every
+graphical input path. Process/snapshot cache checks do not establish host
+power-loss durability. XP HTTP does not establish TLS support.
 
 The historical format-31 Enterprise run uses variable helper SHA-256
 `0b2b94dbd74f84d9befa0f2747d812f580fc01e760843676b46b4a0373d45f3c` for the
