@@ -422,10 +422,11 @@ impl DeviceManager {
         vm: &KvmVm,
         event_manager: &mut EventManager,
         cmdline: &mut Cmdline,
+        protocol: crate::arch::BootProtocol,
         serial_out_path: Option<&crate::devices::legacy::serial::SerialOutput>,
         serial_rate_limiter: Option<TokenBucket>,
     ) -> Result<(), AttachDeviceError> {
-        // Serial device setup.
+        // Firmware exposes this UART through SPCR, independently of Linux boot arguments.
         let cmdline_contains_console = cmdline
             .as_cstring()
             .map_err(|_| AttachDeviceError::Cmdline)?
@@ -433,7 +434,7 @@ impl DeviceManager {
             .map_err(|_| AttachDeviceError::Cmdline)?
             .contains("console=");
 
-        if cmdline_contains_console {
+        if cmdline_contains_console || protocol == crate::arch::BootProtocol::FirmwareBoot {
             let serial = Self::setup_serial_device(
                 event_manager,
                 serial_out_path,
@@ -442,8 +443,10 @@ impl DeviceManager {
             )?;
             self.mmio_platform_devices
                 .register_mmio_serial(vm, serial, None)?;
-            self.mmio_platform_devices
-                .add_mmio_serial_to_cmdline(cmdline)?;
+            if protocol == crate::arch::BootProtocol::LinuxBoot {
+                self.mmio_platform_devices
+                    .add_mmio_serial_to_cmdline(cmdline)?;
+            }
         }
 
         let rtc = Arc::new(Mutex::new(RTCDevice::new()));
@@ -1355,55 +1358,52 @@ pub(crate) mod tests {
     #[cfg(target_arch = "aarch64")]
     #[test]
     fn test_attach_legacy_serial() {
-        let mut vmm = default_vmm();
-        assert!(vmm.device_manager.mmio_platform_devices.rtc.is_none());
-        assert!(vmm.device_manager.mmio_platform_devices.serial.is_none());
+        use crate::arch::BootProtocol::{FirmwareBoot, LinuxBoot};
 
-        let mut cmdline = Cmdline::new(4096).unwrap();
-        let mut event_manager = EventManager::new().unwrap();
-        vmm.device_manager
-            .attach_legacy_devices_aarch64(
-                vmm.vm.as_kvm().unwrap(),
-                &mut event_manager,
-                &mut cmdline,
-                None,
-                None,
-            )
-            .unwrap();
-        assert!(vmm.device_manager.mmio_platform_devices.rtc.is_some());
-        assert!(vmm.device_manager.mmio_platform_devices.serial.is_none());
-
-        let mut vmm = default_vmm();
-        cmdline.insert("console", "/dev/blah").unwrap();
-        vmm.device_manager
-            .attach_legacy_devices_aarch64(
-                vmm.vm.as_kvm().unwrap(),
-                &mut event_manager,
-                &mut cmdline,
-                None,
-                None,
-            )
-            .unwrap();
-        assert!(vmm.device_manager.mmio_platform_devices.rtc.is_some());
-        assert!(vmm.device_manager.mmio_platform_devices.serial.is_some());
-
-        assert!(
-            cmdline
-                .as_cstring()
-                .unwrap()
-                .into_string()
-                .unwrap()
-                .contains(&format!(
+        for (protocol, arguments, serial) in [
+            (LinuxBoot, "", false),
+            (
+                LinuxBoot,
+                crate::vmm_config::boot_source::DEFAULT_KERNEL_CMDLINE,
+                false,
+            ),
+            (LinuxBoot, "console=/dev/blah", true),
+            (FirmwareBoot, "", true),
+            (
+                FirmwareBoot,
+                crate::vmm_config::boot_source::DEFAULT_KERNEL_CMDLINE,
+                true,
+            ),
+            (FirmwareBoot, "console=/dev/blah", true),
+        ] {
+            let mut vmm = default_vmm();
+            assert!(vmm.device_manager.mmio_platform_devices.rtc.is_none());
+            assert!(vmm.device_manager.mmio_platform_devices.serial.is_none());
+            let mut cmdline = crate::vmm_config::boot_source::build_cmdline(arguments).unwrap();
+            let mut event_manager = EventManager::new().unwrap();
+            vmm.device_manager
+                .attach_legacy_devices_aarch64(
+                    vmm.vm.as_kvm().unwrap(),
+                    &mut event_manager,
+                    &mut cmdline,
+                    protocol,
+                    None,
+                    None,
+                )
+                .unwrap();
+            let devices = &vmm.device_manager.mmio_platform_devices;
+            assert!(devices.rtc.is_some());
+            assert_eq!(devices.serial.is_some(), serial);
+            let command_line = cmdline.as_cstring().unwrap().into_string().unwrap();
+            if protocol == LinuxBoot && serial {
+                assert!(command_line.contains(&format!(
                     "earlycon=uart,mmio,0x{:08x}",
-                    vmm.device_manager
-                        .mmio_platform_devices
-                        .serial
-                        .as_ref()
-                        .unwrap()
-                        .resources
-                        .addr
-                ))
-        );
+                    devices.serial.as_ref().unwrap().resources.addr
+                )));
+            } else {
+                assert_eq!(command_line, arguments);
+            }
+        }
     }
 
     fn make_hotplug_block_cfg(drive_id: &str, f: &TempFile, is_root: bool) -> BlockDeviceConfig {
