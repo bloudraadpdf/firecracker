@@ -196,9 +196,9 @@ includes `files.sha256-sizes` and `image.sha256`. The tool does not supply a
 product key. This media check does not qualify Windows Setup or the installed
 driver's signature policy.
 
-The NT6 tool takes an explicit `win7`, `win10`, `win11`, `win11-enterprise-26h2`
-or `server2025` profile, a matching pinned AMD64 Windows ISO and
-`virtio-win-0.1.302.iso`:
+The NT6 tool takes an explicit `win7`, `win10`, `win11`,
+`win11-enterprise-26h2`, `win11-pro-26h2` or `server2025` profile, a matching
+pinned AMD64 Windows ISO and `virtio-win-0.1.302.iso`:
 
 ```sh
 build/windows/console/prepare-nt6 win7 windows7.iso virtio-win-0.1.302.iso \
@@ -206,7 +206,7 @@ build/windows/console/prepare-nt6 win7 windows7.iso virtio-win-0.1.302.iso \
 ```
 
 It needs `7z`, `genisoimage` and `sha256sum`. It extracts the full UDF tree,
-preserves the original BIOS and EFI boot images, adds the signed storage and
+verifies the original BIOS and EFI boot extents, adds the signed storage and
 network packages under `$WinPEDriver$`, then re-extracts the result and checks
 every file's size and SHA-256 digest. It removes staging files after
 verification. Normal errors remove the newly created output directory, including
@@ -215,9 +215,12 @@ both standalone tool sources; it supplies shared checksum, boot-catalogue and
 cleanup helpers.
 
 `win11` selects the tested IoT Enterprise LTSC image. For standard Enterprise
-Evaluation and its 2023-signed boot files, use `win11-enterprise-26h2` with the
+Evaluation, use `win11-enterprise-26h2`; for the pinned standard Pro English
+AMD64 media and its Professional image at index 6, use `win11-pro-26h2`. Both
+profiles select the 2023 boot-file recipe in the
 [secure firmware and media procedure](../resources/firmware/cloudhv-secureboot/README.md#current-windows-installation-media).
-The accepted source digests are in
+Pro installation remains unqualified; that procedure retains the source
+install.wim warning and boot-chain limits. The accepted source digests are in
 [`profile_config`](../tools/windows/prepare-nt6.rs); the tool rejects other
 images.
 
@@ -228,9 +231,11 @@ Desktop Experience, or `client` for a Windows client. The server account is
 `Administrator`; the client account is `Firecracker`, a local administrator.
 Pass the answer file as the optional final argument to the matching
 `prepare-nt6` profile; the rebuilt DVD then contains Setup, the answer file and
-both storage/network drivers. Keep the generated DVD private because it contains
-the account password. Each revised single-DVD unattended path requires a fresh
-installation qualification for its selected edition.
+both storage/network drivers. Only `win11-pro-26h2` with an answer file uses the
+original no-prompt EX EFI CD image; graphical Pro and the other five profiles
+retain their previous boot-image selection. Keep the generated DVD private
+because it contains the account password. Each revised single-DVD unattended
+path requires a fresh installation qualification for its selected edition.
 
 Setup searches `$WinPEDriver$` for matching drivers in both graphical and
 unattended installations. It loads them into PE and adds them to the installed
