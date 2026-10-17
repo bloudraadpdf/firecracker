@@ -113,6 +113,9 @@ pub struct MachineConfig {
     /// Virtio PCI platform; non-default modes require PCI to be enabled.
     #[serde(default, skip_serializing_if = "PciTransportMode::is_modern")]
     pub pci_transport: PciTransportMode,
+    /// Expose the VMClock interface to the guest.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub vmclock: bool,
     /// Number of vcpu to start.
     pub vcpu_count: u8,
     /// The memory size in MiB.
@@ -126,7 +129,7 @@ pub struct MachineConfig {
     pub hyperv: bool,
     /// Enables the legacy programmable interval timer on x86_64.
     #[cfg(target_arch = "x86_64")]
-    #[serde(default = "default_pit")]
+    #[serde(default = "default_true")]
     pub pit: bool,
     /// A CPU template that it is used to filter the CPU features exposed to the guest.
     // FIXME: once support for static CPU templates is removed, this field can be dropped altogether
@@ -149,9 +152,12 @@ pub struct MachineConfig {
     pub gdb_socket_path: Option<String>,
 }
 
-#[cfg(target_arch = "x86_64")]
-fn default_pit() -> bool {
+fn default_true() -> bool {
     true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 fn is_none_or_custom_template(template: &Option<CpuTemplateType>) -> bool {
@@ -185,6 +191,7 @@ impl Default for MachineConfig {
     fn default() -> Self {
         Self {
             pci_transport: PciTransportMode::default(),
+            vmclock: true,
             vcpu_count: 1,
             mem_size_mib: DEFAULT_MEM_SIZE_MIB,
             smt: false,
@@ -213,6 +220,9 @@ pub struct MachineConfigUpdate {
     /// Update the virtio PCI platform.
     #[serde(default)]
     pub pci_transport: Option<PciTransportMode>,
+    /// Update whether the guest has a VMClock interface.
+    #[serde(default)]
+    pub vmclock: Option<bool>,
     /// Number of vcpu to start.
     #[serde(default)]
     pub vcpu_count: Option<u8>,
@@ -258,6 +268,7 @@ impl From<MachineConfig> for MachineConfigUpdate {
     fn from(cfg: MachineConfig) -> Self {
         MachineConfigUpdate {
             pci_transport: Some(cfg.pci_transport),
+            vmclock: Some(cfg.vmclock),
             vcpu_count: Some(cfg.vcpu_count),
             mem_size_mib: Some(cfg.mem_size_mib),
             smt: Some(cfg.smt),
@@ -334,6 +345,7 @@ impl MachineConfig {
 
         Ok(MachineConfig {
             pci_transport: update.pci_transport.unwrap_or(self.pci_transport),
+            vmclock: update.vmclock.unwrap_or(self.vmclock),
             vcpu_count,
             mem_size_mib,
             smt,
@@ -354,6 +366,49 @@ impl MachineConfig {
 mod tests {
     use crate::cpu_config::templates::{CpuTemplateType, CustomCpuTemplate, StaticCpuTemplate};
     use crate::vmm_config::machine_config::MachineConfig;
+
+    #[test]
+    fn vmclock_defaults_on_and_patch_preserves_the_choice() {
+        use super::MachineConfigUpdate;
+        let config: MachineConfig =
+            serde_json::from_str(r#"{"vcpu_count":1,"mem_size_mib":128}"#).unwrap();
+        assert!(config.vmclock);
+        assert!(
+            serde_json::to_value(&config)
+                .unwrap()
+                .get("vmclock")
+                .is_none()
+        );
+        let off: MachineConfigUpdate = serde_json::from_str(r#"{"vmclock":false}"#).unwrap();
+        assert!(!off.is_empty());
+        let disabled = config.update(&off).unwrap();
+        assert!(!disabled.vmclock);
+        assert_eq!(
+            disabled.update(&MachineConfigUpdate::default()).unwrap(),
+            disabled
+        );
+        assert_eq!(
+            MachineConfigUpdate::from(disabled.clone()).vmclock,
+            Some(false)
+        );
+        assert!(
+            disabled
+                .update(&MachineConfigUpdate::from(config))
+                .unwrap()
+                .vmclock
+        );
+        let on: MachineConfigUpdate = serde_json::from_str(r#"{"vmclock":true}"#).unwrap();
+        assert!(disabled.update(&on).unwrap().vmclock);
+        serde_json::from_str::<MachineConfigUpdate>(r#"{"vmclock":"false"}"#).unwrap_err();
+    }
+
+    #[test]
+    fn vmclock_false_configuration_is_accepted() {
+        let mut value = serde_json::to_value(MachineConfig::default()).unwrap();
+        value["vmclock"] = false.into();
+        let config: MachineConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(serde_json::to_value(config).unwrap()["vmclock"], false);
+    }
 
     #[cfg(target_arch = "x86_64")]
     #[test]

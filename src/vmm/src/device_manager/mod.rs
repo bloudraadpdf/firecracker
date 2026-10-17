@@ -1167,7 +1167,7 @@ pub(crate) mod tests {
         let mmio_platform_devices = MMIOPlatformDevices::new();
         let acpi_devices = ACPIDeviceManager::new(
             VmGenId::new(&mut resource_allocator).unwrap(),
-            VmClock::new(&mut resource_allocator).unwrap(),
+            Some(VmClock::new(&mut resource_allocator).unwrap()),
         );
         let virtio_devices = VirtioDevices::Mmio(MMIOVirtioDevices::new());
 
@@ -1199,7 +1199,7 @@ pub(crate) mod tests {
         let mut allocator = ResourceAllocator::new();
         manager.acpi_devices = ACPIDeviceManager::new(
             VmGenId::new_with_gpe(&mut allocator, power).unwrap(),
-            VmClock::new(&mut allocator).unwrap(),
+            Some(VmClock::new(&mut allocator).unwrap()),
         );
         manager
     }
@@ -1215,87 +1215,97 @@ pub(crate) mod tests {
     #[cfg(feature = "windows")]
     fn pc_timer_restore_follows_saved_devices() {
         for present in [false, true] {
-            let mut source =
-                crate::vstate::vm::tests::setup_vm_with_memory(crate::utils::mib_to_bytes(128));
-            source.setup_irqchip(true).unwrap();
-            let source = Arc::new(source);
-            let mut events = EventManager::new().unwrap();
-            let mut manager = DeviceManager::new(
-                &mut events,
-                source.vcpus_exit_evt(),
-                &source,
-                None,
-                None,
-                false,
-                present,
-            )
-            .unwrap();
-            manager.attach_vmgenid_device(&source).unwrap();
-            manager.attach_vmclock_device(&source).unwrap();
-            let mut state = manager.save().unwrap();
-            let allocation = source.resource_allocator().save();
-            drop(manager);
-            drop(source);
-            drop(events);
-
-            let mut target =
-                crate::vstate::vm::tests::setup_vm_with_memory(crate::utils::mib_to_bytes(128));
-            target.setup_irqchip(true).unwrap();
-            let target = Arc::new(target);
-            *target.resource_allocator() = ResourceAllocator::restore((), &allocation).unwrap();
-            let mut events = EventManager::new().unwrap();
-            let mut resources = VmResources::default();
-            // Deliberately disagree with saved topology, without opening a boot image.
-            resources.boot_source.config.firmware =
-                (!present).then_some(crate::vmm_config::boot_source::FirmwareConfig::SeaBios);
-            let mut restore = |state: &DevicesState| {
-                DeviceManager::restore(
-                    DeviceRestoreArgs {
-                        mem: target.guest_memory(),
-                        vm: &target,
-                        event_manager: &mut events,
-                        vcpus_exit_evt: target.vcpus_exit_evt(),
-                        vm_resources: &mut resources,
-                        instance_id: "pc-restore",
-                        vmgenid_notification: Default::default(),
-                        vmclock_notification: Default::default(),
-                    },
-                    state,
+            for clock_present in [false, true] {
+                let mut source =
+                    crate::vstate::vm::tests::setup_vm_with_memory(crate::utils::mib_to_bytes(128));
+                source.setup_irqchip(true).unwrap();
+                let source = Arc::new(source);
+                let mut events = EventManager::new().unwrap();
+                let mut manager = DeviceManager::new(
+                    &mut events,
+                    source.vcpus_exit_evt(),
+                    &source,
+                    None,
+                    None,
+                    false,
+                    present,
                 )
-            };
-            if present {
-                let cmos = state.cmos_state.take();
-                assert!(matches!(
-                    restore(&state),
-                    Err(DeviceManagerPersistError::IncompletePcState)
-                ));
-                state.cmos_state = cmos;
-                let power = state.power_state.take();
-                assert!(matches!(
-                    restore(&state),
-                    Err(DeviceManagerPersistError::IncompletePcState)
-                ));
-                state.power_state = power;
-                assert!(
-                    !target
+                .unwrap();
+                manager.attach_vmgenid_device(&source).unwrap();
+                if clock_present {
+                    manager.attach_vmclock_device(&source).unwrap();
+                }
+                let mut state = manager.save().unwrap();
+                assert_eq!(state.acpi_state.has_vmclock(), clock_present);
+                let allocation = source.resource_allocator().save();
+                drop(manager);
+                drop(source);
+                drop(events);
+
+                let mut target =
+                    crate::vstate::vm::tests::setup_vm_with_memory(crate::utils::mib_to_bytes(128));
+                target.setup_irqchip(true).unwrap();
+                let target = Arc::new(target);
+                *target.resource_allocator() = ResourceAllocator::restore((), &allocation).unwrap();
+                let mut events = EventManager::new().unwrap();
+                let mut resources = VmResources::default();
+                // Deliberately disagree with saved topology, without opening a boot image.
+                resources.boot_source.config.firmware =
+                    (!present).then_some(crate::vmm_config::boot_source::FirmwareConfig::SeaBios);
+                let mut restore = |state: &DevicesState| {
+                    DeviceManager::restore(
+                        DeviceRestoreArgs {
+                            mem: target.guest_memory(),
+                            vm: &target,
+                            event_manager: &mut events,
+                            vcpus_exit_evt: target.vcpus_exit_evt(),
+                            vm_resources: &mut resources,
+                            instance_id: "pc-restore",
+                            vmgenid_notification: Default::default(),
+                            vmclock_notification: Default::default(),
+                        },
+                        state,
+                    )
+                };
+                if present {
+                    let cmos = state.cmos_state.take();
+                    assert!(matches!(
+                        restore(&state),
+                        Err(DeviceManagerPersistError::IncompletePcState)
+                    ));
+                    state.cmos_state = cmos;
+                    let power = state.power_state.take();
+                    assert!(matches!(
+                        restore(&state),
+                        Err(DeviceManagerPersistError::IncompletePcState)
+                    ));
+                    state.power_state = power;
+                    assert!(
+                        !target
+                            .resource_allocator()
+                            .gsi_legacy_allocator
+                            .is_allocated(8)
+                    );
+                }
+                let restored = restore(&state).unwrap();
+                assert_eq!(restored.acpi_devices.vmclock().is_some(), clock_present);
+                assert_eq!(
+                    restored.save().unwrap().acpi_state.has_vmclock(),
+                    clock_present
+                );
+                assert_eq!(restored.pc_devices().is_some(), present);
+                assert_eq!(restored.save().unwrap().power_state.is_some(), present);
+                assert_eq!(restored.save().unwrap().cmos_state.is_some(), present);
+                assert_eq!(
+                    target
                         .resource_allocator()
                         .gsi_legacy_allocator
-                        .is_allocated(8)
+                        .is_allocated(8),
+                    present
                 );
+                assert_eq!(target.pio_bus.read(0x70, &mut [0]).is_ok(), present);
+                assert_eq!(target.pio_bus.read(0x600, &mut [0]).is_ok(), present);
             }
-            let restored = restore(&state).unwrap();
-            assert_eq!(restored.pc_devices().is_some(), present);
-            assert_eq!(restored.save().unwrap().power_state.is_some(), present);
-            assert_eq!(restored.save().unwrap().cmos_state.is_some(), present);
-            assert_eq!(
-                target
-                    .resource_allocator()
-                    .gsi_legacy_allocator
-                    .is_allocated(8),
-                present
-            );
-            assert_eq!(target.pio_bus.read(0x70, &mut [0]).is_ok(), present);
-            assert_eq!(target.pio_bus.read(0x600, &mut [0]).is_ok(), present);
         }
     }
 

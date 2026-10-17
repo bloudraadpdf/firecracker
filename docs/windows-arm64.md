@@ -101,7 +101,7 @@ The following configuration limits the 52-bit validation host to 48 bits:
       "system_uuid": "11223344-5566-7788-99aa-bbccddeeff01"
     }
   },
-  "machine-config": {"vcpu_count": 2, "mem_size_mib": 4096, "track_dirty_pages": true},
+  "machine-config": {"vcpu_count": 2, "mem_size_mib": 4096, "track_dirty_pages": true, "vmclock": false},
   "cpu-config": {
     "vcpu_features": [{"index": 0, "bitmap": "0b1xxx"}],
     "reg_modifiers": [{"addr": "0x603000000013c038", "bitmap": "0b0101"}]
@@ -120,8 +120,10 @@ Start with
 `firecracker --enable-pci --api-sock windows.sock --config-file windows.json`.
 CPU-template bit 3 enables `KVM_ARM_VCPU_PMU_V3`. Firecracker assigns PPI 23 and
 initialises the PMU after creating the interrupt controller. Restore recreates
-the PMU from the saved vCPU feature flags. The AMD64 `hyperv` machine field does
-not apply to ARM64.
+the PMU from the saved vCPU feature flags. VMClock is explicitly disabled in
+this example; its default remains enabled. Restore retains the saved clock
+presence, independently of VM Generation ID. The AMD64 `hyperv` machine field
+does not apply to ARM64.
 
 The register modifier sets `ID_AA64MMFR0_EL1.PARange` to 48 bits. On the 52-bit
 validation host, firmware creates five-level translation tables. The tested

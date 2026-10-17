@@ -180,21 +180,21 @@ sequence. Do not restore an older snapshot with a disk modified by a later run.
 
 The preserved `check.sh` runs this sequence. Set `WINDOWS_CONNECT_BASE` to a
 fresh test directory containing `config.json`, with absolute firmware and disk
-paths, `track_dirty_pages: true`, CID 3, and `uds_path: "vsock.sock"`. Set
-`WINDOWS_CONNECT_FC`, `WINDOWS_CONNECT_PROXY` (Tokoloshe `windows_probe`),
-`WINDOWS_CONNECT_SIDECAR` (`tokoloshe-egress`), `WINDOWS_CONNECT_PROXY_ROOT`,
-and `WINDOWS_CONNECT_SNAPSHOT_EDITOR` to their absolute paths. Set
-`WINDOWS_CONNECT_UID` and `WINDOWS_CONNECT_GID` to the test user. The controller
-creates `run/`; preserve or remove an earlier run before starting another. It
-executes a read-only per-run copy of its shell source. For a graphical guest,
-use the relative console path `console.sock`; cleanup removes its stale socket
-only after the owned VMM has stopped. User and group IDs default to the invoking
-user. When changing identity, it initialises that user's supplementary groups.
-API requests have time limits. On exit it allows each child ten seconds to stop,
-then sends KILL if the child remains live. After a successful KILL it polls for
-up to another ten seconds. It leaves a live VMM's sockets in place. The proxy
-uses a separate process group so cleanup also attempts to stop a stalled
-sidecar. A forced stop fails the run. Allow the
+paths, `track_dirty_pages: true`, `vmclock: false`, CID 3, and
+`uds_path: "vsock.sock"`. Set `WINDOWS_CONNECT_FC`, `WINDOWS_CONNECT_PROXY`
+(Tokoloshe `windows_probe`), `WINDOWS_CONNECT_SIDECAR` (`tokoloshe-egress`),
+`WINDOWS_CONNECT_PROXY_ROOT`, and `WINDOWS_CONNECT_SNAPSHOT_EDITOR` to their
+absolute paths. Set `WINDOWS_CONNECT_UID` and `WINDOWS_CONNECT_GID` to the test
+user. The controller creates `run/`; preserve or remove an earlier run before
+starting another. It executes a read-only per-run copy of its shell source. For
+a graphical guest, use the relative console path `console.sock`; cleanup removes
+its stale socket only after the owned VMM has stopped. User and group IDs
+default to the invoking user. When changing identity, it initialises that user's
+supplementary groups. API requests have time limits. On exit it allows each
+child ten seconds to stop, then sends KILL if the child remains live. After a
+successful KILL it polls for up to another ten seconds. It leaves a live VMM's
+sockets in place. The proxy uses a separate process group so cleanup also
+attempts to stop a stalled sidecar. A forced stop fails the run. Allow the
 [cleanup time](../egress/README.md) in any outer watchdog and confirm that owned
 processes have stopped before reusing the disk or helper state.
 
@@ -258,6 +258,6 @@ guest transcript and sealed proxy stage watermarks bind these records to the
 normal three allowed bidirectional transfers and three zero-byte denials. There
 are no prearmed requests in this XP mode. Existing commands without the option
 retain their ordinary behaviour. The
-[validation record](../../../docs/windows-validation.md#current-windows-xp-reference)
+[validation record](../../../docs/windows-validation.md#recorded-windows-xp-reference)
 identifies the qualified format-33 CONNECT run and its exact reader and host
 inputs. A new build or changed input needs its own guest and restore checks.

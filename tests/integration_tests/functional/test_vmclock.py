@@ -10,17 +10,34 @@ pytestmark = pin_guest_kernel(ACPI_GUEST_KERNELS)
 
 
 @pytest.fixture(scope="function")
-def vm_with_vmclock(uvm, bin_vmclock_path):
+def vm_with_vmclock(uvm, bin_vmclock_path, request):
     """Create a VM with VMclock support and the `vmclock` test binary under `/tmp/vmclock`"""
     basevm = uvm
     basevm.spawn()
 
     basevm.basic_config()
+    if getattr(request, "param", True) is False:
+        basevm.api.machine_config.patch(vmclock=False)
     basevm.add_net_iface()
     basevm.start()
     basevm.ssh.scp_put(bin_vmclock_path, "/tmp/vmclock")
 
     yield basevm
+
+
+@pytest.mark.parametrize("vm_with_vmclock", [False], indirect=True)
+def test_vmclock_absence_survives_restore(
+    vm_with_vmclock, microvm_factory, snapshot_type
+):
+    """Restore an absent clock without a special notification/load flag."""
+    basevm = vm_with_vmclock
+    assert basevm.api.machine_config.get().json()["vmclock"] is False
+    basevm.ssh.check_output("test ! -e /dev/vmclock0")
+    snapshot = basevm.make_snapshot(snapshot_type)
+    basevm.kill()
+    for vm in microvm_factory.build_n_from_snapshot(snapshot, 1, incremental=True):
+        assert vm.api.machine_config.get().json()["vmclock"] is False
+        vm.ssh.check_output("test ! -e /dev/vmclock0")
 
 
 def parse_vmclock(vm, use_mmap=False):

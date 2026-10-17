@@ -329,6 +329,13 @@ mod tests {
 
     #[test]
     fn test_bad_version() {
+        let mut previous = Snapshot::new(());
+        previous.header.version = Version::new(33, 0, 0);
+        let data = bitcode::serialize(&previous).unwrap();
+        assert!(matches!(
+            Snapshot::<()>::load_without_crc_check(&data),
+            Err(SnapshotError::InvalidFormatVersion(v)) if v.major == 33
+        ));
         // Different major version: shouldn't work
         let mut bad_snapshot = Snapshot::new(());
         bad_snapshot.header.version.major = SNAPSHOT_VERSION.major + 1;

@@ -114,9 +114,9 @@ existing namespace and does not change host routing or firewall rules. The
 caller owns their setup and teardown.
 
 Create a fresh test directory with `config.json`: absolute disk, firmware and
-logger paths, `track_dirty_pages: true`, the TAP interface, no vsock, and an
-optional console at `<test-directory>/console.sock`. Set these environment
-variables to absolute paths before running `bash tap-check.sh`:
+logger paths, `track_dirty_pages: true`, `vmclock: false`, the TAP interface, no
+vsock, and an optional console at `<test-directory>/console.sock`. Set these
+environment variables to absolute paths before running `bash tap-check.sh`:
 
 | Variable                        | Value                                           |
 | ------------------------------- | ----------------------------------------------- |
@@ -451,6 +451,6 @@ reads the installed reader again from the stopped OS volume and writes
 equal nonzero IDs per stage, three different stage IDs, matching phase order and
 all normal TAP checks. The XP network path remains HTTP, DNS and TCP; this mode
 does not add TLS support. The
-[validation record](../../../docs/windows-validation.md#current-windows-xp-reference)
+[validation record](../../../docs/windows-validation.md#recorded-windows-xp-reference)
 records the scoped format-33 TAP and CONNECT results. A new reader build needs
 its own guest and restore qualification.
