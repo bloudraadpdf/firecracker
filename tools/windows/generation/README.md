@@ -315,8 +315,10 @@ all six reads and three distinct stage IDs, and retains the raw evidence hashes
 in `generation-verification.json`. Ordinary egress, storage, shutdown and
 proxy-accounting checks still run independently.
 
-A successful source test or link does not qualify these rebuilt readers.
-Complete the current snapshot-format matrix on the installed XP guest before
-claiming restore coverage. Rebuilding the standalone Win7 probe also requires a
-new prearmed notification regression; previous Win7 results identify the earlier
-binary.
+A successful source test or link does not qualify a new reader build. The
+[validation record](../../../docs/windows-validation.md#current-windows-xp-reference)
+separates the recorded XP TAP and CONNECT polling results from open gates.
+Repeat the matching guest and snapshot-format matrix for changed inputs before
+claiming their restore coverage. Rebuilding the standalone Win7 probe also needs
+a new prearmed notification regression; previous Win7 results identify the
+earlier binary.
