@@ -31,12 +31,17 @@ The functional checks use the current release VMMs.
 | Variable helper (unchanged inputs)                     | 67 passed; none ignored                         |
 | Console helper (unchanged inputs)                      | 31 passed; none ignored                         |
 | Strict workspace Clippy                                | Default and all features, GNU and musl          |
-| Strict ARM64 cross-Clippy                              | Default and all features, GNU; compilation only |
+| Strict ARM64 cross-Clippy                              | GNU default/all features; command 0, run failed |
 | Standalone tool Clippy and Rust/Markdown style gates   | Passed                                          |
 | Platform devices                                       | 7 passed                                        |
 | Selected API and boot tests                            | 65 passed; 2 empty CPU-template skips           |
 | Selected basic Linux snapshot tests                    | 36 passed                                       |
 | Selected Linux snapshot-cycle tests                    | 12 passed in one invocation                     |
+
+Both strict ARM64 GNU cross-Clippy commands exited zero. The enclosing run and
+its post-run guard failed because compiler-cache allocation exceeded the fixed
+cap. Later cache custody checks and retirement do not change that failed result.
+These command results establish compilation checks only.
 
 The VMM suites execute the real swtpm restore, ACPICA evaluation and maximum
 optional-buffer snapshot-reader tests. The console backlog regression passes;
@@ -96,6 +101,34 @@ instances stop at snapshot boundaries; the final instance requests S5 and the
 VMM exits zero. Host process, mount and loop closure checks pass. This qualifies
 only the installed Win7 test-signing profile and fresh connections.
 
+### Current Windows XP reference
+
+On the current format-33 implementation, the installed XP Professional SP3 x86
+reference has the genuine Microsoft generation-counter package 6.3.9600.17831.
+Separate read-only catalogue-member checks accept its installed INF and SYS; WMI
+records the selected signed driver. After a distinct cold boot, the device has
+Code 0, `gencounter` and KMDF are running, and two actual reads return the same
+nonzero 16-byte generation ID. The guest then requests normal S5 and the VMM
+exits zero. The stopped disk, host processes, mounts and loops are closed.
+
+A separate installed-reference clone passes format-33 cold, full-restore and
+differential-restore TAP checks with the
+[shared polling reader](../tools/windows/generation/README.md#xp-polling-during-egress).
+Six genuine driver queries form three matching pairs with distinct nonzero
+generation IDs. Each phase passes a 2 MiB equal TCP echo in each direction and
+hostname HTTP with status 200. The offline verifier accepts all 65,536 storage
+bytes. Both saved states report v33.0.0. The final guest requests normal S5 and
+the VMM exits zero. Host process, mount, loop and network closure checks pass.
+
+The TAP run uses the vendor-signed NetKVM package with normal XP driver-warning
+consent. These checks do not establish WHQL status or installed catalogue
+registration. The separate default driver-policy signature check fails. The
+original offline collector failed on a trailing-space marker. A separate parser
+accepts the retained actual bytes after the marker correction; the original
+collector remains failed and was not rerun. These results qualify this installed
+reference and TAP route only. Current-format XP CONNECT, generation-change
+notifications and TLS remain unqualified.
+
 Current Windows installation, graphical input, security, the other guests' TAP
 routes and performance qualification remain open. The historical results below
 use format 31 and their matching binaries. They do not qualify formats 32 or 33.
@@ -133,13 +166,14 @@ listed runs finish with clean guest S5 and VMM exit zero.
 XP and Windows 7 use the documented external test-signed Viosock packages. The
 format-31 Windows 7 inventory retains three ACPI Code 28 devices. Current
 Windows 7 generation-counter binding, polling and TAP restore results are
-described above. XP's original signed package and compatible KMDF preparation
-have static/build checks only; guest binding and queries remain unqualified.
-VMClock recognition on modern Windows establishes enumeration only. These
-installed references do not establish fresh XP, Windows 7, Windows 10 or IoT
-installation, or every graphical input path. Process/snapshot cache checks do
-not establish host power-loss durability. XP HTTP does not establish TLS
-support.
+described above. Current XP driver-query and TAP restore results are also
+described above. Those results qualify a separate installed reference and do not
+qualify current-format XP CONNECT or generation-change notifications. Historical
+egress results do not prove six generation reads across restores. VMClock
+recognition on modern Windows establishes enumeration only. These installed
+references do not establish fresh XP, Windows 7, Windows 10 or IoT installation,
+or every graphical input path. Process/snapshot cache checks do not establish
+host power-loss durability. XP HTTP does not establish TLS support.
 
 The historical format-31 Enterprise run uses variable helper SHA-256
 `0b2b94dbd74f84d9befa0f2747d812f580fc01e760843676b46b4a0373d45f3c` for the

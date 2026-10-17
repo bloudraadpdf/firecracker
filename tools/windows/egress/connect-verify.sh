@@ -8,6 +8,12 @@ mount_helper=$(realpath "$(dirname "$0")/mount-state.sh")
 cd "${WINDOWS_CONNECT_BASE:?Set test directory}"
 prefix=${WINDOWS_CONNECT_PREFIX:?Set guest file prefix}
 tag=${WINDOWS_CONNECT_TAG:?Set guest marker tag}
+generation=${WINDOWS_GENERATION_CHECKS:-0}
+if [[ "$generation" != 0 && "$generation" != 1 ]]; then
+    echo 'WINDOWS_GENERATION_CHECKS must be 0 or 1' >&2
+    exit 1
+fi
+if [[ "$generation" = 1 ]]; then test "$tag" = XPLEGACY; fi
 identity=${WINDOWS_CONNECT_IDENTITY:-SYSTEM}
 identity_label=${WINDOWS_CONNECT_IDENTITY_LABEL:-RunAs User}
 encoding=${WINDOWS_CONNECT_ENCODING:-UTF-8}
@@ -23,13 +29,10 @@ denied='dest_host: "127.0.0.1", dest_port: 40568, bytes_up: 0, bytes_down: 0, ou
 test "$(printf '%s' "$accounting" | grep -oF "$allowed" | wc -l)" = 3
 test "$(printf '%s' "$accounting" | grep -oF "$denied" | wc -l)" = 3
 mkdir -p mnt
-if mountpoint -q mnt; then exit 1; fi
-loop_args=(--find --show --read-only)
-if [[ -n "$offset" ]]; then loop_args+=(--offset "$offset"); else loop_args+=(--partscan); fi
 # shellcheck source=mount-state.sh
 source "$mount_helper"
 windows_mount_directory=$PWD/mnt
-windows_mount_loop=$(losetup "${loop_args[@]}" "$disk")
+windows_mount_attach "$disk" "$offset"
 partition=$windows_mount_loop
 if [[ -z "$offset" ]]; then partition=${windows_mount_loop}p3; fi
 ntfs-3g "$partition" mnt -o ro
@@ -51,6 +54,12 @@ if grep -q "${tag}_FAIL" run/guest-transcript.txt; then exit 1; fi
 if [[ "$tag" = XPLEGACY ]]; then
     test "$(grep -c '^CONNECT_RESULT=0' run/guest-transcript.txt)" = 1
     "${WINDOWS_CONNECT_XP_VERIFIER:?Set the legacy XP host verifier}" run/final-data.bin
+    if [[ "$generation" = 1 ]]; then
+        python3 "$(dirname "$0")/../generation/verify.py" "$PWD/run" --tag XPLEGACY --xp-mode connect \
+            --reader "$PWD/mnt/xp-connect.exe" \
+            --probe-sha256 "${WINDOWS_GENERATION_PROBE_SHA256:?Set the staged XP reader SHA256}" \
+            > run/generation-verification.json
+    fi
 else
     grep -Ei "${identity_label}[[:space:]]*:.*\\\\${identity}[[:space:]]*$" run/guest-transcript.txt
     expected=$(awk '{gsub(/\r/, "")} $1 == "Hash" && $2 == ":" {hash=$3; reading=1; next} reading && $1 ~ /^[0-9A-Fa-f]+$/ {hash=hash $1; next} reading {reading=0} END {print hash}' run/guest-transcript.txt | tr -d '\r')

@@ -4,35 +4,15 @@
 #![no_std]
 #![no_main]
 use core::ptr;
+#[path = "../egress/device.rs"]
+mod device;
+use device::{CloseHandle, CreateFileW, DeviceIoControl};
 #[path = "../egress/win32.rs"]
 mod win32;
 use win32::{ExitProcess, GetLastError, GetStdHandle, WriteFile};
 #[cfg(xp_matrix)]
 mod xp_matrix;
 
-#[link(name = "kernel32")]
-unsafe extern "system" {
-    fn CreateFileW(
-        name: *const u16,
-        access: u32,
-        share: u32,
-        security: *const u8,
-        disposition: u32,
-        attributes: u32,
-        template: usize,
-    ) -> usize;
-    fn DeviceIoControl(
-        handle: usize,
-        code: u32,
-        input: *const u8,
-        input_len: u32,
-        output: *mut u32,
-        output_len: u32,
-        returned: *mut u32,
-        overlap: *mut u8,
-    ) -> i32;
-    fn CloseHandle(handle: usize) -> i32;
-}
 #[link(name = "ws2_32")]
 unsafe extern "system" {
     fn WSAStartup(version: u16, data: *mut u8) -> i32;
@@ -165,7 +145,7 @@ fn run() {
     // SAFETY: name is terminated UTF-16 and stays live for the synchronous open.
     let handle = unsafe { CreateFileW(name.as_ptr(), 0x80000000, 1, ptr::null(), 3, 0x80, 0) };
     require(handle != usize::MAX, b"open Viosock");
-    let mut af = 0;
+    let mut af = 0u32;
     let mut returned = 0;
     // SAFETY: handle is live; af and returned are writable for their declared sizes, and
     // the synchronous IOCTL has no input or overlapped buffer.
@@ -175,7 +155,7 @@ fn run() {
             0x0801300c,
             ptr::null(),
             0,
-            &mut af,
+            (&raw mut af).cast(),
             4,
             &mut returned,
             ptr::null_mut(),

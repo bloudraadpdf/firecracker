@@ -26,10 +26,12 @@ rustc --edition 2024 "${windows_rustflags[@]}" -D warnings \
   tools/windows/generation/probe.rs -o build/windows/generation/xp-x86.exe
 ```
 
-The existing `egress/win32.rs` must remain at its repository path. No new crate,
-C implementation or generated import library is needed. Check the actual PE
-architecture, subsystem version and imports before using a rebuilt executable. A
-successful link does not qualify a guest driver or a restore.
+Keep `counter.rs`, `polling.rs`, `egress/win32.rs` and `egress/device.rs` at
+their repository paths. The probe and XP egress readers share the same polling
+implementation; the standalone probe retains its notification interface. No new
+crate, C implementation or generated import library is needed. Check the actual
+PE architecture, subsystem version and imports before using a rebuilt
+executable. A successful link does not qualify a guest driver or a restore.
 
 ## Interface and result
 
@@ -116,8 +118,9 @@ rustc +1.98.1 --edition 2024 --test -D warnings tools/windows/generation/probe.r
 build/windows/generation/probe-tests
 ```
 
-These tests cover option parsing and field order. They do not execute Windows
-I/O or qualify driver completion, cancellation or SCI delivery.
+These tests cover option parsing, layout, field order and the pure XP polling
+state checks. They do not execute Windows I/O or qualify driver completion,
+cancellation or SCI delivery.
 
 ## Win7 driver servicing
 
@@ -177,9 +180,9 @@ preserve its actual error/restart result and signature warnings, and complete a
 normal restart before checking the selected signed package, device Code 0 and
 running service. Do not edit an INF, substitute a catalogue or disable signing
 checks. Neither the Win7 CAB nor a correct MSI reconstruction proves XP binding.
-Current package inspection and Rust compatibility/installer build checks are
-static/build evidence only; XP driver installation, cold queries and restores
-remain unqualified.
+The installed XP SP3 x86 reference has separate
+[current cold-query evidence](../../../docs/windows-validation.md#current-windows-xp-reference).
+That evidence does not qualify a rebuilt egress reader or restore matrix.
 
 ## Cold, full and differential checks
 
@@ -284,7 +287,36 @@ IDs and both original child completions. See the
 [current Win7 validation](../../../docs/windows-validation.md#current-windows-7-reference)
 for the tested rejection cases and scope. Other Windows versions still need
 runtime qualification. Polling qualifies identity changes separately from
-prearmed notification. XP supports polling only and cannot use
-`-GenerationChecks`. Neither a changed ID nor a completed request proves entropy
-reseeding or application recovery. Driver servicing, real guest queries and the
-restore matrix remain separate from compile/link and pure-verifier checks.
+prearmed notification. XP supports polling only and cannot use the PowerShell
+notification workflow above. Its separate CMD option is described next. Neither
+a changed ID nor a completed request proves entropy reseeding or application
+recovery. Driver servicing, real guest queries and the restore matrix remain
+separate from compile/link and pure-verifier checks.
+
+## XP polling during egress
+
+The XP TAP and CONNECT readers have an optional `GenerationChecks SHA256`
+argument in their maintained CMD launchers. Use the SHA-256 of the actual
+rebuilt `restore-probe.exe` or `xp-connect.exe`. This identifies the reader
+which performs the inline IOCTLs; it is not the standalone generation probe's
+digest. Keep earlier probe binaries and evidence unchanged.
+
+Each stage makes two synchronous reads through the shared `counter.rs` API. Both
+must return the same nonzero 16-byte ID. The previous stage's ID stays in the
+snapshotted CMD or Rust process memory, so the full and differential stages must
+observe new IDs. The raw log records both reads and their stage number. This
+mode creates no waiter and makes no notification claim on XP.
+
+Follow the [XP TAP instructions](../egress/README.md#xp-generation-polling) or
+[XP CONNECT instructions](../legacy-vsock/README.md#xp-generation-polling). The
+public controller hashes the selected reader on the closed OS volume before
+starting a VM or network helper. Offline verification hashes it again, checks
+all six reads and three distinct stage IDs, and retains the raw evidence hashes
+in `generation-verification.json`. Ordinary egress, storage, shutdown and
+proxy-accounting checks still run independently.
+
+A successful source test or link does not qualify these rebuilt readers.
+Complete the current snapshot-format matrix on the installed XP guest before
+claiming restore coverage. Rebuilding the standalone Win7 probe also requires a
+new prearmed notification regression; previous Win7 results identify the earlier
+binary.
