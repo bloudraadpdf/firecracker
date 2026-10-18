@@ -806,10 +806,6 @@ required checkpoint storage locking; use the development container on such
 hosts. The real swtpm checkpoint and ACPICA physical-presence tests run with the
 normal VMM unit suite; missing executables are test failures.
 
-The normal unit and benchmark build tests cover the default build and the
-`windows` feature. Clippy checks both default and all-feature builds. TPM,
-console and firmware execution tests run in the Windows-enabled variant.
-
 `functional/test_platform_devices.py` restricts Hyper-V and PVH device cases to
 AMD64. The PVH cases compile the Apache-licensed fixture in `data/platform/` and
 create their own ROM and media bytes. They check jailed boot, guest-written
@@ -819,6 +815,13 @@ group-restricted sockets inside bind mounts. Teardown stops VMMs and helpers
 before removing those mounts. No Windows media is needed. These fixtures do not
 qualify production firmware, Secure Boot or Windows; retain the separate
 [Windows validation matrix](../docs/windows-validation.md).
+
+### Optional Windows capability
+
+The normal Rust unit, example and benchmark checks cover default and `windows`
+builds. Clippy checks default and all features. Use
+`cargo build --features windows` to enable the optional platform. Default
+binaries keep the API fields and reject requests which need this capability.
 
 The platform module builds the Windows-enabled binary pair with the release
 profile when `--binary-dir` is absent. If you supply that option, use a release

@@ -3,16 +3,16 @@
 Historical tests ran AMD64 Windows Server 2025 Core, Windows 10, Windows 11, XP
 x86 and Windows 7 x64 on Linux/KVM with virtio PCI storage, networking and
 full/differential snapshots. Support is experimental; the
-[validation record](windows-validation.md#recorded-format33-integration-candidate)
+[validation record](windows-validation.md#current-integration-candidate)
 distinguishes recorded results from open qualification. This adds no Windows
 host backend. See the [ARM64 guide](windows-arm64.md) for the separate firmware
 path and its validation status.
 
 ## Build
 
-The Windows platform is an optional build capability. On an AMD64 Linux build
-host, follow the [build prerequisites](getting-started.md), then build the VMM,
-jailer and matching snapshot editor with the pinned Rust toolchain:
+The optional Windows platform requires a Linux/KVM host. On AMD64 Linux, follow
+[the build prerequisites](getting-started.md), then build the VMM, jailer and
+matching snapshot editor with the pinned Rust toolchain:
 
 ```sh
 cargo build --release --locked --target x86_64-unknown-linux-musl \
@@ -21,12 +21,11 @@ cargo build --release --locked --target x86_64-unknown-linux-musl \
 ```
 
 The binaries are in `build/cargo_target/x86_64-unknown-linux-musl/release/`. Use
-the VMM and editor from the same build. Ordinary builds leave this capability
-disabled; firmware, graphical console, TPM, variable services and Hyper-V
-requests then return an unsupported-build error. Both builds use the same
-snapshot schema and can exchange ordinary Linux snapshots. A build without this
-capability rejects saved Windows devices before creating destination VMs or
-connecting to helpers.
+the VMM and editor from the same build. Default builds retain the API schema but
+reject explicit firmware, console, Hyper-V, TPM and variable-service requests
+before opening boot files or attaching devices. Saved device state uses the same
+data layout in both builds; a default build rejects saved Windows devices
+explicitly.
 
 ## Boot configuration
 
@@ -308,14 +307,13 @@ firmware-stage snapshots remain unvalidated.
 Use the [validation matrix](windows-validation.md) for exact tested builds. XP
 SP3 x86 uses SeaBIOS, transitional PCI and one vCPU with its uniprocessor HAL.
 Its checks do not establish SMP or HTTPS support. The recorded format-31 Windows
-7 SP1 x64 preparation and TAP/CONNECT checks use SeaBIOS, transitional PCI, two
-vCPUs and Hyper-V. The earlier GPT/EFI installation used corrected CloudHv
-firmware; it is a separate historical profile. Both operating systems require
-drivers matched to their OS version. Contemporary virtio-win media has no
-compatible Viosock package; the tested historical drivers require the documented
-receive, reset and DMA fixes. These packages are test-signed. Build and
-installation instructions are in
-[legacy-vsock](../tools/windows/legacy-vsock/README.md).
+7 SP1 x64 TAP/CONNECT reference uses SeaBIOS, transitional PCI, two vCPUs and
+Hyper-V. The earlier GPT/EFI installation used corrected CloudHv firmware; it is
+a separate historical profile. Both operating systems require drivers matched to
+their OS version. Contemporary virtio-win media has no compatible Viosock
+package; the tested historical drivers require the documented receive, reset and
+DMA fixes. These packages are test-signed. Build and installation instructions
+are in [legacy-vsock](../tools/windows/legacy-vsock/README.md).
 
 ### Windows 7 signed drivers
 
