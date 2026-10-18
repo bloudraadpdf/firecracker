@@ -232,19 +232,23 @@ impl VmClock {
                 ),
                 &aml::Name::new(
                     "_CRS".try_into()?,
-                    &aml::ResourceTemplate::new(vec![
-                        &aml::AddressSpace::new_memory(
-                            aml::AddressSpaceCacheable::Cacheable,
-                            false,
-                            self.guest_address.0,
-                            self.guest_address.0 + VMCLOCK_SIZE as u64 - 1,
-                        )?,
-                        &aml::Interrupt::new(true, true, false, false, interrupt),
-                    ]),
+                    &aml::ResourceTemplate::new(vec![&aml::AddressSpace::new_memory(
+                        aml::AddressSpaceCacheable::Cacheable,
+                        false,
+                        self.guest_address.0,
+                        self.guest_address.0 + VMCLOCK_SIZE as u64 - 1,
+                    )?]),
                 )?,
             ],
         )
-        .append_aml_bytes(v)
+        .append_aml_bytes(v)?;
+        crate::acpi::append_ged(
+            scope.device_path("GCLK")?,
+            1,
+            interrupt,
+            scope.absolute_device_path("VCLK")?,
+            v,
+        )
     }
 }
 
@@ -267,6 +271,73 @@ mod tests {
     fn default_vmclock() -> VmClock {
         let mut resource_allocator = ResourceAllocator::new();
         VmClock::new(&mut resource_allocator).unwrap()
+    }
+
+    #[test]
+    fn acpi_resources_and_notification() {
+        #[cfg(target_arch = "x86_64")]
+        use acpi_tables::{Aml, aml};
+
+        use crate::acpi::DeviceScope;
+
+        #[cfg(target_arch = "x86_64")]
+        let scopes = [
+            (DeviceScope::SystemBus, "\\_SB_"),
+            (DeviceScope::PciRoot, "\\_SB_.PC00"),
+        ];
+        #[cfg(target_arch = "aarch64")]
+        let scopes = [(DeviceScope::SystemBus, "\\_SB_")];
+        for (scope, parent) in scopes {
+            let mut bytes = Vec::new();
+            #[cfg(target_arch = "x86_64")]
+            if matches!(scope, DeviceScope::PciRoot) {
+                aml::Device::new("_SB_.PC00".try_into().unwrap(), vec![])
+                    .append_aml_bytes(&mut bytes)
+                    .unwrap();
+            }
+            let clock = default_vmclock();
+            clock.append_aml_bytes_in_scope(scope, &mut bytes).unwrap();
+            #[cfg(target_arch = "x86_64")]
+            let interrupt = clock.gsi;
+            #[cfg(target_arch = "aarch64")]
+            let interrupt = clock.gsi + crate::arch::SPI_START;
+            let irq = [&[0x89, 6, 0, 3, 1][..], &interrupt.to_le_bytes()].concat();
+            assert_eq!(
+                bytes
+                    .windows(irq.len())
+                    .filter(|value| *value == irq)
+                    .count(),
+                1
+            );
+            let output = crate::test_utils::execute_aml(
+                bytes,
+                &format!("template {parent}.VCLK._CRS; execute {parent}.GCLK._EVT 0"),
+            );
+            assert_eq!(output.matches("QWORD Address Space Resource").count(), 1);
+            assert!(output.contains("Resource Type : Memory Range"), "{output}");
+            for (field, value) in [
+                ("Address Minimum", clock.guest_address.0),
+                (
+                    "Address Maximum",
+                    clock.guest_address.0 + u64::from(VMCLOCK_SIZE) - 1,
+                ),
+                ("Address Length", u64::from(VMCLOCK_SIZE)),
+            ] {
+                assert!(
+                    output.contains(&format!("{field} : {value:016X}")),
+                    "{output}"
+                );
+            }
+            assert!(output.contains("EndTag Resource"), "{output}");
+            assert!(!output.contains("IRQ Resource"), "{output}");
+            assert!(
+                output
+                    .lines()
+                    .any(|line| line.contains("Received a Device Notify on [VCLK]")
+                        && line.contains("Value 0x80")),
+                "{output}"
+            );
+        }
     }
 
     #[test]

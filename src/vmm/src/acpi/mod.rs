@@ -1,9 +1,9 @@
 // Copyright 2024 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use acpi_tables::aml;
 #[cfg(any(target_arch = "x86_64", feature = "windows"))]
 use acpi_tables::fadt::{FADT_F_HW_REDUCED_ACPI, FADT_F_PWR_BUTTON, FADT_F_SLP_BUTTON};
+use acpi_tables::{Aml, aml};
 #[cfg(any(target_arch = "x86_64", feature = "windows"))]
 use acpi_tables::{Dsdt, Fadt, Madt, Mcfg, RootTable, RootTableEntries, Rsdp, Sdt};
 #[cfg(any(target_arch = "x86_64", feature = "windows"))]
@@ -59,14 +59,50 @@ pub(crate) enum DeviceScope {
 }
 
 impl DeviceScope {
-    pub(crate) fn device_path(self, name: &str) -> Result<aml::Path, aml::AmlError> {
-        let parent = match self {
+    fn parent(self) -> &'static str {
+        match self {
             Self::SystemBus => "_SB_",
             #[cfg(target_arch = "x86_64")]
             Self::PciRoot => "_SB_.PC00",
-        };
-        format!("{parent}.{name}").as_str().try_into()
+        }
     }
+
+    pub(crate) fn device_path(self, name: &str) -> Result<aml::Path, aml::AmlError> {
+        format!("{}.{name}", self.parent()).as_str().try_into()
+    }
+
+    pub(crate) fn absolute_device_path(self, name: &str) -> Result<aml::Path, aml::AmlError> {
+        format!("\\{}.{name}", self.parent()).as_str().try_into()
+    }
+}
+
+pub(crate) fn append_ged(
+    path: aml::Path,
+    uid: u8,
+    gsi: u32,
+    target: aml::Path,
+    v: &mut Vec<u8>,
+) -> Result<(), aml::AmlError> {
+    aml::Device::new(
+        path,
+        vec![
+            &aml::Name::new("_HID".try_into()?, &"ACPI0013")?,
+            &aml::Name::new("_UID".try_into()?, &uid)?,
+            &aml::Name::new(
+                "_CRS".try_into()?,
+                &aml::ResourceTemplate::new(vec![&aml::Interrupt::new(
+                    true, true, false, false, gsi,
+                )]),
+            )?,
+            &aml::Method::new(
+                "_EVT".try_into()?,
+                1,
+                true,
+                vec![&aml::Notify::new(&target, &0x80usize)],
+            ),
+        ],
+    )
+    .append_aml_bytes(v)
 }
 
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
@@ -359,13 +395,14 @@ mod tests {
                 vmm.device_manager.append_aml_bytes(&mut bytes).unwrap();
                 super::setup_arch_dsdt(&mut bytes, &vmm.device_manager).unwrap();
                 for (name, irq) in [
-                    (b"VCLK", if pc_enabled { 5u32 } else { 6 }),
-                    (b"COM1", 4),
-                    (b"PS2_", 1),
+                    (b"GCLK", Some(if pc_enabled { 5u32 } else { 6 })),
+                    (b"COM1", Some(4)),
+                    (b"PS2_", Some(1)),
+                    (b"VCLK", None),
                 ]
                 .into_iter()
-                .chain((!pc_enabled).then_some((b"GED_", 5)))
-                .chain(pc_enabled.then_some((b"RTC0", 8)))
+                .chain((!pc_enabled).then_some((b"GED_", Some(5))))
+                .chain(pc_enabled.then_some((b"RTC0", Some(8))))
                 {
                     let path = [parent, name].concat();
                     let start = bytes
@@ -384,8 +421,12 @@ mod tests {
                         length |= usize::from(bytes[length_start + 1 + i]) << (4 + 8 * i);
                     }
                     let body = &bytes[start + path.len()..length_start + length];
-                    let resource = [&[0x89, 6, 0, 3, 1][..], &irq.to_le_bytes()].concat();
-                    assert!(body.windows(resource.len()).any(|value| value == resource));
+                    if let Some(irq) = irq {
+                        let resource = [&[0x89, 6, 0, 3, 1][..], &irq.to_le_bytes()].concat();
+                        assert!(body.windows(resource.len()).any(|value| value == resource));
+                    } else {
+                        assert!(!body.windows(5).any(|value| value == [0x89, 6, 0, 3, 1]));
+                    }
                 }
                 assert_eq!(bytes.windows(4).any(|value| value == b"GED_"), !pc_enabled);
                 assert_eq!(bytes.windows(4).any(|value| value == b"_E00"), pc_enabled);
