@@ -320,6 +320,9 @@ It takes no password, recovery key or raw-key argument. An inaccessible volume
 fails; the wrapper never changes encryption or protectors. Do not enable verbose
 libbde output, which can expose sensitive metadata.
 
+Verification also requires `fusermount` on `PATH` for cleanup. The wrapper
+checks this command before opening the volume or creating mount state.
+
 Use upstream **libbde 20260916**, from
 [the pinned release](https://github.com/libyal/libbde/releases/tag/20260916).
 The source archive `libbde-alpha-20260916.tar.gz` has SHA-256
