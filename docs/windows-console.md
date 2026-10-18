@@ -366,6 +366,9 @@ restores the original mode and exits zero before normal S5. This direct-console
 check does not qualify Windows Keep/Revert/timeout UI, browser/VNC input,
 nonzero-mode cold boot or full/differential display/input restore.
 
+The [XP miniport source and build procedure](../tools/windows/display/README.md)
+are included with the test tools. Windows supplies its inbox display DLL.
+
 The modern signed AWS recognition package does not cover the XP x86 and legacy
 Windows 7 hardware-ID cases. No legacy VMClock recognition installation is
 qualified. Recognition alone would not establish clock use. Do not report a
