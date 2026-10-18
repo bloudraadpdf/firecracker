@@ -725,7 +725,7 @@ mod tests {
             )
             .unwrap();
 
-        let render = |manager| {
+        let render = |manager: &DeviceManager| {
             create_fdt(
                 &mem,
                 &super::super::CpuTopology {
