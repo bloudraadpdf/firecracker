@@ -4,10 +4,9 @@ The optional console provides a private display/input endpoint without guest
 networking or vsock. The AMD64 profile adds VGA/VBE graphics, a PS/2 keyboard, a
 USB HID pointer and optional read-only ATAPI installation media. The ARM64
 profile adds an MMIO display and one combined virtio keyboard/absolute pointer.
-See the
-[validation record](windows-validation.md#recorded-format33-integration-candidate)
-for the recorded XP input baseline and historical AMD64 results. ARM64 guest
-qualification remains pending.
+See the [validation record](windows-validation.md#current-integration-candidate)
+for the current XP display/input results and historical AMD64 results. ARM64
+guest qualification remains pending.
 
 The AMD64 device path is:
 
@@ -31,10 +30,13 @@ remote browser or VNC viewer
                 virtio disk
 ```
 
-## Configure
+Build the VMM with the optional `windows` capability, following the
+[AMD64 build instructions](windows.md#build) or
+[ARM64 build instructions](windows-arm64.md#build). Default builds retain the
+console configuration schema but reject console requests and saved console
+devices before opening their host resources.
 
-Build Firecracker with the [Windows capability](windows.md#build). The console
-is unavailable in ordinary builds.
+## Configure
 
 ### AMD64
 
@@ -356,14 +358,18 @@ Default Linux and ARM hardware retain GED. XP and Windows 7 do not bind drivers
 to all these ACPI features. The recorded format33 pre-installation XP baseline
 uses VgaSave and retains the unconfigured VGA device at Code 1 and AWS VMClock
 (`ACPI\AMZNC10C`) at Code 28; VGEN reports Code 0 with service `gencounter`. A
-later isolated VGA driver installation completed its wizard but its display
-remained black after a cold boot. Display-driver acceptance remains open. The
-modern signed AWS recognition package does not cover the XP x86 and legacy
+later isolated VGA driver attempt remained black after cold boot. That failed
+attempt is historical. On VMM `93434437`, the unsigned XPDM miniport 0.1.2.0
+passes all 16 advertised 32-bit modes with full-frame RGB checks, five pointer
+targets per mode and saved printable ASCII with Caps Lock on. The helper
+restores the original mode and exits zero before normal S5. This direct-console
+check does not qualify Windows Keep/Revert/timeout UI, browser/VNC input,
+nonzero-mode cold boot or full/differential display/input restore.
+
+The modern signed AWS recognition package does not cover the XP x86 and legacy
 Windows 7 hardware-ID cases. No legacy VMClock recognition installation is
-qualified. Recognition alone would not establish clock use. These limits are
-separate from the recorded raw console CLI keyboard and pointer baseline; do not
-report a clean device inventory or full display-driver acceptance for these
-guests.
+qualified. Recognition alone would not establish clock use. Do not report a
+clean device inventory or broader guest support from the display/input result.
 
 The bridge uses the guest keyboard LEDs to preserve printable ASCII case and
 punctuation with Caps Lock and Num Lock. It waits at most 100 ms for a pending
