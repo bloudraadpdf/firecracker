@@ -193,6 +193,7 @@ where
                             0
                         }
                     },
+                    Err(VsockError::PktBufMissing) => 0,
                     Err(VsockError::NoData) => {
                         // No more data to deliver. Return the unused buffer to the queue.
                         queue.undo_pop();
@@ -745,6 +746,28 @@ mod tests {
                 .unwrap();
             assert_eq!(event, [0xff; 4]);
         }
+    }
+
+    #[test]
+    fn test_rx_missing_payload_buffer_does_not_block_next_descriptor() {
+        let test_ctx = TestContext::new();
+        let mut ctx = test_ctx.create_event_handler_context();
+        ctx.mock_activate(test_ctx.mem.clone(), test_ctx.interrupt.clone());
+        ctx.guest_rxvq.dtable[2].set(0x0040_2000, VSOCK_PKT_HDR_SIZE, VIRTQ_DESC_F_WRITE, 0);
+        ctx.guest_rxvq.avail.ring[0].set(2);
+        ctx.guest_rxvq.avail.ring[1].set(0);
+        ctx.guest_rxvq.avail.idx.set(2);
+        ctx.device.backend.set_pending_rx(true);
+        ctx.device
+            .backend
+            .set_rx_err(Some(VsockError::PktBufMissing));
+
+        assert!(ctx.device.process_rx().unwrap());
+        assert_eq!(ctx.guest_rxvq.used.idx.get(), 2);
+        assert_eq!(ctx.guest_rxvq.used.ring[0].get().id, 2);
+        assert_eq!(ctx.guest_rxvq.used.ring[0].get().len, 0);
+        assert_eq!(ctx.guest_rxvq.used.ring[1].get().id, 0);
+        assert_eq!(ctx.device.backend.rx_ok_cnt, 1);
     }
 
     #[test]
