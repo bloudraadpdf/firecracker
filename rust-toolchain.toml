@@ -12,6 +12,12 @@
 # always fail.
 [toolchain]
 channel = "1.98.1"
-targets = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"]
+components = ["clippy", "rustfmt"]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-unknown-linux-musl",
+]
 profile = "minimal"
 
