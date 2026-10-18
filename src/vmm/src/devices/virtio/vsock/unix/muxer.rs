@@ -171,6 +171,10 @@ impl VsockChannel for VsockMuxer {
                 }
             };
 
+            if matches!(res, Err(VsockError::PktBufMissing)) {
+                return res;
+            }
+
             if res.is_ok() {
                 // Inspect traffic, looking for RST packets, since that means we have to
                 // terminate and remove this connection from the active connection pool.
@@ -1223,6 +1227,23 @@ mod tests {
         // After being notified, the muxer should've figured out that RX data was available for one
         // of its connections, so it should now be reporting that it can fill in an RX packet.
         assert!(ctx.muxer.has_pending_rx());
+        let mut handler = ctx._vsock_test_ctx.create_event_handler_context();
+        handler.guest_rxvq.dtable[0]
+            .flags
+            .set(crate::devices::virtio::queue::VIRTQ_DESC_F_WRITE);
+        let mut short = VsockPacketRx::new().unwrap();
+        short
+            .parse(
+                &ctx._vsock_test_ctx.mem,
+                handler.device.queues[RXQ_INDEX].pop().unwrap().unwrap(),
+            )
+            .unwrap();
+        assert!(matches!(
+            ctx.muxer.recv_pkt(&mut short),
+            Err(VsockError::PktBufMissing)
+        ));
+        assert!(ctx.muxer.has_pending_rx());
+        assert_eq!(ctx.muxer.conn_map[&key].state(), ConnState::Established);
         ctx.recv();
         assert_eq!(ctx.rx_pkt.hdr.op(), uapi::VSOCK_OP_RW);
         assert_eq!(ctx.rx_pkt.hdr.src_port(), LOCAL_PORT);

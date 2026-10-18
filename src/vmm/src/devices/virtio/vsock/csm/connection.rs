@@ -218,6 +218,11 @@ where
                 return Ok(());
             }
 
+            if pkt.buf_size() == 0 {
+                self.pending_rx.insert(PendingRx::Rw);
+                return Err(VsockError::PktBufMissing);
+            }
+
             // The maximum amount of data we can read in is limited by both the RX buffer size and
             // the peer available buffer space.
             let max_len = std::cmp::min(pkt.buf_size(), self.peer_avail_credit());
@@ -1383,6 +1388,43 @@ mod tests {
         assert_eq!(ctx.conn.stream.shutdown_write_count, 1);
         ctx.recv();
         assert_eq!(ctx.rx_pkt.hdr.op(), uapi::VSOCK_OP_RST);
+    }
+
+    #[test]
+    fn test_header_only_rx_preserves_pending_data() {
+        let mut ctx = CsmTestContext::new(ConnState::PeerInit);
+        let mut handler = ctx._vsock_test_ctx.create_event_handler_context();
+        handler.guest_rxvq.dtable[0]
+            .flags
+            .set(crate::devices::virtio::queue::VIRTQ_DESC_F_WRITE);
+        let mut short = VsockPacketRx::new().unwrap();
+        short
+            .parse(
+                &ctx._vsock_test_ctx.mem,
+                handler.device.queues[RXQ_INDEX].pop().unwrap().unwrap(),
+            )
+            .unwrap();
+        assert_eq!(short.buf_size(), 0);
+        ctx.conn.recv_pkt(&mut short).unwrap();
+        assert_eq!(short.hdr.op(), uapi::VSOCK_OP_RESPONSE);
+        assert_eq!(ctx.conn.state, ConnState::Established);
+
+        ctx.set_stream(TestStream::new_with_read_buf(&[1, 2, 3, 4]));
+        ctx.notify_epollin();
+        for _ in 0..2 {
+            assert!(matches!(
+                ctx.conn.recv_pkt(&mut short),
+                Err(VsockError::PktBufMissing)
+            ));
+            assert_eq!(ctx.conn.state, ConnState::Established);
+            assert_eq!(ctx.conn.stream.read_buf, [1, 2, 3, 4]);
+            assert!(ctx.conn.has_pending_rx());
+        }
+        ctx.recv();
+        assert_eq!(ctx.rx_pkt.hdr.op(), uapi::VSOCK_OP_RW);
+        assert_eq!(ctx.rx_pkt.hdr.len(), 4);
+        assert_eq!(test_utils::read_packet_data(&ctx.tx_pkt, 4), [1, 2, 3, 4]);
+        assert!(ctx.conn.stream.read_buf.is_empty());
     }
 
     #[test]
