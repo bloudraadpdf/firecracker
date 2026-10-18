@@ -150,28 +150,13 @@ impl ACPIDeviceManager {
             .append_aml_bytes(v);
         }
         let (_, gsi) = self.vmgenid().interrupt().unwrap();
-        aml::Device::new(
+        crate::acpi::append_ged(
             scope.device_path("GED_")?,
-            vec![
-                &aml::Name::new("_HID".try_into()?, &"ACPI0013")?,
-                &aml::Name::new(
-                    "_CRS".try_into()?,
-                    &aml::ResourceTemplate::new(vec![&aml::Interrupt::new(
-                        true, true, false, false, gsi,
-                    )]),
-                )?,
-                &aml::Method::new(
-                    "_EVT".try_into()?,
-                    1,
-                    true,
-                    vec![&aml::Notify::new(
-                        &aml::Path::new("\\_SB_.VGEN")?,
-                        &0x80usize,
-                    )],
-                ),
-            ],
+            0,
+            gsi,
+            "\\_SB_.VGEN".try_into()?,
+            v,
         )
-        .append_aml_bytes(v)
     }
 }
 
@@ -186,6 +171,7 @@ mod tests {
         let mut aml = Vec::new();
         manager.acpi_devices.append_aml_bytes(&mut aml).unwrap();
         assert_eq!(aml.windows(8).any(|bytes| bytes == b"AMZNC10C"), present);
+        assert_eq!(aml.windows(4).any(|bytes| bytes == b"GCLK"), present);
         aml
     }
 
@@ -204,36 +190,12 @@ mod tests {
     #[test]
     #[cfg(all(target_arch = "x86_64", feature = "windows"))]
     fn pc_gpe_executes_generation_notify() {
-        use acpi_tables::Sdt;
-        use std::io::Write;
-        use std::process::Command;
-        use vm_memory::{Bytes, GuestAddress};
         for present in [false, true] {
             let aml = aml_with_clock(
                 crate::device_manager::tests::default_device_manager_with_pc(),
                 present,
             );
-            let mut table = acpi_tables::Dsdt::new(*b"FC    ", *b"GPE TEST", 1, aml);
-            let memory =
-                vm_memory::GuestMemoryMmap::<()>::from_ranges(&[(GuestAddress(0), 0x10000)])
-                    .unwrap();
-            table.write_to_guest(&memory, GuestAddress(0)).unwrap();
-            let mut bytes = vec![0; table.len()];
-            memory.read_slice(&mut bytes, GuestAddress(0)).unwrap();
-            let file = vmm_sys_util::tempfile::TempFile::new_in(std::path::Path::new(".")).unwrap();
-            file.as_file().write_all(&bytes).unwrap();
-            let output = Command::new("acpiexec")
-                .args(["-to", "20", "-b", "execute \\_GPE._E00"])
-                .arg(file.as_path())
-                .output()
-                .unwrap();
-            assert!(output.status.success());
-            let output = format!(
-                "{}{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            assert!(!output.contains("AE_"), "{output}");
+            let output = crate::test_utils::execute_aml(aml, "execute \\_GPE._E00");
             assert!(
                 output
                     .lines()
@@ -241,6 +203,20 @@ mod tests {
                         && line.contains("Value 0x80")),
                 "{output}"
             );
+            if present {
+                let aml = aml_with_clock(
+                    crate::device_manager::tests::default_device_manager_with_pc(),
+                    true,
+                );
+                let output = crate::test_utils::execute_aml(aml, "execute \\_SB_.GCLK._EVT 0");
+                assert!(
+                    output
+                        .lines()
+                        .any(|line| line.contains("Received a Device Notify on [VCLK]")
+                            && line.contains("Value 0x80")),
+                    "{output}"
+                );
+            }
         }
     }
 }
