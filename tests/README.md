@@ -806,6 +806,16 @@ required checkpoint storage locking; use the development container on such
 hosts. The real swtpm checkpoint and ACPICA physical-presence tests run with the
 normal VMM unit suite; missing executables are test failures.
 
+Build this branch's development image on a Linux host before running these
+checks. The published default image does not contain the added tools.
+`build_devctr` creates the local `latest` tag; select it for subsequent commands
+in the same shell:
+
+```sh
+./tools/devtool build_devctr
+export DEVCTR_IMAGE_TAG=latest
+```
+
 `functional/test_platform_devices.py` restricts Hyper-V and PVH device cases to
 AMD64. The PVH cases compile the Apache-licensed fixture in `data/platform/` and
 create their own ROM and media bytes. They check jailed boot, guest-written
