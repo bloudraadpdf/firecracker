@@ -7,18 +7,17 @@ tested guest, installed drivers, firmware, VMM and route. Use the
 
 ## Current integration candidate
 
-The latest guest-qualified AMD64 VMM is the Windows-feature release `93434437`,
-using snapshot format 34. Its source is the recorded `9eb13bb7` base plus the
-Rust USB tablet zero-coordinate correction; it is not an unchanged build of that
-Git commit. The preceding VMM `f90f364e` also uses format 34. Results from that
-binary are labelled separately below. Neither format compatibility nor a
-successful build carries a runtime result forward to changed code. The combined
-USB/vsock source candidate still needs its own runtime qualification.
+The current combined AMD64 runtime is built from `95aaccfb`; subsequent changes
+only affect documentation. Its Windows-feature binary is `6f63cd8d` and its
+default counterpart is `1c68a888`, using snapshot format 34. Normal Linux and
+host checks below qualify these binaries. The Windows edition, installation,
+input and egress matrix still requires separate guest qualification.
 
-The combined source passes the supported Windows release build and 83 focused
-vsock tests in each capability build, plus strict Clippy. Its release binary is
-`8b8c6932`. These are build and host-test results; no guest has qualified that
-combined binary.
+The latest Windows guest-qualified VMM remains `93434437`. Its source is the
+recorded `9eb13bb7` base plus the Rust USB tablet zero-coordinate correction; it
+is not an unchanged build of that Git commit. The preceding `f90f364e` and
+combined `8b8c6932` binaries also use format 34. Neither format compatibility
+nor a successful build carries a runtime result forward to changed code.
 
 Reuse a recorded result when the inputs relevant to that check are unchanged.
 Retain the guest configuration, driver and firmware hashes, VMM capability and
@@ -26,16 +25,16 @@ source identity with each result. A documentation change does not require a new
 VMM build or guest run. Repeat a check for changed behaviour or an unresolved
 failure, and retain the earlier failed record.
 
-| Area                                        | Latest qualified result                                                                                                                                                                   | Remaining gate                                                                                                                               |
-| ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| XP SP3 x86 display and direct console input | VMM `93434437`, unsigned XPDM miniport 0.1.2.0: all 16 advertised 32-bit modes pass full-frame RGB comparison, five pointer targets per mode and saved printable ASCII with Caps Lock on. | Normal Windows Keep/Revert/timeout UI, browser/VNC input, other layouts and guests.                                                          |
-| XP mode and input persistence               | The helper restores the original 640x480x32, 60 Hz mode, exits zero and the guest shuts down through normal S5.                                                                           | Nonzero-mode cold boot and full/differential restore of display and held input state.                                                        |
-| XP TAP and CONNECT                          | Earlier installed-reference results exist.                                                                                                                                                | Both routes on the latest candidate, with current drivers and generation/storage verification.                                               |
-| Windows 7 TAP                               | Preceding VMM `f90f364e`: installed Enterprise SP1 x64 reference passes cold/full/differential egress, storage and generation checks.                                                     | Qualify the combined candidate `8b8c6932`; the installed-reference result does not qualify a fresh installation.                             |
-| Windows 7 CONNECT                           | Normal VMM `93434437`: installed-reference cold/full/differential transfers, denials, storage, public verifier and final S5 pass. The outer caller fails firewall-rule preservation.      | Explain the two removed Docker rules and the earlier normal `f90f364e` failure; qualify the combined candidate separately.                   |
-| Modern installation and security            | Earlier binary/format-specific installation, Secure Boot, TPM and variable-service results exist.                                                                                         | Current Windows 10/11/Server installation, security, persistence and route matrix; Windows 11 Pro and remaining editions remain unqualified. |
-| Host regression checks                      | The tablet regression fails before the fix and passes after it; 41 affected Windows-feature tests, strict musl Clippy and the Windows release build pass.                                 | Complete default/Windows, Linux/API/seccomp/jailer, standalone-tool and supported-host regression gates on the final source.                 |
-| ARM64 and performance                       | Historical emulated/cross-build results and earlier measurements only.                                                                                                                    | Native ARM64/KVM guest qualification and unchanged final default/Windows performance gates.                                                  |
+| Area                                        | Latest qualified result                                                                                                                                                                                      | Remaining gate                                                                                                                                    |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| XP SP3 x86 display and direct console input | VMM `93434437`, unsigned XPDM miniport 0.1.2.0: all 16 advertised 32-bit modes pass full-frame RGB comparison, five pointer targets per mode and saved printable ASCII with Caps Lock on.                    | Normal Windows Keep/Revert/timeout UI, browser/VNC input, other layouts and guests.                                                               |
+| XP mode and input persistence               | The helper restores the original 640x480x32, 60 Hz mode, exits zero and the guest shuts down through normal S5.                                                                                              | Nonzero-mode cold boot and full/differential restore of display and held input state.                                                             |
+| XP TAP and CONNECT                          | Earlier installed-reference results exist.                                                                                                                                                                   | Both routes on the latest candidate, with current drivers and generation/storage verification.                                                    |
+| Windows 7 TAP                               | Preceding VMM `f90f364e`: installed Enterprise SP1 x64 reference passes cold/full/differential egress, storage and generation checks.                                                                        | Qualify the current candidate `6f63cd8d`; the installed-reference result does not qualify a fresh installation.                                   |
+| Windows 7 CONNECT                           | Normal VMM `93434437`: installed-reference cold/full/differential transfers, denials, storage, public verifier and final S5 pass. The outer caller fails firewall-rule preservation.                         | Explain the two removed Docker rules and the earlier normal `f90f364e` failure; qualify the combined candidate separately.                        |
+| Modern installation and security            | Earlier binary/format-specific installation, Secure Boot, TPM and variable-service results exist.                                                                                                            | Current Windows 10/11/Server installation, security, persistence and route matrix; Windows 11 Pro and remaining editions remain unqualified.      |
+| Host regression checks                      | Current default/Windows unit, documentation, example and benchmark checks, standalone tools, platform module and Linux PMEM/bzImage checks pass; default API, jailer, seccomp and snapshot checks also pass. | Results cover the tested Ryzen 5950X/Linux 7.0 host and Linux 6.1.188 guest. CPU-template skips and the supported-host matrix remain unqualified. |
+| ARM64 and performance                       | Final default/Windows boot and restored-memory measurements complete. The maintained analyser flags increased executable text and restored memory overhead; no boot metric is flagged.                       | Native ARM64/KVM qualification remains open. Preserve the measured footprint costs below; the performance comparison is not an overall pass.      |
 
 The XP pass uses one installed Professional SP3 x86 reference, SeaBIOS,
 `vmclock: false`, one vCPU and 2 GiB RAM. Its normal unsigned-driver warning was
@@ -64,6 +63,29 @@ probe does not record enough detail to classify EOF or timeout. A separate
 Debug-logging run passes; neither that result nor the later normal pass
 establishes a cause or a repair. The new vsock correction has no guest-cause
 attribution from these runs.
+
+## Measured footprint
+
+The maintained boot-time and memory-overhead tests ran once per binary set, with
+their normal sampling loops, PCI and MMIO, one vCPU, 128 MiB RAM and Linux
+6.1.188. The retained baseline is consumer revision `658ff27e`, not upstream
+main. Both final capability builds passed all selected test bodies and teardown.
+The normal analyser, with unchanged thresholds, failed both comparisons:
+
+- Baseline to final default: executable text increases by about 250 KB (7.08%);
+  restored memory overhead increases by about 200 KB for MMIO and 260 KB for
+  PCI.
+- Final default to Windows capability: executable text increases by about 291 KB
+  (7.70%); restored memory overhead increases by about 267 KB for MMIO and 293
+  KB for PCI.
+
+No boot metric was flagged. These are measurements on a shared host, not
+qualification on a dedicated performance host. The default build includes
+transitional PCI/INTx and common API/snapshot decoding; optional live Windows
+devices are feature-gated. Source review found no confirmed missing feature
+gate, but does not attribute the measured bytes or prove that the implementation
+cannot be smaller. The footprint failures remain recorded; no threshold change
+or repeat run was used to obtain a pass.
 
 ## Run the maintained checks
 
