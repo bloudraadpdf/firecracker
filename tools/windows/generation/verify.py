@@ -105,6 +105,7 @@ def collect(source, root):
 
 
 def report_view(lines):
+    """Separate report text from host receipt timestamps."""
     view, records = [], []
     for index, line in enumerate(lines):
         if line.startswith("report: "):
@@ -122,6 +123,7 @@ def report_view(lines):
 
 
 def verify(root, tag):
+    """Validate captured generation, reader and transfer evidence."""
     require(re.fullmatch(r"[A-Za-z0-9_-]+", tag), "Invalid guest tag")
     host_raw = (root / "echo.log").read_bytes()
     host, records = report_view(host_raw.decode("utf-8").splitlines())
