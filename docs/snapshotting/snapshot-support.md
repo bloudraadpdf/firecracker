@@ -660,6 +660,12 @@ Generation ID remains separate and available. Snapshots retain the actual clock
 presence; restore cannot add or remove it. The `vmclock_restore_notification`
 selector has no effect when no clock was saved.
 
+On ACPI guests, VMClock exposes one memory resource. A separate Generic Event
+Device delivers its interrupt as a notification to the clock. Snapshots retain
+their original guest ACPI tables; restoring a snapshot does not replace them.
+Boot a fresh guest and recreate its snapshots to use the corrected clock
+notification path.
+
 VMClock device
 ([specification](https://uapi-group.org/specifications/specs/vmclock/)) is a
 device that enables efficient application clock synchronization against real
