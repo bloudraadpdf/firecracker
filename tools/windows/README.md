@@ -8,6 +8,10 @@ and does not create bootable media. No QEMU binary or library is required.
 Existing output directories are rejected so preparation cannot overwrite a
 previous disk.
 
+The preparation tools do not enable VMM capabilities. To start a VM with the
+console, also build Firecracker with the optional `windows` capability as shown
+in the [VMM build instructions](../../docs/windows.md#build).
+
 ## Build prerequisites
 
 Run the commands from the Firecracker repository root on Linux. Use upstream's

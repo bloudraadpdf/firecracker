@@ -1081,7 +1081,8 @@ definitions:
       - type
     description: |
       Explicit firmware ABI declaration without an initrd. AMD64 profiles require
-      a PVH ELF image and select conventional PC timers and ACPI power registers.
+      the windows build feature and a PVH ELF image, and select conventional PC
+      timers and ACPI power registers.
       ARM64 accepts only CloudHv with a raw firmware image. CloudHv requires a
       stable system UUID, retained on restore.
       SeaBIOS accepts only an absent or null system UUID and has no CloudHv
@@ -1389,7 +1390,8 @@ definitions:
     type: object
     additionalProperties: false
     description: |
-      Optional graphical console. AMD64 attaches VGA, PS/2 keyboard, USB
+      Requires the windows build feature. Optional graphical console.
+      AMD64 attaches VGA, PS/2 keyboard, USB
       absolute HID mouse and optional optical media. ARM64 attaches an MMIO
       display and one combined virtio keyboard/absolute pointer with modern PCI;
       its configuration accepts only socket_path. Both require PCI, at least

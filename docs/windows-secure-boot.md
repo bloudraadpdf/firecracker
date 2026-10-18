@@ -3,7 +3,7 @@
 Standard Windows 11 Pro and Enterprise are in the acceptance scope. Historical
 format-31 Enterprise Evaluation tests passed installation, Secure Boot, TPM,
 cold/full/differential restore and both egress paths on the recorded build. The
-[validation record](windows-validation.md#recorded-format33-integration-candidate)
+[validation record](windows-validation.md#current-integration-candidate)
 separates those results from current qualification. Support is experimental. The
 prior IoT Enterprise LTSC result does not qualify these editions. Do not bypass
 Setup's hardware checks. Windows 11 Pro has not been separately installed or
@@ -28,6 +28,16 @@ firmware. The helper processes are started by the launcher, before Firecracker
 connects. They receive no guest memory descriptor. Use a private directory and
 one helper instance per VM. There is no network listener and no host-device
 passthrough.
+
+## Build capability
+
+Build the VMM and matching snapshot editor with the optional `windows`
+capability, following the [AMD64 build instructions](windows.md#build) or
+[ARM64 build instructions](windows-arm64.md#build). Default builds retain the
+service configuration schema but reject TPM and variable-service requests before
+connecting to their backends. They also reject snapshots containing these
+devices. The standalone variable helper has its own build procedure; compiling
+it does not enable the VMM capability.
 
 ## Configuration
 
@@ -117,7 +127,7 @@ and both restore types. Its installation used Microsoft's CA2023 boot files with
 the recorded revocation database and a signed viostor driver, without
 hardware-check bypasses or forced unsigned drivers. Public TPM baselines also
 matched across the cold boot between TAP and CONNECT runs. These results do not
-qualify the current format-33 platform.
+qualify the current format-34 platform.
 
 BitLocker automatically encrypted the guest volume. The recorded volume is
 unlocked, protection is off and no key protectors are configured. Read-only

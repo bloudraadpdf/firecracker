@@ -17,6 +17,25 @@ restore fails; fresh connections succeed. This validates the transport, not a
 complete Windows port of the Tokoloshe guest agent. The emulated cold boot takes
 about 30 minutes to reach the probe and reports several service-start timeouts.
 
+## Build
+
+On the ARM64 Linux host, follow [the build prerequisites](getting-started.md)
+and build the VMM, jailer and matching snapshot editor with the pinned Rust
+toolchain:
+
+```sh
+cargo build --release --locked --target aarch64-unknown-linux-musl \
+  -p firecracker -p jailer -p snapshot-editor \
+  --features firecracker/windows,snapshot-editor/windows
+```
+
+Use the VMM and editor from the same build, in
+`build/cargo_target/aarch64-unknown-linux-musl/release/`. ARM64 firmware
+execution requires the optional `windows` capability. Default builds reject
+firmware before loading it; an ordinary direct Linux kernel boot does not
+require this capability. The guest still requires the Linux/KVM host below; this
+feature does not add a macOS or Windows host backend.
+
 ## Host requirements
 
 Use an ARM64 Linux host with KVM, GICv3/ITS and PMUv3 support. The Windows
@@ -56,19 +75,6 @@ uses its separate MMIO display and combined virtio input profile; see
 ATAPI preparation commands do not apply.
 
 ## Firecracker boot configuration
-
-Build the VMM and matching snapshot editor on an ARM64 Linux build host with the
-Windows capability enabled:
-
-```sh
-cargo build --release --locked --target aarch64-unknown-linux-musl \
-  -p firecracker -p jailer -p snapshot-editor \
-  --features firecracker/windows,snapshot-editor/windows
-```
-
-The binaries are in `build/cargo_target/aarch64-unknown-linux-musl/release/`. A
-cross-build does not qualify guest execution; retain the native host
-requirements above.
 
 Build the
 [ARM64 CloudHv profile](../resources/firmware/cloudhv-secureboot/arm64/README.md)

@@ -2,6 +2,11 @@
 
 For BIOS disks, use the separate [SeaBIOS PVH handoff](seabios/README.md).
 
+Use a Windows-enabled VMM build for explicit firmware boot:
+[AMD64 instructions](../../docs/windows.md#build) or
+[ARM64 instructions](../../docs/windows-arm64.md#build). Building EDK II does
+not enable this VMM capability.
+
 The additional [PVH memory-map fix](pvh-memory-map.md) is required for all AMD64
 CloudHv profiles, including headless and Secure Boot. The current AMD64 image
 digests include that fix. Recreate snapshots from a cold boot with corrected
@@ -32,7 +37,7 @@ Windows from loading conventional ACPI tables.
 The patch applies to Cloud Hypervisor EDK II tag `ch-97eeb7b09`. The GCC release
 build boots Windows with virtio PCI disk and network devices. The corrected
 headless image passes the real UEFI memory-map probe, SHA-256
-`dc565fbd5facf9016863f3b91c732ee1196fa11f475a361c52654869f7d81d84`. Current
+`dc565fbd5facf9016863f3b91c732ee1196fa11f475a361c52654869f7d81d84`. Recorded
 Windows installation and egress checks use the graphical profiles; see
 [the validation record](../../docs/windows-validation.md).
 
