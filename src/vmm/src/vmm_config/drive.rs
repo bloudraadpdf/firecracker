@@ -96,6 +96,8 @@ pub struct BlockBuilder {
     // specified in order to avoid bugs in case of switching from partuuid boot
     // scenarios to /dev/vda boot type.
     pub devices: VecDeque<Arc<Mutex<Block>>>,
+    /// Launcher-owned backing files, outside snapshot state.
+    pub backings: std::collections::BTreeMap<String, std::fs::File>,
 }
 
 impl BlockBuilder {
@@ -103,7 +105,24 @@ impl BlockBuilder {
     pub fn new() -> Self {
         Self {
             devices: Default::default(),
+            backings: Default::default(),
         }
+    }
+
+    /// Clones the launcher-selected backing for a cold boot or snapshot restore.
+    pub fn backing(&self, id: &str) -> Result<Option<std::fs::File>, BlockError> {
+        self.backings
+            .get(id)
+            .map(std::fs::File::try_clone)
+            .transpose()
+            .map_err(|error| {
+                BlockError::VirtioBackend(
+                    crate::devices::virtio::block::virtio::VirtioBlockError::BackingFile(
+                        error,
+                        id.to_owned(),
+                    ),
+                )
+            })
     }
 
     /// Specifies whether there is a root block device already present in the list.
@@ -154,8 +173,11 @@ impl BlockBuilder {
             return Err(DriveError::RootBlockDeviceAlreadyAdded);
         }
 
+        let backing = self
+            .backing(&config.drive_id)
+            .map_err(DriveError::CreateBlockDevice)?;
         let block_dev = Arc::new(Mutex::new(
-            Block::new(config).map_err(DriveError::CreateBlockDevice)?,
+            Block::new(config, backing).map_err(DriveError::CreateBlockDevice)?,
         ));
 
         // If the id of the drive already exists in the list, the operation is update/overwrite.
@@ -735,7 +757,7 @@ mod tests {
             socket: None,
         };
 
-        let block = Block::new(config).unwrap();
+        let block = Block::new(config, None).unwrap();
 
         block_devs.add_virtio_device(Arc::new(Mutex::new(block)));
         assert_eq!(block_devs.devices.len(), 1);

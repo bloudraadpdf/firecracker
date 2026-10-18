@@ -63,7 +63,7 @@ pub fn default_block_with_path(path: String, file_engine_type: FileEngineType) -
     };
 
     // The default block device is read-write and non-root.
-    VirtioBlock::new(config).unwrap()
+    VirtioBlock::new(config, None).unwrap()
 }
 
 pub fn set_queue(blk: &mut VirtioBlock, idx: usize, q: Queue) {

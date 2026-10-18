@@ -57,6 +57,7 @@ pub enum FileEngineType {
 #[derive(Debug)]
 pub struct DiskProperties {
     pub file_path: String,
+    pub inherited: bool,
     pub file_engine: FileEngine,
     pub nsectors: u64,
     pub image_id: [u8; VIRTIO_BLK_ID_BYTES as usize],
@@ -96,13 +97,24 @@ impl DiskProperties {
         disk_image_path: String,
         is_disk_read_only: bool,
         file_engine_type: FileEngineType,
+        backing: Option<File>,
     ) -> Result<Self, VirtioBlockError> {
-        let mut disk_image = Self::open_file(&disk_image_path, is_disk_read_only)?;
+        let inherited = backing.is_some();
+        let mut disk_image = match backing {
+            Some(file) => {
+                utils::inherited::block(&file, is_disk_read_only).map_err(|error| {
+                    VirtioBlockError::BackingFile(error, disk_image_path.clone())
+                })?;
+                file
+            }
+            None => Self::open_file(&disk_image_path, is_disk_read_only)?,
+        };
         let disk_size = Self::file_size(&disk_image_path, &mut disk_image)?;
         let image_id = Self::build_disk_image_id(&disk_image);
 
         Ok(Self {
             file_path: disk_image_path,
+            inherited,
             file_engine: FileEngine::from_file(disk_image, file_engine_type)
                 .map_err(VirtioBlockError::FileEngine)?,
             nsectors: disk_size >> SECTOR_SHIFT,
@@ -116,6 +128,9 @@ impl DiskProperties {
         disk_image_path: String,
         is_disk_read_only: bool,
     ) -> Result<(), VirtioBlockError> {
+        if self.inherited {
+            return Err(VirtioBlockError::Config);
+        }
         let mut disk_image = Self::open_file(&disk_image_path, is_disk_read_only)?;
         let disk_size = Self::file_size(&disk_image_path, &mut disk_image)?;
 
@@ -403,11 +418,15 @@ impl VirtioBlock {
     /// Create a new virtio block device that operates on the given file.
     ///
     /// The given file must be seekable and sizable.
-    pub fn new(config: VirtioBlockConfig) -> Result<VirtioBlock, VirtioBlockError> {
+    pub fn new(
+        config: VirtioBlockConfig,
+        backing: Option<File>,
+    ) -> Result<VirtioBlock, VirtioBlockError> {
         let disk_properties = DiskProperties::new(
             config.path_on_host,
             config.is_read_only,
             config.file_engine_type,
+            backing,
         )?;
 
         let rate_limiter = config
@@ -946,16 +965,20 @@ mod tests {
         f.as_file().set_len(size).unwrap();
 
         for engine in [FileEngineType::Sync, FileEngineType::Async] {
-            let disk_properties =
-                DiskProperties::new(String::from(f.as_path().to_str().unwrap()), true, engine)
-                    .unwrap();
+            let disk_properties = DiskProperties::new(
+                String::from(f.as_path().to_str().unwrap()),
+                true,
+                engine,
+                None,
+            )
+            .unwrap();
 
             assert_eq!(size, u64::from(SECTOR_SIZE) * num_sectors);
             assert_eq!(disk_properties.nsectors, num_sectors);
             // Testing `backing_file.virtio_block_disk_image_id()` implies
             // duplicating that logic in tests, so skipping it.
 
-            let res = DiskProperties::new("invalid-disk-path".to_string(), true, engine);
+            let res = DiskProperties::new("invalid-disk-path".to_string(), true, engine, None);
             assert!(
                 matches!(res, Err(VirtioBlockError::BackingFile(_, _))),
                 "{:?}",

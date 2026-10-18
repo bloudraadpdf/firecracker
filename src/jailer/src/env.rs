@@ -113,6 +113,7 @@ pub struct Env {
     control_fd: Option<i32>,
     control_port: Option<u32>,
     serial_out_fd: Option<i32>,
+    drive_fds: std::collections::BTreeMap<String, i32>,
 }
 
 pub fn launch_fd(
@@ -329,6 +330,7 @@ impl Env {
             control_fd,
             control_port,
             serial_out_fd,
+            drive_fds: utils::inherited::drives(arguments).map_err(JailerError::Launch)?,
         })
     }
 
@@ -663,6 +665,9 @@ impl Env {
             if let Some(value) = value {
                 args.extend([format!("--{name}"), value]);
             }
+        }
+        for (id, fd) in &self.drive_fds {
+            args.extend(["--drive-fd".to_owned(), format!("{id}={fd}")]);
         }
         args.extend(self.extra_args.iter().cloned());
         args

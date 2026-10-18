@@ -15,6 +15,41 @@ pub fn number(value: &str) -> io::Result<RawFd> {
         .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))
 }
 
+pub fn drives(
+    arguments: &crate::arg_parser::Arguments,
+) -> io::Result<std::collections::BTreeMap<String, RawFd>> {
+    let mut drives = std::collections::BTreeMap::new();
+    for value in arguments.multiple_values("drive-fd").unwrap_or_default() {
+        let (id, fd) = value.split_once('=').ok_or(io::ErrorKind::InvalidInput)?;
+        if id.is_empty() || id.contains('/') || drives.insert(id.to_owned(), number(fd)?).is_some()
+        {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+    }
+    Ok(drives)
+}
+
+pub fn block(file: &File, read_only: bool) -> io::Result<()> {
+    use std::os::unix::fs::FileTypeExt;
+    let kind = file.metadata()?.file_type();
+    if !kind.is_file() && !kind.is_block_device() {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    // SAFETY: file owns a live descriptor; F_GETFL takes no pointer argument.
+    let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let access = flags & libc::O_ACCMODE;
+    if flags & (libc::O_PATH | libc::O_APPEND) != 0
+        || access == libc::O_WRONLY
+        || (!read_only && access != libc::O_RDWR)
+    {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    Ok(())
+}
+
 pub fn socket(fd: RawFd, kind: libc::c_int, listening: bool) -> io::Result<()> {
     for (option, expected) in [
         (libc::SO_DOMAIN, libc::AF_UNIX),
@@ -72,4 +107,19 @@ pub fn pipe(file: &File) -> io::Result<()> {
         return Err(io::ErrorKind::InvalidInput.into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn block_rejects_special_files_and_read_only_writes() {
+        let file = File::open("/dev/null").unwrap();
+        assert!(block(&file, true).is_err());
+        let file = File::open("Cargo.toml").unwrap();
+        assert!(block(&file, true).is_ok());
+        assert!(block(&file, false).is_err());
+        let directory = File::open(".").unwrap();
+        assert!(block(&directory, true).is_err());
+    }
 }

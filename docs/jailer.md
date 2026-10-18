@@ -30,6 +30,19 @@ jailer --id <id> \
        [--...extra arguments for Firecracker]
 ```
 
+- `--drive-fd <drive-id>=<descriptor>` retains a launcher-opened regular file or
+  block device and passes it to Firecracker. This option can repeat for distinct
+  drive identifiers and descriptor numbers. It needs the API configuration path;
+  configuration-file and no-API launches reject inherited drives. Each descriptor
+  must be readable, and writable when its drive is writable. Append-only and
+  path-only descriptors are rejected. The launcher must retain exclusive backing
+  access for the VM lifetime; this interface does not fence another host.
+  Firecracker uses the file directly without a jail link, mount, path reopen or
+  ownership change. The drive cannot later replace its backing through a path
+  update. Snapshot format 14 records whether a drive requires an inherited
+  backing; restore needs a descriptor for the same logical drive ID. Descriptor
+  numbers are not snapshot state. Older snapshot formats are incompatible.
+
 - `--id` specifies the unique VM identification string, which may contain
   alphanumeric characters and hyphens. The maximum length is currently 64
   characters.
@@ -118,8 +131,8 @@ Here is an example on how to set multiple resource limits using this argument:
 After starting, the Jailer goes through the following operations:
 
 - Validate **all provided paths** and the VM ID.
-- Close all open file descriptors based on `/proc/<jailer-pid>/fd` except input,
-  output, error and the `--api-sock-fd` descriptor.
+- Close all descriptors except standard streams and explicit launch roles.
+  Duplicate descriptor roles are rejected before launch.
 - If `--api-sock-fd` is present, check that its descriptor is a listening
   `AF_UNIX` stream socket.
 - Cleanup all environment variables received from the parent process.

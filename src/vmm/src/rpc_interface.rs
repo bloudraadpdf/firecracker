@@ -386,6 +386,7 @@ impl<'a> PrebootApiController<'a> {
         };
 
         vm_resources.vsock.initial_control = launch_io.control;
+        vm_resources.block.backings = launch_io.drives;
 
         // Init the data store from file, if present.
         if let Some(data) = metadata_json {

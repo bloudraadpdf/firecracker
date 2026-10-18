@@ -29,12 +29,18 @@ pub enum Block {
 }
 
 impl Block {
-    pub fn new(config: BlockDeviceConfig) -> Result<Block, BlockError> {
+    pub fn new(
+        config: BlockDeviceConfig,
+        backing: Option<std::fs::File>,
+    ) -> Result<Block, BlockError> {
         if let Ok(config) = VirtioBlockConfig::try_from(&config) {
             Ok(Self::Virtio(
-                VirtioBlock::new(config).map_err(BlockError::VirtioBackend)?,
+                VirtioBlock::new(config, backing).map_err(BlockError::VirtioBackend)?,
             ))
         } else if let Ok(config) = VhostUserBlockConfig::try_from(&config) {
+            if backing.is_some() {
+                return Err(BlockError::InvalidBlockConfig);
+            }
             Ok(Self::VhostUser(
                 VhostUserBlock::new(config).map_err(BlockError::VhostUserBackend)?,
             ))
@@ -261,6 +267,9 @@ impl Persist<'_> for Block {
         constructor_args: Self::ConstructorArgs,
         state: &Self::State,
     ) -> Result<Self, Self::Error> {
+        if matches!(state, BlockState::VhostUser(_)) && constructor_args.backing.is_some() {
+            return Err(BlockError::InvalidBlockConfig);
+        }
         match state {
             BlockState::Virtio(s) => Ok(Self::Virtio(
                 VirtioBlock::restore(constructor_args, s).map_err(BlockError::VirtioBackend)?,

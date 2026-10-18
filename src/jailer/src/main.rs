@@ -244,6 +244,7 @@ pub fn build_arg_parser() -> ArgParser<'static> {
         .arg(Argument::new("bind-rw").takes_value(true).allow_multiple(true).help(
             "Writable directory bind: destination-name=/absolute/source. Restricts suid, devices and execution.",
         ))
+        .arg(Argument::new("drive-fd").takes_value(true).allow_multiple(true).help("Pinned drive backing: drive-id=descriptor."))
         .arg(Argument::new("bootstrap-fd").takes_value(true).help("Private Unix datagram socket for pidfd and mount namespace hand-off."))
         .arg(Argument::new("exec-fd").takes_value(true).help("Sealed executable owned by this retained jail."))
         .arg(Argument::new("mount-ns-fd").takes_value(true).help("Owned mount namespace of this retained jail."))
@@ -376,6 +377,11 @@ fn main_exec() -> Result<(), JailerError> {
             keep.push(fd);
         }
     }
+    keep.extend(
+        utils::inherited::drives(arguments)
+            .map_err(JailerError::Launch)?
+            .into_values(),
+    );
     sanitize_process(&keep)
         .unwrap_or_else(|err| panic!("Failed to sanitize the Jailer process: {}", err));
     if let Some(fd) = api_sock_fd {
