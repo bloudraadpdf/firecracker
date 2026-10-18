@@ -261,3 +261,16 @@ retain their ordinary behaviour. The
 [validation record](../../../docs/windows-validation.md#recorded-windows-xp-reference)
 identifies the qualified format-33 CONNECT run and its exact reader and host
 inputs. A new build or changed input needs its own guest and restore checks.
+
+## Receive failure diagnostics
+
+On receive failure, `connect.rs` records the return count, Winsock error,
+header/payload context, payload chunk and offset within the current read.
+`count=0` is EOF; its `wsa` value is not valid. Only `count=-1` reports a valid
+`WSAGetLastError`, marked `wsa_valid=1`. The error is captured before writing
+output. The process exits nonzero after recording the failure.
+
+Use the existing Windows user-mode build procedure above. The diagnostics do not
+change payloads, retry receives, relax policy checks or explain an earlier
+failure without a matching trace. In particular, the successful later Win7 run
+does not establish the cause of the earlier receive failure after full restore.
