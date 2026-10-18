@@ -356,3 +356,10 @@ A direct Firecracker ARM64 installer and standard ARM64 Windows 11 remain
 unqualified. The [ARM64 guide](../../docs/windows-arm64.md) retains historical
 prepared-disk provenance and current host requirements. The AMD64 console and
 installation procedure do not establish ARM64 support.
+
+## XP display driver
+
+The [XP display miniport](display/README.md) supplies the experimental linear
+display driver, external WDK build procedure and normal installation steps. Its
+source and host unit tests are separate from the user-mode compatibility
+libraries above.
