@@ -12,6 +12,7 @@ state=${WINDOWS_BITLOCKER_STATE:?Set a new absolute mount directory}
 bdemount=${WINDOWS_BITLOCKER_BDEMOUNT:?Set the pinned bdemount binary}
 [[ "$disk" = /* && "$state" = /* && "$bdemount" = /* ]]
 [[ "$offset" =~ ^[0-9]+$ && "$size" =~ ^[1-9][0-9]*$ ]]
+command -v fusermount > /dev/null || { echo 'Install fusermount for BitLocker verification cleanup' >&2; exit 1; }
 "$bdemount" -V | grep -x 'bdemount 20260916' > /dev/null
 bash "$scripts/assert-disk-closed.sh" "$disk"
 umask 077
