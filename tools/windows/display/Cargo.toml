@@ -1,0 +1,16 @@
+[package]
+name = "firecracker-windows-display"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[workspace]
+
+[[test]]
+name = "xp-miniport"
+path = "miniport.rs"
+
+[[test]]
+name = "mode-probe"
+path = "probe/probe.rs"

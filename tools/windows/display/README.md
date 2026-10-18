@@ -188,5 +188,85 @@ The pinned actual XP `display.inf` provides the legacy `.SoftwareSettings`,
 typed settings and Video-service/event-log precedent. Modern WDDM-only registry
 sections are not substituted for that XP contract.
 
+## Mode acceptance helper
+
+The [probe](probe/probe.rs) uses the same sixteen-mode table and emits a full
+RGB pattern from [model.rs](probe/model.rs). It restores the original display
+mode and cursor count on completion or failure. It uses the public XP DEVMODE
+prefix, accepts dmSize 188..220, and makes no private display-driver calls.
+
+For the user-mode executable, select the XP x86 profile and generate
+`windows_rustflags` using the existing
+[compatibility-library procedure](../README.md#windows-probe-linking). In the
+same Bash session, run:
+
+```bash
+mkdir -p build/windows/display-probe
+rustc --edition 2024 -D warnings "${windows_rustflags[@]}" \
+  tools/windows/display/probe/probe.rs -o build/windows/display-probe/modes.exe
+rustc --edition 2024 -D warnings tools/windows/display/probe/frame.rs \
+  -o build/windows/display-probe/frame
+rustc --edition 2024 -D warnings --test tools/windows/display/probe/probe.rs \
+  -o build/windows/display-probe/tests
+build/windows/display-probe/tests
+```
+
+The existing twenty host tests cover mode selection, public ABI bounds, RGB
+patterns, pointer ordering, keyboard state, cleanup and callback re-entry. They
+do not replace guest testing. The host frame utility uses the same pattern code
+so that full-frame comparison needs no separate oracle implementation.
+
+Use a disposable installed XP reference with the selected miniport. Create a new
+empty guest directory, copy `modes.exe` there, enable Caps Lock, and run
+`modes.exe > modes.log` from that directory. It creates `mode-00.txt` through
+`mode-15.txt` exclusively; existing files make the run fail.
+
+For each case, within its ninety-second deadline:
+
+1. Wait for `PAINT case=N phase=Pixels`. The cursor is hidden. Capture the whole
+   display with the existing
+   [console screenshot command](../console/README.md#unattended-capture-and-input).
+
+1. Generate the expected PPM and compare every byte, replacing case index zero
+   and filenames below for each case:
+
+   ```sh
+   build/windows/display-probe/frame 0 > build/windows/display-probe/expected-00.ppm
+   cmp build/windows/display-probe/expected-00.ppm build/windows/display-probe/actual-00.ppm
+   ```
+
+1. Only after comparison passes, press and release F1. Move the pointer to the
+   top-left, top-right, bottom-right, bottom-left and centre, in that order. Use
+   pixel coordinates `(0,0)`, `(width-1,0)`, `(width-1,height-1)`,
+   `(0,height-1)` and `(width/2,height/2)`. If already at a target, move away
+   and return; unchanged positions are not accepted.
+
+1. In the Text phase, enter ASCII bytes 32..126 in order with Caps Lock enabled,
+   without repeated key events. Wait for
+   `SAVED case=N bytes=95 write=true flush=true close=true` and the Saved phase,
+   then press and release Enter. Escape aborts the run and requests restoration.
+
+Require `MODE392 FINISHED status=0` with no cleanup error. Verify the original
+mode was restored, then shut down normally. From the stopped OS volume, verify
+all sixteen saved files contain exactly bytes 32..126, with no BOM or newline.
+Retain the log and actual RGB captures. An acknowledged key or pointer command
+alone does not prove guest input or stored data. Browser/VNC, normal Windows
+Keep/Revert/timeout, cold nonzero-mode persistence and snapshot tests remain
+separate checks in the [validation matrix](../../../docs/windows-validation.md).
+
+## Maintained host checks
+
+The test-only Cargo workspace has no dependencies. The existing standalone-tool
+unit and Clippy gates discover it with the other tool workspaces. No Windows
+image, WDK library or guest is needed for these host tests.
+
+```sh
+cargo test --locked --all-targets --manifest-path tools/windows/display/Cargo.toml
+cargo clippy --locked --all-targets --manifest-path tools/windows/display/Cargo.toml -- -D warnings
+```
+
+These commands run the same 36 miniport and 20 probe unit cases documented
+above. Kernel and guest executable builds retain their separate commands.
+
 [info]: https://learn.microsoft.com/en-us/windows-hardware/drivers/display/setting-hardware-information-in-the-registry
 [memory]: https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-videocontroller
