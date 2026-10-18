@@ -23,6 +23,8 @@ on ARM64. Registers follow `OvmfPkg/Include/IndustryStandard/QemuUefiVars.h`;
 firmware uses DMA messages. The separate TPM CRB page is `0xfed40000` on AMD64
 or `0x10000000` on ARM64. The helper protocol is independent of architecture;
 see the [ARM64 guide](../../docs/windows-arm64.md#optional-security-devices).
+See the [VMM service contract](../../docs/windows-secure-boot.md) for build
+capability and checkpoint requirements.
 
 ## IPC version 1
 

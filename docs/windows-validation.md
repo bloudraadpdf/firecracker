@@ -1,255 +1,76 @@
 # Windows guest validation
 
-The recorded format33 results below do not qualify the optional VMClock choice
-or format34. Rebuild snapshots and repeat the affected device, generation and
-transport checks before making those claims for the new code.
+Windows support is experimental and incomplete. A pass below applies only to its
+tested guest, installed drivers, firmware, VMM and route. Use the
+[AMD64 guide](windows.md), [console guide](windows-console.md) and
+[secure platform guide](windows-secure-boot.md) to prepare a test.
 
-Windows support is experimental. Use the [AMD64 guide](windows.md),
-[installation console](windows-console.md) and
-[secure platform guide](windows-secure-boot.md) for configuration.
+## Current integration candidate
 
-## Recorded format33 integration candidate
+The latest guest-qualified AMD64 VMM is the Windows-feature release `93434437`,
+using snapshot format 34. Its source is the recorded `9eb13bb7` base plus the
+Rust USB tablet zero-coordinate correction; it is not an unchanged build of that
+Git commit. The preceding VMM `f90f364e` also uses format 34. Results from that
+binary are labelled separately below. Neither format compatibility nor a
+successful build carries a runtime result forward to changed code. The combined
+USB/vsock source candidate still needs its own runtime qualification.
 
-The recorded candidate uses snapshot format 33. Windows hardware and firmware
-require the default-off `windows` Cargo feature. Both builds retain the
-saved-state fields; the default build rejects Windows configuration before
-opening its backends. Ordinary Linux snapshots must restore between the two
-builds.
+The combined source passes the supported Windows release build and 83 focused
+vsock tests in each capability build, plus strict Clippy. Its release binary is
+`8b8c6932`. These are build and host-test results; no guest has qualified that
+combined binary.
 
-That correction adds conventional PC GPE status/enable state and routes VM
-Generation ID notification through the existing SCI. Default and Windows release
-builds pass. The following checks used Rust 1.98.1 on native AMD64 Linux/KVM.
+Reuse a recorded result when the inputs relevant to that check are unchanged.
+Retain the guest configuration, driver and firmware hashes, VMM capability and
+source identity with each result. A documentation change does not require a new
+VMM build or guest run. Repeat a check for changed behaviour or an unresolved
+failure, and retain the earlier failed record.
 
-### Recorded host checks
+| Area                                        | Latest qualified result                                                                                                                                                                   | Remaining gate                                                                                                                               |
+| ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| XP SP3 x86 display and direct console input | VMM `93434437`, unsigned XPDM miniport 0.1.2.0: all 16 advertised 32-bit modes pass full-frame RGB comparison, five pointer targets per mode and saved printable ASCII with Caps Lock on. | Normal Windows Keep/Revert/timeout UI, browser/VNC input, other layouts and guests.                                                          |
+| XP mode and input persistence               | The helper restores the original 640x480x32, 60 Hz mode, exits zero and the guest shuts down through normal S5.                                                                           | Nonzero-mode cold boot and full/differential restore of display and held input state.                                                        |
+| XP TAP and CONNECT                          | Earlier installed-reference results exist.                                                                                                                                                | Both routes on the latest candidate, with current drivers and generation/storage verification.                                               |
+| Windows 7 TAP                               | Preceding VMM `f90f364e`: installed Enterprise SP1 x64 reference passes cold/full/differential egress, storage and generation checks.                                                     | Qualify the combined candidate `8b8c6932`; the installed-reference result does not qualify a fresh installation.                             |
+| Windows 7 CONNECT                           | Normal VMM `93434437`: installed-reference cold/full/differential transfers, denials, storage, public verifier and final S5 pass. The outer caller fails firewall-rule preservation.      | Explain the two removed Docker rules and the earlier normal `f90f364e` failure; qualify the combined candidate separately.                   |
+| Modern installation and security            | Earlier binary/format-specific installation, Secure Boot, TPM and variable-service results exist.                                                                                         | Current Windows 10/11/Server installation, security, persistence and route matrix; Windows 11 Pro and remaining editions remain unqualified. |
+| Host regression checks                      | The tablet regression fails before the fix and passes after it; 41 affected Windows-feature tests, strict musl Clippy and the Windows release build pass.                                 | Complete default/Windows, Linux/API/seccomp/jailer, standalone-tool and supported-host regression gates on the final source.                 |
+| ARM64 and performance                       | Historical emulated/cross-build results and earlier measurements only.                                                                                                                    | Native ARM64/KVM guest qualification and unchanged final default/Windows performance gates.                                                  |
 
-The full unit suites used the recorded production source. Subsequent changes
-were confined to test configuration and error assertions; both affected tests
-passed on that recorded source. Standalone-tool results cover unchanged
-implementation inputs. The functional checks used the recorded release VMMs.
+The XP pass uses one installed Professional SP3 x86 reference, SeaBIOS,
+`vmclock: false`, one vCPU and 2 GiB RAM. Its normal unsigned-driver warning was
+accepted; no signing-policy or registry repair bypass was used. All 16 saved
+files contain exactly bytes 32 through 126, without a BOM or newline. The
+stopped probe log confirms all mode tests/applications, 80 accepted pointer
+coordinates including each top-left `(0,0)`, successful writes/flushes/closes,
+restoration and final status zero. These checks complement the RGB frames; input
+acknowledgements or screenshots alone do not prove saved data.
 
-| Check                                                  | Result                                          |
-| ------------------------------------------------------ | ----------------------------------------------- |
-| Default VMM unit suite                                 | 891 passed; none ignored                        |
-| Windows VMM unit suite                                 | 1,098 passed; none ignored                      |
-| Privileged jailer mount and retained-namespace parents | Both passed, including their child protocols    |
-| Variable helper (unchanged inputs)                     | 67 passed; none ignored                         |
-| Console helper (unchanged inputs)                      | 31 passed; none ignored                         |
-| Strict workspace Clippy                                | Default and all features, GNU and musl          |
-| Strict ARM64 cross-Clippy                              | GNU default/all features; command 0, run failed |
-| Standalone tool Clippy and Rust/Markdown style gates   | Passed                                          |
-| Platform devices                                       | 7 passed                                        |
-| Selected API and boot tests                            | 65 passed; 2 empty CPU-template skips           |
-| Selected basic Linux snapshot tests                    | 36 passed                                       |
-| Selected Linux snapshot-cycle tests                    | 12 passed in one invocation                     |
+A separate normal Windows 7 CONNECT run on `93434437` passes all three phases
+with a guest probe update that adds failure diagnostics. Six sealed proxy
+entries confirm three allowed 2 MiB transfers in each direction and three
+zero-payload denials. The stopped transcript, final disk bytes,
+full/differential restore logs, both format-34 headers, public verifier and
+normal S5 agree. This qualifies fresh connections on the installed reference,
+with generation checks disabled. The overall caller remains failed: two Docker
+PREROUTING DROP rules present before the run are absent afterwards. The
+responsible actor and cause are not established; owned VM, proxy, mount and loop
+closure passes.
 
-Both strict ARM64 GNU cross-Clippy commands exited zero. The enclosing run and
-its post-run guard failed because compiler-cache allocation exceeded the fixed
-cap. Later cache custody checks and retirement do not change that failed result.
-These command results establish compilation checks only.
+The earlier normal `f90f364e` failure remains unresolved. Its cold transfer
+passes, but after full restore the proxy accounts 162,816 bytes in each
+direction before the guest reports a receive failure and requests S5. The older
+probe does not record enough detail to classify EOF or timeout. A separate
+Debug-logging run passes; neither that result nor the later normal pass
+establishes a cause or a repair. The new vsock correction has no guest-cause
+attribution from these runs.
 
-The VMM suites execute the real swtpm restore, ACPICA evaluation and maximum
-optional-buffer snapshot-reader tests. The console backlog regression passes;
-replacing only its connector with the preceding blocking call reproduces the
-five-second failure. Normal discovery ignores two privileged jailer parents and
-their two child entrypoints. Both parents were then run explicitly with the
-required privileges; they invoke the children. These results do not imply that
-every ignored documentation example was executed.
+## Run the maintained checks
 
-The selected API/boot tests have 65 passes and two empty CPU-template skips; no
-custom CPU-template coverage is claimed. All 12 selected cycle cases pass in one
-invocation with unchanged test thresholds. An earlier cycle run failed on a
-2,317 ms pause API call. Its cause remains unresolved. Diagnostic tracing of the
-passing run recorded no owned Firecracker executions and provides no usable
-trace; the pass does not establish a scheduler or storage-latency bound.
-
-### Recorded Windows 7 reference
-
-On the recorded format-33 implementation, an installed Windows 7 Enterprise SP1
-x64 reference retains the installed SSU and SHA-2 updates after a normal
-restart. NetKVM 61.77.104.17200 and Microsoft's generation-counter driver
-6.3.9600.18080 retain device Code 0, `IsSigned=True`, the pinned selected
-INF/SYS and running services. The KMDF runtime is running. Two actual driver
-queries return the same nonzero 16-byte generation ID, followed by normal
-shutdown.
-
-This installed reference also passes the maintained optional TAP generation
-checks on PowerShell 2 through cold boot, full restore and differential restore
-with format-33 snapshots under normal Windows driver policy. The SYSTEM startup
-task invokes the public `tools/windows/egress/tap.ps1` directly with
-`-GenerationChecks`. Each phase checks DNS, certificate-validated TLS 1.2 HTTPS,
-a 2 MiB equal TCP echo in each direction and matching storage hashes. Before
-each snapshot, an owned child reports ARMED while alive; after restore, that
-same child PID completes with a changed generation ID matching two fresh driver
-queries. The public verifier accepts seven matching guest/host reports, three
-distinct nonzero IDs and both original child completions.
-
-On this reference, an incorrect probe digest, an existing event directory and an
-existing transcript are each rejected. All three checks leave the NIC
-configuration, earlier transcript and storage unchanged, preserve existing event
-files where present, send no reports and request normal S5.
-
-The cold and full source instances stop at the normal controller snapshot
-boundaries. The final differential instance requests S5 and the VMM exits zero.
-Host process, mount, loop and network closure checks pass. These TAP results
-qualify only this installed reference and route.
-
-A separate clone of this installed reference passes format-33 cold, full-restore
-and differential-restore CONNECT checks using the documented external
-test-signed Viosock package. It retains the isolated test-signing policy without
-an integrity-check bypass. A SYSTEM startup task opens fresh connections through
-the real Tokoloshe HTTP CONNECT proxy over vsock, with no guest NIC. Each phase
-passes a 2 MiB equal transfer in each direction and an HTTP 403 policy denial
-with no payload. Accounting seals three allowed and three denied entries; the
-final disk file matches its guest SHA-256. Both states report v33.0.0. Cold/full
-instances stop at snapshot boundaries; the final instance requests S5 and the
-VMM exits zero. Host process, mount and loop closure checks pass. This qualifies
-only the installed Win7 test-signing profile and fresh connections.
-
-### Recorded Windows XP reference
-
-On the recorded format-33 implementation, the installed XP Professional SP3 x86
-reference has the genuine Microsoft generation-counter package 6.3.9600.17831.
-Separate read-only catalogue-member checks accept its installed INF and SYS; WMI
-records the selected signed driver. After a distinct cold boot, the device has
-Code 0, `gencounter` and KMDF are running, and two actual reads return the same
-nonzero 16-byte generation ID. The guest then requests normal S5 and the VMM
-exits zero. The stopped disk, host processes, mounts and loops are closed.
-
-A separate installed-reference clone passes format-33 cold, full-restore and
-differential-restore TAP checks with the
-[shared polling reader](../tools/windows/generation/README.md#xp-polling-during-egress).
-Six genuine driver queries form three matching pairs with distinct nonzero
-generation IDs. Each phase passes a 2 MiB equal TCP echo in each direction and
-hostname HTTP with status 200. The offline verifier accepts all 65,536 storage
-bytes. Both saved states report v33.0.0. The final guest requests normal S5 and
-the VMM exits zero. Host process, mount, loop and network closure checks pass.
-
-The TAP run uses the vendor-signed NetKVM package with normal XP driver-warning
-consent. These checks do not establish WHQL status or installed catalogue
-registration. The separate default driver-policy signature check fails. The
-original offline collector failed on a trailing-space marker. A separate parser
-accepts the retained actual bytes after the marker correction; the original
-collector remains failed and was not rerun. Those results qualify the TAP route
-on that installed reference.
-
-A separate installed-reference clone passes format-33 cold, full-restore and
-differential-restore CONNECT checks without a guest NIC. The real Tokoloshe
-proxy connects to the host-loopback echo target. Each stage passes a byte-equal
-2 MiB transfer in each direction and a policy-denied request with status 403 and
-zero payload. Six sealed FetchLog entries bind those transfers and denials to
-the three stages. Six genuine generation-counter polls form three matching pairs
-with distinct nonzero IDs. The unchanged offline verifiers accept the final 2
-MiB storage pattern and normal guest S5 with VMM exit zero.
-
-This run binds source-manifest SHA-256
-`836e743b99a7f62e8013267c4ccd33027f72b029291d9f607e9f44d3261b10aa` and
-build-receipt SHA-256
-`6033bf6a0f48b6aaa36b9501d04528eb2d5b07f38d95b6bbc1aa6cc96a037772` to these
-recorded binaries:
-
-| Input             | SHA-256                                                            |
-| ----------------- | ------------------------------------------------------------------ |
-| VMM               | `c1b1d608138f147c1d8c3314ebdfbf40abad824fb9838412927d9235714cb29f` |
-| Snapshot editor   | `0bbe760cf233d66f27725639c5dba8a9da7fe595b92ff4942cb9aadcb9b7f370` |
-| XP CONNECT reader | `a04d5ecd8d931095e557bcad4339af87f69fed21cb5a1b1d4eb090368d17d0f1` |
-| Host proxy shim   | `0ff7f14d5aca46306347f3ce6d5713cedefe95a0162085a46ad0f0bad6641270` |
-| Tokoloshe sidecar | `5d4cc8b4f7896dfe59dccfe0bb149708b297ed40adc8cf4502d7f80fa3498e78` |
-
-The original runtime observer failed to count the non-dumpable VMM through
-`/proc/<pid>/exe`; its failed main unit and absent result remain unchanged. A
-separate review accepts the actual controller exit zero, launch-chain UID
-inheritance and guest S5. Stopped raw collection and the ordinary verifiers then
-qualify the transfers, accounting, generation polls and stored bytes. This does
-not turn the original observer failure into a pass. The Viosock package remains
-an external test driver; these results establish neither WHQL status nor normal
-production signing. They do not qualify arbitrary Internet targets, TLS,
-generation-change notifications or later changed source, binaries or helpers. XP
-supports generation polling only; its notification request is unsupported.
-
-A pre-installation XP console baseline, with VgaSave running, separately
-verifies the 256x128 bitmap, four pointer-selected pixel changes and a saved
-194-byte file containing all 95 printable ASCII characters with Caps Lock off
-and on. It uses raw console CLI commands and 640x480 frames. The original bitmap
-and staged payloads remain unchanged. This qualifies that installed reference
-and input sequence, not browser or VNC input, every layout, mode, guest or
-restored input path. The baseline's full PnP inventory retains the unconfigured
-VGA device at Code 1 and VMClock at Code 28; VGEN reports Code 0 with service
-`gencounter`.
-
-A later isolated VGA installation completed its normal driver wizard and
-required a restart. The display remained black on the subsequent cold boot; that
-experiment does not qualify the display driver. Legacy VMClock recognition and a
-clean device inventory also remain open.
-
-Current Windows installation, the remaining graphical input and display matrix,
-security, the other guests' TAP routes and performance qualification remain
-open. The historical results below use format 31 and their matching binaries.
-They do not qualify later snapshot formats. Do not load an older saved state
-with the candidate.
-
-The variable helper is Rust and reuses the upstream AWS-LC versions and
-checksums: `aws-lc-rs` 1.18.0 and `aws-lc-sys` 0.44.0. Their existing backend
-contains C/assembly. No QEMU library or new linked native backend is used. The
-TPM backend is the separate swtpm/libtpms service; Firecracker does not link
-libtpms. Firmware remains external, with the supplied patches and original
-licences.
-
-## Historical AMD64 guest results
-
-These tests used VMM SHA-256
-`4424dc69822e105abee765621549e38fe898d8a0e70a7c31076c931fff435171` and format-31
-snapshots. Each installed-reference network result covers cold boot, full
-restore and differential restore.
-
-| Guest                                 | Build      | TAP  | Tokoloshe CONNECT over vsock | Scope                                                         |
-| ------------------------------------- | ---------- | ---- | ---------------------------- | ------------------------------------------------------------- |
-| XP Professional SP3 x86               | 2600       | Pass | Pass                         | Installed reference; `Unsafe` disk cache; HTTP only           |
-| Windows 7 Enterprise SP1 x64          | 7601       | Pass | Pass                         | Installed reference; `Writeback`                              |
-| Windows 10 Enterprise LTSC 2021       | 19044.1288 | Pass | Pass                         | Installed reference; `Writeback`                              |
-| Windows 11 IoT Enterprise LTSC        | 26100.1742 | Pass | Pass                         | Installed reference; `Writeback`                              |
-| Windows 11 Enterprise Evaluation 26H2 | 26300.9457 | Pass | Pass                         | Fresh direct installation and protected platform; `Writeback` |
-
-TAP has no guest vsock device; CONNECT has no guest NIC. TAP checks DNS and a 2
-MiB equal echo in each direction. Guests other than XP also check HTTPS with
-certificate validation and TLS 1.2. CONNECT uses the actual Tokoloshe proxy,
-with three allowed transfers and three zero-payload denials per run. Host
-accounting and offline disk checks bind the results to the three phases. All
-listed runs finish with clean guest S5 and VMM exit zero.
-
-XP and Windows 7 use the documented external test-signed Viosock packages. The
-format-31 Windows 7 inventory retains three ACPI Code 28 devices. Recorded
-Windows 7 generation-counter binding, polling and TAP restore results are
-described above. Recorded XP driver-query, TAP and CONNECT restore results are
-also described above, with their separate installed references, tested inputs
-and failure qualifications. XP results establish polling only. Historical egress
-results do not prove six generation reads across restores. VMClock recognition
-on modern Windows establishes enumeration only. These installed references do
-not establish fresh XP, Windows 7, Windows 10 or IoT installation, or every
-graphical input path. Process/snapshot cache checks do not establish host
-power-loss durability. XP HTTP does not establish TLS support.
-
-The historical format-31 Enterprise run uses variable helper SHA-256
-`0b2b94dbd74f84d9befa0f2747d812f580fc01e760843676b46b4a0373d45f3c` for the
-protected runtime checks, and secure firmware SHA-256
-`370a2a969758d361008decb59bdf59072664e273c3402f9b4f931d7511515e43`. Setup stages
-the signed storage driver automatically, without a hardware-check bypass, and
-the installed guest boots without its DVD. Secure Boot and TPM readiness pass.
-The final inventory reports 53 present devices without problem codes after the
-unmodified signed VMClock recognition INF and Viosock package are installed.
-
-Its unattended SYSTEM task passes both network routes after full and
-differential restores. The protected checks retain PCR7, a persistent TPM object
-and PK/KEK/db/dbx digests; authenticated private-variable updates, deletion,
-tamper, wrong-owner and replay checks also pass. The stopped disk and
-TPM/variable stores form a matched set. An earlier four-second variable-service
-stall remains unexplained; the helper fix and subsequent passing boots do not
-establish its cause. The host tests do not establish an untraced storage-latency
-or reclaim/OOM bound.
-
-## Reproduce
-
-Follow the [normal test environment](../tests/README.md) and run the maintained
-tool and platform tests:
+Use the [normal test environment](../tests/README.md). The VMM unit suite needs
+its documented swtpm/libtpms and ACPICA inputs; standalone tools have separate
+workspaces. Run the existing build and platform entry points from the repository
+root:
 
 ```sh
 ./tools/devtool test -- \
@@ -261,33 +82,123 @@ tool and platform tests:
 ./tools/devtool test -- integration_tests/functional/test_platform_devices.py
 ```
 
-Omit `--binary-dir` for the platform module so its fixtures build both the
-Windows and default counterparts. See the
-[test guide](../tests/README.md#standalone-tools-and-platform-devices) for the
-required swtpm/ACPICA inputs and standalone workspaces.
+Omit `--binary-dir` for the platform module so its fixtures build both default
+and Windows counterparts. These commands are regression entry points, not a
+claim that the latest candidate has passed every test. See the
+[test requirements](../tests/README.md#standalone-tools-and-platform-devices).
 
-For Windows runtime tests, prepare authorised media with the
-[media tools](../tools/windows/README.md), then use the maintained
-[egress controllers and offline verifiers](../tools/windows/egress/README.md).
-Use an independent disk and matching stopped TPM/variable stores. Complete
-driver installation before testing. Record actual VMM, firmware, media and
-driver hashes, guest build, snapshot format and host kernel. Preserve phase
-logs, proxy accounting, public security baselines and offline data hashes.
-Screenshots and process exit status alone do not establish network or restore
-success.
+The affected USB and console tests require the Windows feature. On an AMD64
+Linux host with the musl target and build prerequisites installed, reproduce the
+focused checks and supported release profile with:
 
-## Open qualification
+```sh
+cargo test --locked --target x86_64-unknown-linux-musl --features windows \
+  -p vmm --lib devices::usb:: -- --test-threads=1
+cargo test --locked --target x86_64-unknown-linux-musl --features windows \
+  -p vmm --lib device_manager::console_usb::tests:: -- --test-threads=1
+cargo test --locked --target x86_64-unknown-linux-musl --features windows \
+  -p vmm --lib device_manager::console_server:: -- --test-threads=1
+cargo clippy --locked --target x86_64-unknown-linux-musl --features windows \
+  -p vmm -p firecracker --all-targets -- -D warnings
+cargo build --locked --target x86_64-unknown-linux-musl --features windows \
+  -p firecracker --release
+```
 
-Standard Windows 11 Pro, Server Core and Desktop, and the remaining fresh
-installations remain unqualified. The recorded format-33 guest matrix is
-incomplete and does not qualify format 34. The earlier memory comparison against
-fork baseline `658ff27e` exceeded the normal performance gates. The final
-candidate must pass unchanged gates against the registered consumer base
-`c6655e5`, with default and Windows builds measured separately.
+For the recorded source, the three test selectors run 18, 5 and 18 tests. Reject
+zero selected tests. An all-features release build enables fuzzing and is not
+the Windows release recipe. The standalone XP display probe and its 16-case host
+sequence remain retained validation artifacts; they are not yet a maintained
+public test entry point. A fresh display acceptance run needs those reviewed
+sources and build inputs, all RGB oracles, the stopped case files and the full
+probe log. The console bridge tests do not replace that guest check.
 
-The native AMD64 host runs Linux 7.0.0-60009-generic. Its results do not qualify
-the supported host-kernel matrix. [ARM64 results](windows-arm64.md) are
-historical emulated tests; current cross-builds do not qualify native ARM64
-Windows installation, input, security or egress. Cross-host migration and
-firmware-stage snapshots also remain unvalidated. Tokoloshe's Windows job
-runtime is outside this guest-platform and egress scope.
+### Guest egress and restore
+
+Prepare authorised media with the [media tools](../tools/windows/README.md).
+Complete driver installation and shut down before using an isolated test disk.
+Follow the [egress procedure](../tools/windows/egress/README.md) for the exact
+probe build, guest configuration, environment variables and offline-verifier
+inputs. Legacy user-mode probes use the documented VC-LTL5/YY-Thunks link
+profiles; a successful cross-link is not guest runtime qualification.
+
+Choose one route. TAP uses the maintained network setup with a guest NIC and no
+vsock; retain its network namespace through both restores. CONNECT uses the
+[real Tokoloshe proxy](../tools/windows/legacy-vsock/README.md) and vsock with
+no guest NIC. After setting the route's documented environment, run its
+controller as the ordinary test user:
+
+```sh
+# TAP
+timeout --signal=TERM --kill-after=120s 900 \
+  bash tools/windows/egress/tap-check.sh
+# CONNECT, in its separately prepared test directory/environment
+timeout --signal=TERM --kill-after=120s 900 \
+  bash tools/windows/legacy-vsock/check.sh
+```
+
+The TAP controller's public launcher uses sudo for its VMMs and editor. CONNECT
+runs the VMM, proxy and sidecar as the same ordinary user. After the controller
+has stopped and the disk is closed, run the matching offline verifier in a root
+shell with the same documented verification environment:
+
+```sh
+# TAP
+bash tools/windows/egress/tap-verify.sh
+# CONNECT
+bash tools/windows/egress/connect-verify.sh
+```
+
+Require cold, full and differential phase proofs, both actual snapshot version
+headers, fresh guest output after each restore, byte-equal transfers, stored
+data and final S5. CONNECT also requires six sealed accounting entries and
+zero-payload policy denials. Enable the documented generation checks where
+supported; XP uses polling, not notifications. For protected guests, use the
+secure-state and read-only BitLocker procedures in the same egress guide. Retain
+the final disk and its matching stopped variable/TPM stores together.
+
+## Recorded format33 integration candidate
+
+Format 33 and older results are historical. Their installed XP/Windows 7 TAP and
+CONNECT passes, modern Windows installation and protected-runtime checks do not
+qualify format 34 or the latest source. Earlier Secure Boot/TPM results do not
+establish TPM-sealed recovery or attestation; recorded BitLocker protection was
+off. The existing validation artifacts retain exact binary, firmware, media,
+driver and source identities, failed runs and full logs. Rebuild snapshots for
+the selected format; do not load an older saved state as an upgrade test.
+
+### Recorded Windows 7 reference
+
+The historical format-33 Enterprise SP1 x64 reference retains signed NetKVM and
+Microsoft generation-counter drivers after servicing and restart. Its TAP run
+passes cold/full/differential transfer, storage and generation checks, including
+both prearmed child completions. Wrong probe hashes and existing output paths
+are rejected without changing the earlier data. A separate CONNECT clone passes
+fresh connections in all three phases with the external test-signed Viosock
+profile, six sealed accounting entries and final S5. These installed-reference
+results do not qualify another policy, guest image or VMM.
+
+### Recorded Windows XP reference
+
+The historical format-33 Professional SP3 x86 reference passes cold queries with
+Microsoft generation-counter 6.3.9600.17831 and running KMDF. Separate TAP and
+CONNECT clones pass cold/full/differential transfers, polling with three
+distinct generation IDs, final storage and S5. TAP uses normal NetKVM warning
+consent; the separate default signature-policy check fails. Its original offline
+collector also remains failed; a separate parser accepts the retained
+trailing-space marker. CONNECT passes three bidirectional 2 MiB transfers and
+three zero-payload denials with six sealed accounting entries. These results use
+the retained original reader and host inputs; a rebuilt reader needs new
+qualification.
+
+The [ARM64 guide](windows-arm64.md) describes the separate firmware path and
+historical emulated results. Native ARM64 installation, input, security and
+network/restore qualification remain open. Cross-host migration and
+firmware-stage snapshots are also unvalidated.
+
+Performance acceptance remains open: earlier memory comparisons exceeded the
+unchanged thresholds and do not measure the current default Linux profile.
+Measure default and Windows builds separately against the registered consumer
+base `c6655e5`, using the existing gates and supported host matrix. Egress
+passes and process/snapshot consistency do not establish power-loss durability,
+a latency bound or production readiness. Tokoloshe's Windows job runtime is
+outside this guest-platform and egress scope.
