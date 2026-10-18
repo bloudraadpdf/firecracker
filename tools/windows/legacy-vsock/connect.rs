@@ -102,11 +102,37 @@ impl Socket {
             data = &data[count as usize..];
         }
     }
-    fn read(&self, mut data: &mut [u8]) {
+    fn read(&self, mut data: &mut [u8], chunk: Option<usize>) {
+        let requested = data.len();
         while !data.is_empty() {
             // SAFETY: the socket is live and callers supply bounded writable message slices.
             let count = unsafe { recv(self.0, data.as_mut_ptr(), data.len() as i32, 0) };
-            require(count > 0, b"recv");
+            if count <= 0 {
+                // SAFETY: WSAGetLastError takes no arguments. Capture it before output;
+                // Winsock defines this value for SOCKET_ERROR, not for EOF.
+                let wsa = unsafe { WSAGetLastError() };
+                output(b"FAIL recv count=");
+                if count < 0 {
+                    output(b"-");
+                }
+                number(count.unsigned_abs());
+                output(b" wsa=");
+                number(wsa as u32);
+                output(b" wsa_valid=");
+                output(if count == -1 { b"1" } else { b"0" });
+                match chunk {
+                    Some(chunk) => {
+                        output(b" context=payload chunk=");
+                        number(chunk as u32);
+                    }
+                    None => output(b" context=header"),
+                }
+                output(b" offset=");
+                number((requested - data.len()) as u32);
+                output(b"\r\n");
+                // SAFETY: ExitProcess takes no pointers and does not return.
+                unsafe { ExitProcess(1) }
+            }
             data = &mut data[count as usize..];
         }
     }
@@ -115,7 +141,7 @@ impl Socket {
         let mut len = 0;
         loop {
             require(len < head.len(), b"header length");
-            self.read(&mut head[len..len + 1]);
+            self.read(&mut head[len..len + 1], None);
             output(&head[len..len + 1]);
             len += 1;
             if head[..len].ends_with(b"\r\n\r\n") {
@@ -180,7 +206,7 @@ fn run() {
                 *byte = (i.wrapping_mul(37) ^ chunk ^ (chunk >> 8)) as u8;
             }
             allowed.write(&sent);
-            allowed.read(&mut received);
+            allowed.read(&mut received, Some(chunk));
             require(sent == received, b"payload equality");
         }
         output(b"PASS LEGACY_CONNECT bytes=2097152\r\n");
