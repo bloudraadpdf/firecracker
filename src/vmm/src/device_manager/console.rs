@@ -271,6 +271,32 @@ impl DeviceManager {
     }
 
     #[cfg(target_arch = "x86_64")]
+    pub(crate) fn update_optical_drive(
+        &mut self,
+        config: crate::vmm_config::console::OpticalDriveConfig,
+    ) -> io::Result<()> {
+        let console = self
+            .console
+            .as_mut()
+            .ok_or_else(|| io::Error::other("console is absent"))?;
+        let channel = console
+            .config
+            .optical_drives
+            .iter()
+            .position(|drive| drive.drive_id == config.drive_id)
+            .ok_or_else(|| io::Error::other("optical drive is absent"))?;
+        console
+            .optical
+            .as_ref()
+            .ok_or_else(|| io::Error::other("optical controller is absent"))?
+            .lock()
+            .unwrap()
+            .replace_media(channel, config.path_on_host.as_deref())?;
+        console.config.optical_drives[channel] = config;
+        Ok(())
+    }
+
+    #[cfg(target_arch = "x86_64")]
     pub fn attach_console(
         &mut self,
         vm: &Arc<KvmVm>,

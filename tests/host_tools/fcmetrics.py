@@ -358,6 +358,9 @@ def validate_fc_metrics(metrics):
             "missed_write_count",
         ]
 
+    if {"optical_count", "optical_fails"} & metrics["put_api_requests"].keys():
+        firecracker_metrics["put_api_requests"].extend(["optical_count", "optical_fails"])
+
     # add vhost-user metrics to the schema if applicable
     vhost_user_devices = []
     for metrics_name in metrics.keys():
