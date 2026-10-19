@@ -5,10 +5,13 @@
 
 pub mod memory;
 pub mod protocol;
+pub mod surface;
 pub mod transport;
 
 #[cfg(test)]
 mod memory_tests;
+#[cfg(test)]
+mod surface_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

@@ -193,6 +193,10 @@ pub struct Rect {
 }
 
 impl Rect {
+    pub fn bounds(&self) -> [i32; 4] {
+        [self.left, self.top, self.right, self.bottom]
+    }
+
     pub fn decode(data: &[u8]) -> Result<Self, DecodeError> {
         let rect = Self {
             top: i32::from_le_bytes(bytes(data, 0)?),
