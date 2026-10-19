@@ -83,8 +83,8 @@ The current implementation relies on the
 
 ## Snapshot compatibility
 
-This fork uses format39.0.0. The console saves its optical drive IDs/paths and
-the controller saves independent primary/secondary channel state. Restore
+This fork uses format40.0.0. ATAPI saves pending unit attention and media events.
+The console saves its optical drive IDs/paths and the controller saves independent primary/secondary channel state. Restore
 validates the channel layout. ATAPI state stores optional medium identity/size
 and the tray position separately. An empty drive has no ISO identity or file;
 restore rejects substituting a medium for an empty saved drive, or the reverse.
@@ -107,7 +107,7 @@ LEDs. Console restore reuses that saved PCI backend. The AMD64 display saves two
 MMIO mappings and a typed optional ROM containing its bytes, mapping and PCI ROM
 BAR state; an absent ROM has no mapping or ROM BAR. The console's saved
 configuration also records the optional ROM path. Format29.0.0 through
-format38.0.0 files require their matching older binaries; format39 does not
+format39.0.0 files require their matching older binaries; format40 does not
 decode them. Snapshot state remains specific to its CPU architecture.
 
 The conventional PC event state also saves GPE0 status and enable bits. Its VM
@@ -116,7 +116,7 @@ without a separate GED interrupt or allocation. Restore uses the saved complete
 PC hardware pair, validates its route before constructing devices, writes the
 new generation ID, then latches the event before vCPUs resume. Default Linux and
 ARM hardware retain the dedicated GED route. Both Cargo builds use the same
-format39 schema; no format34 decoder or migration is provided.
+format40 schema; no format34 decoder or migration is provided.
 
 ### Host kernel
 
