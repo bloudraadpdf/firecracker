@@ -16,6 +16,7 @@ const MAX_BACKING: usize = MAX_RESOURCES * MAX_BACKING_ENTRIES;
 const MAX_SCANOUT_PIXELS: usize = MAX_RESOURCE_BYTES / 4;
 const CURSOR_PIXELS: usize = 64 * 64;
 
+#[cfg(feature = "windows")]
 #[derive(Clone, Debug)]
 pub(super) struct Resource {
     pub width: u32,

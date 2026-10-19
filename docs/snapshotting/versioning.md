@@ -83,7 +83,12 @@ The current implementation relies on the
 
 ## Snapshot compatibility
 
-This fork uses format34.0.0. VMClock state is optional and records actual device
+This fork uses format35.0.0. The format adds optional virtio GPU state to both
+transport inventories, including queue progress, display-change events and the
+bounded renderer payload. The snapshot reader permits at most 128 MiB, including
+GPU resources, scanout, backing entries and the VGA console.
+
+VMClock state is optional and records actual device
 presence; restore reconstructs the machine configuration from that presence
 without allocating or notifying an absent clock. The x86 PIT state is optional
 and records whether the timer exists; restore uses that saved hardware choice.
@@ -94,7 +99,7 @@ LEDs. Console restore reuses that saved PCI backend. The AMD64 display saves two
 MMIO mappings and a typed optional ROM containing its bytes, mapping and PCI ROM
 BAR state; an absent ROM has no mapping or ROM BAR. The console's saved
 configuration also records the optional ROM path. Format29.0.0 through
-format33.0.0 files require their matching older binaries; format34 does not
+format34.0.0 files require their matching older binaries; format35 does not
 decode them. Snapshot state remains specific to its CPU architecture.
 
 The conventional PC event state also saves GPE0 status and enable bits. Its VM
@@ -103,7 +108,7 @@ without a separate GED interrupt or allocation. Restore uses the saved complete
 PC hardware pair, validates its route before constructing devices, writes the
 new generation ID, then latches the event before vCPUs resume. Default Linux and
 ARM hardware retain the dedicated GED route. Both Cargo builds use the same
-format34 schema; no format33 decoder or migration is provided.
+format35 schema; no format34 decoder or migration is provided.
 
 ### Host kernel
 

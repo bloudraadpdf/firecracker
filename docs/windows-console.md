@@ -411,24 +411,26 @@ Resource pixels and backing entries use bounded flat arrays. Decoding checks
 array lengths before allocating their contents; resource ranges must cover those
 arrays in order, without overlaps, gaps or unused trailing data.
 
-GPU PCI attachment, firmware and device snapshot integration are not implemented
-yet. These components do not change the guest display or snapshot format. VGA
-remains the configured display; Windows virtio display drivers cannot bind to it.
+The GPU device implements modern feature negotiation, queue activation and
+notifications, display-change events, reset and device checkpoints. Device state
+includes queue progress and pending display events; transport restore reactivates
+it. PCI/VGA attachment and console routing are not implemented yet. VGA remains
+the configured display; Windows virtio display drivers cannot bind to it.
 
 AMD64 console snapshots contain display memory and registers, keyboard/mouse
 queues, held input, pending releases, keyboard LEDs and pending lock updates,
 USB controller/HID state, PCI state, optical transfer state and media identity.
-The current snapshot format is 34.0.0. Display state adds about 16 MiB; the
-bounded snapshot reader accepts at most 32 MiB. The guest disk remains a
-separate artifact, as with ordinary Firecracker snapshots.
+The current snapshot format is 35.0.0. Display state adds about 16 MiB; the
+bounded snapshot reader accepts at most 128 MiB, including GPU state. The guest
+disk remains a separate artifact, as with ordinary Firecracker snapshots.
 
 ARM64 console snapshots save display/configuration and one typed virtio-input
 state in the PCI device manager. The console reuses that backend on restore; it
 does not save a second held-key or LED state. Pending frames, partial-frame
 cursor, position, held releases and guest/pending lock LEDs travel with Input.
 Missing, stray or mismatched console/input topology is rejected before backend
-attachment. Format29 through format33 snapshots require their matching older
-binaries; format34 has no decoder for them. Snapshots do not move between AMD64
+attachment. Format29 through format34 snapshots require their matching older
+binaries; format35 has no decoder for them. Snapshots do not move between AMD64
 and ARM64.
 
 The historical format31 Windows 11 test edition was IoT Enterprise LTSC 2024. It

@@ -357,7 +357,7 @@ impl Vmm {
         self.device_manager
             .for_each_virtio_device(|device_type, device| match device_type {
                 // Input has no independent settings; the console configuration is reported below.
-                VirtioDeviceType::Input => (),
+                VirtioDeviceType::Input | VirtioDeviceType::Gpu => (),
                 VirtioDeviceType::Block => {
                     if let Some(b) = device.as_any().downcast_ref::<Block>() {
                         block.push(b.config());
