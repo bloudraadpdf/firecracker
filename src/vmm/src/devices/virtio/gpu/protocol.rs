@@ -54,7 +54,7 @@ impl Header {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ResourceId(NonZeroU32);
 
 impl ResourceId {

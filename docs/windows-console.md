@@ -387,14 +387,20 @@ would otherwise select installation media again.
 
 ## State and platform limits
 
-The `windows` feature contains the first stage of a virtio-gpu 2D backend: a
-decoder for control and cursor requests. It follows
+The `windows` feature contains a virtio-gpu 2D command decoder and software
+renderer. They follow
 [VIRTIO 1.3, section 5.7.6](https://docs.oasis-open.org/virtio/virtio/v1.3/virtio-v1.3.html).
 Backing lists are limited to 8192 entries. The decoder checks request sizes,
 queue selection and nonzero resource identifiers, and preserves requested fence
-identifiers in response headers. It does not attach a GPU, allocate graphics
-resources or change the guest display. VGA remains the configured display;
-Windows virtio display drivers cannot bind to it.
+identifiers in response headers. The renderer supports one cropped scanout,
+scattered guest backing, explicit rectangular transfers and flushes, eight
+32-bit pixel formats and a 64x64 cursor. A resource is limited to 32 MiB and
+4096 pixels per dimension; all resources together are limited to 64 MiB and
+64 resource identifiers. Cursor colours use premultiplied alpha.
+
+GPU PCI attachment, firmware integration and snapshot state are not implemented
+yet. These components do not change the guest display. VGA remains the configured
+display; Windows virtio display drivers cannot bind to it.
 
 AMD64 console snapshots contain display memory and registers, keyboard/mouse
 queues, held input, pending releases, keyboard LEDs and pending lock updates,
