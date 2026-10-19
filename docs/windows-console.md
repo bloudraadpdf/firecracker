@@ -309,7 +309,19 @@ follow the guest's resulting framebuffer size.
 For automatic Windows changes, install the matching upstream VioGpu resolution
 service and session helper supplied with the external driver package. The
 [driver's configuration handler](https://github.com/virtio-win/kvm-guest-drivers-windows/blob/d92b9c073ec1108f51846d0bd109c5796b46fd36/viogpu/viogpudo/viogpudo.cpp)
-notifies that service after reading the new display information. A preferred-size
+notifies that service after reading the new display information. Register the
+service once from elevated PowerShell. For example, with the matching Windows 10
+package directory on drive D:
+
+```powershell
+$driver = 'D:\viogpudo\w10\amd64'
+Copy-Item "$driver\vgpusrv.exe", "$driver\viogpuap.exe" "$env:windir\System32\"
+& "$env:windir\System32\vgpusrv.exe" -i
+Get-Service vgpusrv
+```
+
+Keep both files in System32: the service launches `viogpuap.exe` for each user
+session. Use the package for the guest release and architecture. A preferred-size
 request alone does not prove that the desktop has changed; inspect the returned
 console frame. No custom guest service or display driver is built into Firecracker.
 

@@ -44,6 +44,33 @@ The result does not qualify Windows 11, fresh installation,
 browser/VNC/native-viewer interaction, host-requested resize, differential GPU
 restore or the remaining Toets integration.
 
+## Host-requested display modes
+
+Source `7d3bab807`, GNU development binary `527be718`, requests preferred display
+sizes through `PATCH /display`. One Windows 10 reference session uses the
+existing VioGpu helpers from pinned virtio-win 0.1.302. Both executables have valid
+Microsoft Windows Hardware Compatibility Publisher signatures and match the
+retained package hashes. The upstream `vgpusrv` service is running with automatic
+startup; its session helper `viogpuap` remains present in all 38 observations.
+
+The actual guest dimensions and captured native console frames follow:
+
+```text
+1024x768 -> 1280x720 -> 1366x768 -> 1920x1080 -> 1024x768
+```
+
+The 1366x768 request tests a custom width. An invalid 4096x4096 request returns 400
+without changing the 1024x768 scanout. Repeating 1024x768 returns 204 and preserves
+that scanout. All 60 present PnP devices report healthy; Windows completes S5 and
+Firecracker exits0. The stopped disk is collected read-only and the loop is
+detached. No new disk clone or snapshot RAM file is required.
+
+This run retains the earlier firmware and installed kernel drivers and uses
+`--no-seccomp`. It proves these host-requested changes with the external Windows
+helpers, not sandboxing, other Windows versions, fresh installs, viewer routes
+across mode changes or real format40 guest restore. Component tests cover saved
+preferences and pending notifications. The guest clock offset remains unchanged.
+
 ## Runtime optical media candidate
 
 Source `d8e5bed69`, GNU development binary `6a307899`, cold-boots the same
