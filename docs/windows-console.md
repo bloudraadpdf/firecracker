@@ -407,6 +407,12 @@ the VM lifetime; closing it must not stop the VM. Reconnect to the replacement
 process after reboot. Eject before booting the installed disk when firmware
 would otherwise select installation media again.
 
+The ATAPI core and PCI wrapper can represent a drive with no inserted disc. It
+identifies normally, reports no medium, and preserves that state across restore.
+Closing an empty tray does not create a medium. The startup configuration still
+attaches the existing single image; multi-drive configuration and host media
+replacement remain the next optical increment.
+
 ## State and platform limits
 
 The `windows` feature contains a virtio-gpu 2D command decoder, queue processor
@@ -452,7 +458,7 @@ installed-reference matrix covers the legacy VGA profile.
 AMD64 console snapshots contain display memory and registers, keyboard/mouse
 queues, held input, pending releases, keyboard LEDs and pending lock updates,
 USB controller/HID state, PCI state, optical transfer state and media identity.
-The current snapshot format is 37.0.0. Display state adds about 16 MiB; the
+The current snapshot format is 38.0.0. Display state adds about 16 MiB; the
 bounded snapshot reader accepts at most 128 MiB, including GPU state. The guest
 disk remains a separate artifact, as with ordinary Firecracker snapshots.
 
@@ -461,8 +467,8 @@ state in the PCI device manager. The console reuses that backend on restore; it
 does not save a second held-key or LED state. Pending frames, partial-frame
 cursor, position, held releases and guest/pending lock LEDs travel with Input.
 Missing, stray or mismatched console/input topology is rejected before backend
-attachment. Format29 through format36 snapshots require their matching older
-binaries; format37 has no decoder for them. Snapshots do not move between AMD64
+attachment. Format29 through format37 snapshots require their matching older
+binaries; format38 has no decoder for them. Snapshots do not move between AMD64
 and ARM64.
 
 The historical format31 Windows 11 test edition was IoT Enterprise LTSC 2024. It

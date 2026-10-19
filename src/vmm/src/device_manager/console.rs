@@ -332,7 +332,7 @@ impl DeviceManager {
             Some(path) => Some(OpticalDevice::attach(
                 vm,
                 pci,
-                path,
+                Some(path),
                 state.and_then(|state| state.optical.as_ref()),
             )?),
             None => None,
