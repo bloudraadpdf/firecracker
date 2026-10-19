@@ -58,6 +58,13 @@ struct MediaState {
     size: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum MediaEvent {
+    None,
+    NewMedia,
+    Removal,
+}
+
 /// Controller state; media identity must be a verified digest of the opened ISO.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AtapiState {
@@ -69,6 +76,8 @@ pub struct AtapiState {
     features: u8,
     pending_irq: bool,
     sense: [u8; 3],
+    unit_attention: bool,
+    media_event: MediaEvent,
     transfer: Transfer,
 }
 
@@ -97,7 +106,33 @@ pub struct Atapi {
 impl Atapi {
     /// Creates a drive with optional verified media and a closed tray.
     pub fn new(media: Option<(File, String)>, irq: EventFd) -> io::Result<Self> {
-        let (media, media_state) = match media {
+        let (media, media_state) = Self::validate_media(media)?;
+        let mut device = Self {
+            media,
+            irq,
+            legacy_irq_enabled: true,
+            state: AtapiState {
+                media: media_state,
+                tray_open: false,
+                locked: false,
+                registers: [0; 8],
+                control: 0,
+                features: 0,
+                pending_irq: false,
+                sense: [0; 3],
+                unit_attention: false,
+                media_event: MediaEvent::None,
+                transfer: Transfer::Idle,
+            },
+        };
+        device.reset();
+        Ok(device)
+    }
+
+    fn validate_media(
+        media: Option<(File, String)>,
+    ) -> io::Result<(Option<File>, Option<MediaState>)> {
+        Ok(match media {
             Some((media, identity)) => {
                 let metadata = media.metadata()?;
                 let size = metadata.len();
@@ -115,25 +150,7 @@ impl Atapi {
                 (Some(media), Some(MediaState { identity, size }))
             }
             None => (None, None),
-        };
-        let mut device = Self {
-            media,
-            irq,
-            legacy_irq_enabled: true,
-            state: AtapiState {
-                media: media_state,
-                tray_open: false,
-                locked: false,
-                registers: [0; 8],
-                control: 0,
-                features: 0,
-                pending_irq: false,
-                sense: [0; 3],
-                transfer: Transfer::Idle,
-            },
-        };
-        device.reset();
-        Ok(device)
+        })
     }
 
     /// Selects the fixed legacy IRQ; native PCI delivery is managed by the wrapper.
@@ -155,6 +172,12 @@ impl Atapi {
 
     /// Ejects idle media unless the guest has prevented removal.
     pub fn eject(&mut self) -> io::Result<()> {
+        self.check_media_change()?;
+        self.set_tray_open(true);
+        Ok(())
+    }
+
+    fn check_media_change(&self) -> io::Result<()> {
         if self.state.locked {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -167,8 +190,38 @@ impl Atapi {
                 "optical transfer is active",
             ));
         }
-        self.state.tray_open = true;
         Ok(())
+    }
+
+    /// Replaces host media atomically; None removes the disc and opens the tray.
+    pub fn replace_media(&mut self, media: Option<(File, String)>) -> io::Result<()> {
+        self.check_media_change()?;
+        let (media, state) = Self::validate_media(media)?;
+        let changed = self.state.media != state || (state.is_some() && self.state.tray_open);
+        self.media = media;
+        self.state.media = state;
+        self.state.tray_open = self.media.is_none();
+        if changed {
+            self.media_changed();
+        }
+        Ok(())
+    }
+
+    fn set_tray_open(&mut self, open: bool) {
+        let present = self.state.media_present();
+        self.state.tray_open = open;
+        if present != self.state.media_present() {
+            self.media_changed();
+        }
+    }
+
+    fn media_changed(&mut self) {
+        self.state.unit_attention = true;
+        self.state.media_event = if self.state.media_present() {
+            MediaEvent::NewMedia
+        } else {
+            MediaEvent::Removal
+        };
     }
 
     /// Saves in-flight PIO data, task-file registers and media state.
@@ -525,6 +578,12 @@ impl Atapi {
             self.fail(5, 0x25);
             return;
         }
+        if !matches!(packet[0], 0x03 | 0x12 | 0x4a)
+            && std::mem::take(&mut self.state.unit_attention)
+        {
+            self.fail(6, 0x28);
+            return;
+        }
         if !self.state.media_present()
             && matches!(packet[0], 0x00 | 0x25 | 0x28 | 0xa8 | 0x43 | 0x2b)
         {
@@ -534,7 +593,11 @@ impl Atapi {
         match packet[0] {
             0x00 | 0x2b | 0xbb => self.complete(),
             0x03 => {
-                let [key, asc, ascq] = self.state.sense;
+                let [key, asc, ascq] = if std::mem::take(&mut self.state.unit_attention) {
+                    [6, 0x28, 0]
+                } else {
+                    self.state.sense
+                };
                 let mut bytes = vec![0; 18];
                 bytes[0] = 0x70;
                 bytes[2] = key;
@@ -558,7 +621,7 @@ impl Atapi {
                         self.fail(5, 0x53);
                         return;
                     }
-                    self.state.tray_open = packet[4] & 1 == 0;
+                    self.set_tray_open(packet[4] & 1 == 0);
                 }
                 self.complete();
             }
@@ -592,13 +655,22 @@ impl Atapi {
             0x1a | 0x5a => self.mode_sense(packet),
             0x43 => self.read_toc(packet),
             0x4a if packet[1] & 1 != 0 => {
+                let allocation = usize::from(u16::from_be_bytes([packet[7], packet[8]]));
                 let bytes = if packet[4] & 0x10 != 0 {
+                    let event = match self.state.media_event {
+                        MediaEvent::None => 0,
+                        MediaEvent::NewMedia => 2,
+                        MediaEvent::Removal => 3,
+                    };
+                    if allocation > 4 {
+                        self.state.media_event = MediaEvent::None;
+                    }
                     vec![
                         0,
                         6,
                         4,
                         0x10,
-                        0,
+                        event,
                         u8::from(self.state.tray_open)
                             | (u8::from(self.state.media_present()) << 1),
                         0,
@@ -607,11 +679,9 @@ impl Atapi {
                 } else {
                     vec![0, 2, 0x80, 0x10]
                 };
-                self.response(
-                    bytes,
-                    usize::from(u16::from_be_bytes([packet[7], packet[8]])),
-                );
+                self.response(bytes, allocation);
             }
+            0x4a => self.fail(5, 0x24),
             0x2a | 0xaa => self.fail(7, 0x27),
             _ => self.fail(5, 0x20),
         }
@@ -1010,6 +1080,91 @@ mod tests {
     }
 
     #[test]
+    fn replacement_is_atomic_and_preserves_pending_notifications_on_restore() {
+        let (mut device, _, original) = fixture();
+        let (mut replacement, _, _) = fixture();
+        let media = replacement.media.take().unwrap();
+        media.write_all_at(b"new medium", 0).unwrap();
+        packet(&mut device, &[0x1e, 0, 0, 0, 1], 2048);
+        assert_eq!(
+            device.replace_media(None).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        packet(&mut device, &[0x1e], 2048);
+        packet(&mut device, &[0x28, 0, 0, 0, 0, 0, 0, 0, 1], 2048);
+        assert_eq!(
+            device.replace_media(None).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert_eq!(receive(&mut device), original[..2048]);
+        let invalid = memfd::MemfdOptions::default()
+            .create("invalid-iso")
+            .unwrap()
+            .into_file();
+        device
+            .replace_media(Some((invalid, "invalid".into())))
+            .unwrap_err();
+        assert_eq!(
+            device.state.media.as_ref().unwrap().identity,
+            "verified-test-media"
+        );
+        assert!(!device.state.unit_attention);
+        device
+            .replace_media(Some((media.try_clone().unwrap(), "replacement".into())))
+            .unwrap();
+        let saved = bitcode::deserialize(&bitcode::serialize(&device.save()).unwrap()).unwrap();
+        let mut restored = Atapi::restore(
+            Some((media, "replacement".into())),
+            EventFd::new(libc::EFD_NONBLOCK).unwrap(),
+            &saved,
+        )
+        .unwrap();
+        packet(&mut restored, &[0x12, 0, 0, 0, 36], 2048);
+        receive(&mut restored);
+        for allocation in [0, 4, 5, 8] {
+            packet(
+                &mut restored,
+                &[0x4a, 1, 0, 0, 0x10, 0, 0, 0, allocation],
+                2048,
+            );
+            let event = receive(&mut restored);
+            if allocation > 4 {
+                assert_eq!(event[4], if allocation == 5 { 2 } else { 0 });
+            }
+            assert!(restored.state.unit_attention);
+        }
+        packet(&mut restored, &[3, 0, 0, 0, 18], 2048);
+        let sense = receive(&mut restored);
+        assert_eq!((sense[2], sense[12]), (6, 0x28));
+        packet(&mut restored, &[0x28, 0, 0, 0, 0, 0, 0, 0, 1], 2048);
+        assert_eq!(&receive(&mut restored)[..10], b"new medium");
+        restored.replace_media(None).unwrap();
+        assert!(restored.media.is_none());
+        assert!(restored.state.tray_open);
+        assert!(restored.state.media.is_none());
+        packet(&mut restored, &[0], 2048);
+        assert_eq!(restored.state.sense, [6, 0x28, 0]);
+        packet(&mut restored, &[0], 2048);
+        assert_eq!(restored.state.sense, [2, 0x3a, 0]);
+    }
+
+    #[test]
+    fn host_eject_notifies_the_guest_before_reporting_no_medium() {
+        let (mut device, _, _) = fixture();
+        device.eject().unwrap();
+        packet(&mut device, &[0x4a, 1, 0, 0, 0x10, 0, 0, 0, 8], 2048);
+        assert_eq!(receive(&mut device), [0, 6, 4, 0x10, 3, 1, 0, 0]);
+        packet(&mut device, &[0], 2048);
+        assert_eq!(status(&mut device), READY | ERROR);
+        assert_eq!(device.state.sense, [6, 0x28, 0]);
+        packet(&mut device, &[3, 0, 0, 0, 18], 2048);
+        let sense = receive(&mut device);
+        assert_eq!((sense[2], sense[12]), (6, 0x28));
+        packet(&mut device, &[0], 2048);
+        assert_eq!(device.state.sense, [2, 0x3a, 0]);
+    }
+
+    #[test]
     fn host_eject_obeys_guest_lock_and_active_transfer() {
         let (mut device, _, _) = fixture();
         packet(&mut device, &[0x1e, 0, 0, 0, 1], 2048);
@@ -1038,9 +1193,13 @@ mod tests {
         packet(&mut device, &[0x1e], 2048);
         packet(&mut device, &[0x1b, 0, 0, 0, 2], 2048);
         packet(&mut device, &[0x25], 2048);
+        assert_eq!(device.state.sense, [6, 0x28, 0]);
+        packet(&mut device, &[0x25], 2048);
         assert_eq!(status(&mut device), READY | ERROR);
         assert_eq!(device.state.sense, [2, 0x3a, 0]);
         packet(&mut device, &[0x1b, 0, 0, 0, 3], 2048);
+        packet(&mut device, &[0], 2048);
+        assert_eq!(device.state.sense, [6, 0x28, 0]);
         packet(&mut device, &[0], 2048);
         assert_eq!(status(&mut device), READY);
     }

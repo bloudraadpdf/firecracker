@@ -52,7 +52,8 @@ source `95aaccfb` and using snapshot format 34. Its default counterpart is
 these binaries. The table records completed installed-reference checks on this
 runtime separately from unchanged component results and remaining edition gates.
 
-Current source uses snapshot format 39 for two-channel optical state. The
+Current source uses snapshot format 40 for two-channel optical state and pending
+media-change notifications. The
 format-34 baseline below does not qualify the GPU or format-39 restore path.
 The GPU candidate above records actual format-37 restore evidence; it does not
 qualify the later optical state format.

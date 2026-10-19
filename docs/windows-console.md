@@ -302,7 +302,17 @@ reserve their legacy IRQs. The PCI I/O-enable bit gates all ports.
 
 Each drive supports read-only PIO ATAPI, eject and reload of its current medium.
 DMA, audio and recording are not provided. The existing bridge eject command
-addresses the primary drive. Runtime media replacement is the next increment.
+addresses the primary drive. Host media changes require an idle, unlocked drive.
+A failed update preserves its current medium. Changes report unit attention
+(`06/28/00`) before media-dependent commands proceed. INQUIRY and media-event
+polls leave that attention pending; REQUEST SENSE can report it directly.
+
+Media-event polling reports the latest insertion or removal and current tray
+status. Header-only polls retain the event. A full poll consumes the event
+without clearing unit attention. This follows the
+[MMC-4 section 6.7 polling rules](https://13thmonkey.org/documentation/SCSI/mmc4r05.pdf).
+Pending notifications survive snapshots. The runtime media API follows in a
+separate increment.
 
 BAR size probing, relocation and mode switching follow the
 [PCI IDE 1.0 rules](https://www.isdaman.com/alsos/hardware/hdc/pciide.pdf).
@@ -476,8 +486,8 @@ state in the PCI device manager. The console reuses that backend on restore; it
 does not save a second held-key or LED state. Pending frames, partial-frame
 cursor, position, held releases and guest/pending lock LEDs travel with Input.
 Missing, stray or mismatched console/input topology is rejected before backend
-attachment. Format29 through format38 snapshots require their matching older
-binaries; format39 has no decoder for them. Snapshots do not move between AMD64
+attachment. Format29 through format39 snapshots require their matching older
+binaries; format40 has no decoder for them. Snapshots do not move between AMD64
 and ARM64.
 
 The historical format31 Windows 11 test edition was IoT Enterprise LTSC 2024. It
