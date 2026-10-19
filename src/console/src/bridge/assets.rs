@@ -1,11 +1,13 @@
 // Copyright 2026 Bloudraad.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::invalid;
 use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+
 use tiny_http::{Header, Method, Response, Server, StatusCode};
+
+use crate::invalid;
 
 fn resolve(root: &Path, url: &str) -> io::Result<PathBuf> {
     let path = url.split('?').next().unwrap_or("");

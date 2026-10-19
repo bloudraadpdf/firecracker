@@ -12,6 +12,11 @@ Native VNC viewer -> SSH tunnel -> loopback RFB bridge --+
                                             Firecracker Unix socket
 ```
 
+An optional Rust [native GUI](../../../docs/windows-console.md#optional-native-gui)
+uses the same RFB bridge and SSH tunnel on Linux, macOS and Windows. Its build
+feature is off by default. On a Linux desktop, `firecracker --gui` can own a
+headless VMM child and its private bridge instead.
+
 ## Build and check
 
 Follow the [Rust build prerequisites](../README.md#build-prerequisites). From
@@ -25,7 +30,8 @@ cargo clippy --locked --manifest-path tools/windows/console/Cargo.toml --all-tar
 ```
 
 The shared library is `src/console`; its unit tests run in the root workspace.
-Both workspaces retain their lock files. `Cargo.lock` pins the bridge dependencies. The WebSocket implementation uses
+Both workspaces retain their lock files. `Cargo.lock` pins the bridge dependencies.
+The WebSocket implementation uses
 `tungstenite` 0.30.0. RFB follows
 [RFC 6143](https://www.rfc-editor.org/rfc/rfc6143).
 
@@ -61,8 +67,9 @@ macOS bridge instead of the unauthenticated bridge:
 build/cargo_target/debug/firecracker-console /run/vm/console.sock rfb-macos 127.0.0.1:5900 /run/vm/vnc.password
 ```
 
-The file must contain 1 to 8 printable ASCII characters, optionally followed by
-a newline. On the local Mac, run `open vnc://127.0.0.1:5900` and enter that
+The file must be a regular file of at most 64 bytes. It must contain 1 to 8
+printable ASCII password characters without spaces; trailing whitespace is ignored.
+On the local Mac, run `open vnc://127.0.0.1:5900` and enter that
 password in Screen Sharing. Mode `rfb-macos` maps Command to the Windows key and
 retains Option as Alt. Other clients use mode `rfb` for standard RFB key
 mappings; that mode also accepts the optional password file. The browser retains

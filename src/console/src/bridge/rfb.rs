@@ -1,17 +1,11 @@
 // Copyright 2026 Bloudraad.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{Backend, Frame, invalid, keys};
-pub(super) use crate::auth::Password;
 use std::io::{self, Read, Write};
 
-const DEFAULT_FORMAT: [u8; 16] = [32, 24, 0, 1, 0, 255, 0, 255, 0, 255, 16, 8, 0, 0, 0, 0];
-
-fn read<const N: usize>(stream: &mut impl Read) -> io::Result<[u8; N]> {
-    let mut bytes = [0; N];
-    stream.read_exact(&mut bytes)?;
-    Ok(bytes)
-}
+use super::{Backend, Frame, invalid, keys};
+pub(super) use crate::auth::Password;
+use crate::{RFB_FORMAT as DEFAULT_FORMAT, read};
 
 #[derive(Clone, Copy, Debug)]
 struct PixelFormat {

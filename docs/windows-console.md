@@ -11,7 +11,7 @@ guest qualification remains pending.
 The AMD64 device path is:
 
 ```text
-remote browser or VNC viewer
+native GUI, remote browser or VNC viewer
              |
      SSH tunnel / HTTPS gateway
              |
@@ -37,6 +37,119 @@ console configuration schema but reject console requests and saved console
 devices before opening their host resources.
 
 ## Configure
+
+### Optional native GUI
+
+The `gui` Cargo feature adds a native framebuffer viewer. It uses winit and
+wgpu; it does not change guest hardware or provide guest GPU acceleration.
+VNC and browser access remain available. GUI libraries run in the viewer
+process, outside the headless VMM's event loop and seccomp sandbox.
+
+On a Linux desktop, build and launch from the repository root:
+
+```sh
+cargo build --locked -p firecracker --features gui
+build/cargo_target/debug/firecracker --gui --enable-pci --no-api \
+  --config-file /srv/vm/config.json
+```
+
+Local launch requires `--config-file` and `--no-api`. For an API-managed VM,
+start its normal supervisor and use attach mode. The complete configuration must
+include `console.socket_path` and the normal
+firmware, disk and machine settings below. Use a private working directory.
+The GUI starts the same executable as a headless child, forwards the other
+arguments, and opens its console. Closing the window powers off and reaps that
+child and removes its owned console socket; shut down Windows first to avoid
+losing unsaved work. A guest shutdown
+or reset closes the viewer. Start the command again to continue installation
+after reset. The GUI does not restart VMs or change installation media.
+If the console disconnects before the owned VMM exits, the window shows the
+connection error and waits for the VMM's exit status. Close the window to power
+off a VMM that remains running. Attach mode reports a disconnect immediately.
+
+Linux GUI builds use the native GNU target and need an X11 or Wayland session
+and a Vulkan driver. The normal desktop runtime libraries must be installed:
+X11 needs `libX11`, `libXcursor`, `libXi`, `libXrandr`, `libxkbcommon` and
+`libxkbcommon-x11`; Wayland needs its client/cursor libraries and
+`libxkbcommon`. On Ubuntu, the X11 keyboard library is supplied by
+`libxkbcommon-x11-0`. Firecracker does not supply a default seccomp policy for
+GNU builds. Its existing empty-policy warning applies; a production deployment
+must supply a reviewed GNU policy with `--seccomp-filter`. For a jailed or
+headless host, keep the normal VMM build and use the separate viewer.
+
+Build that viewer on Linux, macOS or Windows:
+
+```sh
+cargo build --locked -p console --no-default-features --features gui \
+  --bin firecracker-viewer
+```
+
+Start one standard `rfb` bridge for the VM, then forward its port using the
+[SSH instructions](../tools/windows/console/README.md#native-vnc-viewer).
+On the local computer:
+
+```sh
+build/cargo_target/debug/firecracker-viewer 127.0.0.1:5900
+```
+
+On Windows the executable is `build\cargo_target\debug\firecracker-viewer.exe`.
+Use `--password-file PATH` if the bridge requires VNC authentication. The file
+must be a regular file of at most 64 bytes, containing the bridge's 1..8
+printable ASCII password characters without spaces; trailing whitespace is
+ignored. Use mode
+`rfb`, including on macOS: this viewer sends standard keysyms. It needs no
+password when the bridge uses security type None. Only loopback addresses are
+accepted; remote access uses SSH forwarding. Closing an attached viewer leaves
+the VM running. A Linux `gui` build also supports this attach mode:
+
+```sh
+build/cargo_target/debug/firecracker --gui-connect 127.0.0.1:5900
+```
+
+Use `--gui-password-file PATH` there if needed. Do not combine attach mode with
+`--gui` or `--config-file`, or run a second bridge for the same VM.
+
+The viewer uses linear filtering when scaling, preserves aspect ratio and maps
+pointer coordinates through the same physical-pixel viewport used for rendering,
+including on Retina displays.
+The host cursor is hidden over the guest image. Focus loss releases held keys
+and buttons. Command/Super sends the Windows key; Option sends Alt. The guest
+must use the existing US keyboard mapping. These shortcuts are also available:
+
+| Shortcut | Action |
+| --- | --- |
+| Ctrl+Alt+Home | Press and release the Windows key |
+| Ctrl+Alt+End | Send Ctrl+Alt+Del |
+| Ctrl+Alt+Enter | Toggle fullscreen |
+
+On Mac keyboards, Fn+Left is Home and Fn+Right is End. Function keys remain
+available to firmware and Setup. The viewer supports raw RGB888 and display
+resize, with a 32 MiB frame bound and about 30 updates per second. It has no
+audio, clipboard transfer, IME, reconnect loop or desktop toolbar. Host GPU
+requirements apply to the viewer computer, independently of the guest OS.
+
+Check the portable protocol and input code without KVM:
+
+```sh
+cargo test --locked -p console --no-default-features --features gui --lib
+cargo clippy --locked -p console --no-default-features --features gui \
+  --all-targets -- -D warnings
+```
+
+On Linux with an X11 display, Vulkan and the XTest library (`libXtst`), run the
+native event tests as well. They use real window-close, keyboard, pointer and
+focus events. Each case runs in a separate process because winit permits one
+event loop per process. Xvfb with a software Vulkan driver can supply the display
+on a headless host.
+
+```sh
+cargo test --locked -p console --no-default-features --features gui --lib \
+  gui::tests::x11::native_window_lifecycle_and_input -- --exact --ignored
+```
+
+Linux bridge cancellation and VMM child cleanup are tested in the normal
+`console` and `firecracker` unit tests with `--features gui`. Default and
+`windows`-only builds have no GUI dependencies.
 
 ### AMD64
 
@@ -391,6 +504,19 @@ does not provide the CPU address wrapping used by an A20-disabled software
 emulator.
 
 ## Validation
+
+The native GUI was exercised on macOS with an existing Windows 10 Firecracker
+desktop through an SSH-forwarded RFB bridge. Display, keyboard, Windows-key
+shortcut and pointer operation were observed; motion coalescing and removal of
+a second frame delay made pointer movement smoother. Fullscreen aspect ratio
+and linear filtering were checked with a synthetic RFB framebuffer.
+
+On AMD64 Linux, an X11/Vulkan software-rendering check launched a firmware-only
+VMM through `--gui`, closed its window and verified child reaping and console
+socket removal. Protocol, input, bridge cancellation and socket ownership use
+normal Rust unit tests. The Windows AMD64 viewer target passes `cargo check`;
+native Windows and Wayland viewer sessions have not been exercised. These GUI
+checks do not expand the guest qualification matrix.
 
 The [validation record](windows-validation.md) lists exact tested editions and
 installation, input, egress and restore checks. The
