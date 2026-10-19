@@ -311,14 +311,14 @@ fn restore_rejects_inconsistent_resources_backing_scanout_and_cursor() {
                 .resources
                 .resize(MAX_RESOURCES + 1, state.resources[0].clone())
         },
-        |state| state.resources[0].1.width = u32::MAX,
-        |state| state.resources[0].1.format = 0,
-        |state| state.resources[0].1.pixels.clear(),
-        |state| state.resources[0].1.backing[0].length = 0,
-        |state| state.resources[0].1.backing[0].address = u64::MAX,
-        |state| state.resources[0].1.backing[0].address = 0x20000,
+        |state| state.resources[0].width = u32::MAX,
+        |state| state.resources[0].format = 0,
+        |state| state.pixels.clear(),
+        |state| state.backing[0].length = 0,
+        |state| state.backing[0].address = u64::MAX,
+        |state| state.backing[0].address = 0x20000,
         |state| {
-            state.resources[0].1.backing.resize(
+            state.backing.resize(
                 MAX_BACKING_ENTRIES + 1,
                 BackingEntry {
                     address: 0x1000,
@@ -347,29 +347,110 @@ fn restore_rejects_inconsistent_resources_backing_scanout_and_cursor() {
 fn restore_checks_the_aggregate_resource_budget_before_cloning_pixels() {
     let mem = memory();
     let mut state = Renderer::new(1024, 768).unwrap().save();
-    let resource = Resource {
-        width: 4096,
-        height: 2048,
-        format: 2,
-        pixels: vec![0; MAX_RESOURCE_BYTES],
-        backing: vec![],
-    };
+    state.pixels = vec![0; MAX_TOTAL_BYTES + 4];
     state.resources = vec![
-        (ResourceId::new(1).unwrap(), resource.clone()),
-        (ResourceId::new(2).unwrap(), resource),
-        (
-            ResourceId::new(3).unwrap(),
-            Resource {
-                width: 1,
-                height: 1,
-                format: 2,
-                pixels: vec![0; 4],
-                backing: vec![],
-            },
-        ),
+        ResourceState {
+            id: ResourceId::new(1).unwrap(),
+            width: 4096,
+            height: 2048,
+            format: 2,
+            pixels: 0..MAX_RESOURCE_BYTES,
+            backing: 0..0,
+        },
+        ResourceState {
+            id: ResourceId::new(2).unwrap(),
+            width: 4096,
+            height: 2048,
+            format: 2,
+            pixels: MAX_RESOURCE_BYTES..MAX_TOTAL_BYTES,
+            backing: 0..0,
+        },
+        ResourceState {
+            id: ResourceId::new(3).unwrap(),
+            width: 1,
+            height: 1,
+            format: 2,
+            pixels: MAX_TOTAL_BYTES..MAX_TOTAL_BYTES + 4,
+            backing: 0..0,
+        },
     ];
     assert_eq!(
         Renderer::restore(&state, &mem).unwrap_err(),
         RendererError::OutOfMemory
     );
+}
+
+#[test]
+fn checkpoint_decoder_rejects_excess_pixels_before_resource_restore() {
+    let mem = memory();
+    let mut state = saved_pixel(&mem);
+    state.pixels.resize(MAX_TOTAL_BYTES + 1, 0);
+    let encoded = bitcode::serialize(&state).unwrap();
+    bitcode::deserialize::<RendererState>(&encoded).unwrap_err();
+}
+
+#[test]
+fn checkpoint_decoder_bounds_metadata_backing_scanout_and_cursor() {
+    let mem = memory();
+    let original = saved_pixel(&mem);
+    let cases: &[fn(&mut RendererState)] = &[
+        |state| {
+            state
+                .resources
+                .resize(MAX_RESOURCES + 1, state.resources[0].clone())
+        },
+        |state| {
+            state.backing.resize(
+                MAX_RESOURCES * MAX_BACKING_ENTRIES + 1,
+                BackingEntry {
+                    address: 0x1000,
+                    length: 4,
+                },
+            )
+        },
+        |state| {
+            state
+                .scanout
+                .as_mut()
+                .unwrap()
+                .pixels
+                .resize(MAX_RESOURCE_BYTES / 4 + 1, 0)
+        },
+        |state| state.cursor.as_mut().unwrap().pixels.resize(4097, 0),
+    ];
+    for modify in cases {
+        let mut state = original.clone();
+        modify(&mut state);
+        let encoded = bitcode::serialize(&state).unwrap();
+        bitcode::deserialize::<RendererState>(&encoded).unwrap_err();
+    }
+}
+
+#[test]
+fn restore_rejects_overlapping_gapped_reversed_and_unowned_ranges() {
+    let mem = memory();
+    let original = saved_pixel(&mem);
+    let cases: &[fn(&mut RendererState)] = &[
+        |state| state.resources[0].pixels = 1..4,
+        |state| state.resources[0].pixels = std::ops::Range { start: 4, end: 0 },
+        |state| state.resources[0].backing = 1..1,
+        |state| state.resources[0].backing = 0..2,
+        |state| state.pixels.push(0),
+        |state| {
+            state.backing.push(BackingEntry {
+                address: 0x1000,
+                length: 4,
+            })
+        },
+        |state| {
+            let mut duplicate = state.resources[0].clone();
+            duplicate.id = ResourceId::new(2).unwrap();
+            state.resources.push(duplicate);
+        },
+    ];
+    for modify in cases {
+        let mut state = original.clone();
+        modify(&mut state);
+        Renderer::restore(&state, &mem).unwrap_err();
+    }
 }
