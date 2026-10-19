@@ -5,8 +5,11 @@
 
 pub mod memory;
 pub mod protocol;
+pub mod transport;
 
 #[cfg(test)]
 mod memory_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod transport_tests;

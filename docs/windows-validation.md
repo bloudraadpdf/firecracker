@@ -18,7 +18,11 @@ Rust component decodes packed commands, primary surfaces, signed rectangles,
 ring counters and generation-tagged memory-slot pointers. Shared memory now
 provides a packed ROM with 18 bounded 32bpp modes, command/cursor/release rings,
 atomic control fields, and RAM that shares the existing boot framebuffer.
-Boundary and reset tests check those components. Its layout follows
+The transport validates registered RAM/VRAM slots, rejects stale generations,
+and bounds each command/cursor dispatch to 32 entries. A full release ring
+stops execution before it can lose an acknowledgement. Commands are released
+only after their handler succeeds. Boundary, reset and transport tests check
+those components. Its layout follows
 the published [QXL device ABI](https://sources.debian.org/src/spice-protocol/0.12.14-1/spice/qxl_dev.h/).
 It does not expose a QXL PCI device yet. Component checks do not establish guest
 driver loading or rendering. Graphics qualification across all agreed guests
