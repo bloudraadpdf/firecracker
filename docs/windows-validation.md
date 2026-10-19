@@ -67,7 +67,21 @@ boundaries, malformed records and rejection before writes. The existing Windows
 driver does not advertise hardware Bezier or geometric-wide-line support; GDI
 decomposes those requests before submission. Such packed path commands remain
 unsupported. Native XP/7 stroke and dash rendering still needs validation.
-Composite, surface-image and self-bitmap operations remain incomplete.
+Image commands can reference primary surface 0. They capture its pixels before
+destination writes, so overlapping and scaled source reads use the original
+frame. Surface descriptors use their 22-byte layout and can have zero dimension
+fields, as emitted by the Windows driver. Alpha commands use source-surface
+alpha only when its flag is set; raw RGBA images keep their own alpha. Invalid
+surface IDs and source crops fail before destination writes. Offscreen surfaces,
+composite and self-bitmap commands remain unsupported.
+
+The integration targets revision 2 with one primary surface and compression
+disabled. The [pinned Windows driver source](https://github.com/freedesktop-unofficial-mirror/spice__win32__qxl/tree/24cbb39f18538672f0a6d6788d5643ad272ac13c/xddm/display)
+uses synchronous I/O for revision 2
+and raw bitmap fallback when the ROM's compression level is zero, including for
+alpha images. It initialises `self_bitmap` to zero and has no composite command
+producer. The remaining integration and native checks must verify those paths
+with the signed packages.
 The layout follows
 the published [QXL device ABI](https://sources.debian.org/src/spice-protocol/0.12.14-1/spice/qxl_dev.h/).
 It does not expose a QXL PCI device yet. Component checks do not establish guest

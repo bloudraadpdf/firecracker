@@ -230,6 +230,7 @@ enum ImageAction {
     Alpha {
         alpha: u8,
         destination_has_alpha: bool,
+        source_surface_has_alpha: bool,
     },
 }
 
@@ -242,7 +243,7 @@ impl ImageAction {
         }
     }
 
-    fn apply(&self, source: u32, x: u32, y: u32, destination: u32) -> u32 {
+    fn apply(&self, source: u32, x: u32, y: u32, destination: u32, surface_source: bool) -> u32 {
         match self {
             Self::Raster(op) => op.apply(source, 0, destination),
             Self::Opaque { brush, op } => op.apply_opaque(source, brush.sample(x, y)),
@@ -259,14 +260,28 @@ impl ImageAction {
             Self::Alpha {
                 alpha,
                 destination_has_alpha,
-            } => alpha_over(source, destination, *alpha, *destination_has_alpha),
+                source_surface_has_alpha,
+            } => {
+                let source = if surface_source && !source_surface_has_alpha {
+                    source | 0xff00_0000
+                } else {
+                    source
+                };
+                alpha_over(source, destination, *alpha, *destination_has_alpha)
+            }
         }
     }
 }
 
 #[derive(Debug)]
+enum ImagePixels {
+    Bitmap(Bitmap),
+    PrimarySurface,
+}
+
+#[derive(Debug)]
 struct ImageSource {
-    bitmap: Bitmap,
+    pixels: ImagePixels,
     area: Rect,
 }
 
@@ -303,10 +318,21 @@ impl Operation {
         bounds: Rect,
     ) -> Result<Self, TransportError> {
         let (source, mode) = if action.uses_source() {
-            let bitmap = Bitmap::decode(memory, addresses, u64::from_le_bytes(bytes(data, 0)?))?;
+            let address = u64::from_le_bytes(bytes(data, 0)?);
+            let header = read::<18>(memory, addresses, address, 0)?;
             let area = Rect::decode(&data[8..24])?;
-            bitmap.validate_rect(area)?;
-            (Some(ImageSource { bitmap, area }), ScaleMode::decode(mode)?)
+            let pixels = if header[8] == 104 {
+                let id = u32::from_le_bytes(read::<4>(memory, addresses, address, 18)?);
+                if id != 0 || header[9] & !3 != 0 {
+                    return Err(DecodeError::Parameter.into());
+                }
+                ImagePixels::PrimarySurface
+            } else {
+                let bitmap = Bitmap::decode(memory, addresses, address)?;
+                bitmap.validate_rect(area)?;
+                ImagePixels::Bitmap(bitmap)
+            };
+            (Some(ImageSource { pixels, area }), ScaleMode::decode(mode)?)
         } else {
             (None, ScaleMode::Nearest)
         };
@@ -542,6 +568,7 @@ impl Drawable {
                     ImageAction::Alpha {
                         alpha,
                         destination_has_alpha: flags & 1 != 0,
+                        source_surface_has_alpha: flags & 2 != 0,
                     },
                     0,
                     None,
@@ -571,7 +598,17 @@ impl Drawable {
         if left == right || top == bottom {
             return Ok(());
         }
-        let copied = if matches!(self.operation, Operation::CopyBits(_)) {
+        let copied = if matches!(
+            self.operation,
+            Operation::CopyBits(_)
+                | Operation::Image {
+                    source: Some(ImageSource {
+                        pixels: ImagePixels::PrimarySurface,
+                        ..
+                    }),
+                    ..
+                }
+        ) {
             Some(surface.snapshot()?)
         } else {
             None
@@ -581,7 +618,13 @@ impl Drawable {
                 source: Some(source),
                 mode,
                 ..
-            } => ScaledBitmap::with_mode(&source.bitmap, source.area, self.bounds, *mode)?,
+            } => {
+                let bitmap = match &source.pixels {
+                    ImagePixels::Bitmap(bitmap) => bitmap,
+                    ImagePixels::PrimarySurface => copied.as_ref().unwrap(),
+                };
+                ScaledBitmap::with_mode(bitmap, source.area, self.bounds, *mode)?
+            }
             Operation::CopyBits(source) => {
                 let bounds = self.bounds.bounds();
                 let x = i64::from(source.0) + i64::from(left) - i64::from(bounds[0]);
@@ -665,7 +708,12 @@ impl Drawable {
                             destination
                         }
                     }
-                    Operation::Image { action, mask, .. } => {
+                    Operation::Image {
+                        source,
+                        action,
+                        mask,
+                        ..
+                    } => {
                         if mask
                             .as_ref()
                             .is_none_or(|mask| mask.covers(x, y, self.bounds))
@@ -675,6 +723,9 @@ impl Drawable {
                                 x,
                                 y,
                                 destination,
+                                source.as_ref().is_some_and(|source| {
+                                    matches!(source.pixels, ImagePixels::PrimarySurface)
+                                }),
                             )
                         } else {
                             destination
