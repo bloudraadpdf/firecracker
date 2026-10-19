@@ -30,6 +30,38 @@ It does not expose a QXL PCI device yet. Component checks do not establish guest
 driver loading or rendering. Graphics qualification across all agreed guests
 must finish before work returns to unrelated platform features.
 
+## Windows 11 native GPU checks
+
+Runtime source `ae208ad25` passes native AMD64 scanout checks on Windows 11 Pro
+and Enterprise Evaluation, both reporting build 26300. Each used an isolated
+disk copy and its matched Secure Boot and TPM state. The original references
+were unchanged. These were GNU development runs with `--no-seccomp`.
+
+Both guests accepted the ISO's `viogpudo/w11/amd64` package through normal
+`pnputil` installation. The active `VioGpuDod` driver reports Code 0, version
+`100.103.104.30200` and a Microsoft Windows Hardware Compatibility Publisher
+signature. Its installed SYS matches SHA-256
+`adb624a34dc1b6519af0601268af7c1e3e8972c16c69467f6e3144e66b67f5e1`.
+Windows 11 installs this file in DriverStore; the service's `PathName` identifies
+the active file. Both resolution helpers have valid WHCP signatures.
+
+Each guest changed actual scanout through 1024x768, 1280x720, 1366x768,
+1920x1080 and back to 1024x768. All 22,400 checked colour pixels match at each
+step. Windows repositions the test window during mode changes; the checks use
+its observed position. Both guests recorded five pointer clicks. Enterprise
+also recorded all five submitted text strings exactly. Pro's separate input
+check records both Control+A chords with Control held and shows the Windows
+Start menu after the Windows key. It does not establish the test TextBox's
+select-all behaviour.
+
+After installing the complete Windows 11 vsock package, all 52 present devices
+report OK in both guests. Enterprise also reports Secure Boot enabled and TPM
+present and ready. Both guests shut down through ACPI S5 with VMM exit code 0.
+
+Windows 11 IoT LTSC native graphics remains pending. These checks do not cover
+the new GPU profile's viewer routes or snapshot restore on Windows 11. The
+earlier installed-reference results below use the legacy display profile.
+
 ## Virtio GPU integration candidate
 
 Runtime source `67ac42dfc` adds the AMD64 `virtio-gpu` console profile. Windows 10

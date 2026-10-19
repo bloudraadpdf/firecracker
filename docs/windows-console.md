@@ -204,7 +204,23 @@ pnputil /add-driver D:\viogpudo\w10\amd64\viogpudo.inf /install
 The package supplies `viogpures.exe`. For example, use
 `D:\viogpudo\w10\amd64\viogpures.exe 1280 720` to request that mode. Verify the
 active adapter and its error code in Device Manager after installation and cold
-boot. Windows 11 uses the ISO's `w11` package; it requires separate qualification.
+boot. For Windows 11, use its separate package:
+
+```bat
+pnputil /add-driver D:\viogpudo\w11\amd64\viogpudo.inf /install
+```
+
+Keep the complete driver directory when staging a package. Its INF lists the
+required files; a SYS and catalogue alone can be insufficient. Windows 11's
+display driver runs from DriverStore. Read its installed path with PowerShell:
+
+```powershell
+Get-CimInstance Win32_SystemDriver -Filter "Name='VioGpuDod'" |
+    Select-Object Name, State, PathName
+```
+
+The [Windows 11 checks](windows-validation.md#windows-11-native-gpu-checks)
+record the tested editions, driver, modes and remaining limits.
 
 Use `--enable-pci`. The AMD64 console requires at least 64 MiB RAM and ordinary
 pages; huge pages cannot represent its legacy VGA memory aperture. There is no
@@ -528,14 +544,15 @@ BAR layout. The AMD64 GPU transport also maps and checkpoints the VGA framebuffe
 registers and legacy ports, with PCI memory/IO decode and BAR relocation.
 Select `"display": "virtio-gpu"` to attach it. The console uses VGA until the
 driver selects a native scanout, shows black when native scanout is disabled,
-and returns to VGA after device reset. This path still requires Windows driver
-qualification beyond the recorded Windows 10 candidate. The earlier full
-installed-reference matrix covers the legacy VGA profile.
+and returns to VGA after device reset. The
+[validation record](windows-validation.md#windows-11-native-gpu-checks) gives the
+Windows 10/11 driver results and remaining viewer and restore checks. The earlier
+full installed-reference matrix covers the legacy VGA profile.
 
 AMD64 console snapshots contain display memory and registers, keyboard/mouse
 queues, held input, pending releases, keyboard LEDs and pending lock updates,
 USB controller/HID state, PCI state, optical transfer state and media identity.
-The current snapshot format is 39.0.0. Display state adds about 16 MiB; the
+The current snapshot format is 40.0.0. Display state adds about 16 MiB; the
 bounded snapshot reader accepts at most 128 MiB, including GPU state. The guest
 disk remains a separate artifact, as with ordinary Firecracker snapshots.
 
