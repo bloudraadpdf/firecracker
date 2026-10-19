@@ -414,8 +414,12 @@ arrays in order, without overlaps, gaps or unused trailing data.
 The GPU device implements modern feature negotiation, queue activation and
 notifications, display-change events, reset and device checkpoints. Device state
 includes queue progress and pending display events; transport restore reactivates
-it. PCI/VGA attachment and console routing are not implemented yet. VGA remains
-the configured display; Windows virtio display drivers cannot bind to it.
+it. The PCI transport identifies the GPU as 1af4:1050, with display class 03.
+On AMD64 its capabilities and MSI-X structures use BAR4, leaving BAR0 and BAR2
+for the VGA framebuffer and registers required by the firmware. Other virtio
+devices keep their existing BAR layout. Cold VGA/GPU attachment and console
+routing are not implemented yet. VGA remains the configured display; Windows
+virtio display drivers cannot bind to it.
 
 AMD64 console snapshots contain display memory and registers, keyboard/mouse
 queues, held input, pending releases, keyboard LEDs and pending lock updates,
