@@ -57,6 +57,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "console"
+version = "0.1.0"
+dependencies = [
+ "des",
+ "getrandom",
+ "tiny_http",
+ "tungstenite",
+ "utils",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -131,12 +142,7 @@ dependencies = [
 name = "firecracker-console"
 version = "0.1.0"
 dependencies = [
- "des",
- "getrandom",
- "libc",
- "tiny_http",
- "tungstenite",
- "utils",
+ "console",
 ]
 
 [[package]]
@@ -209,9 +215,9 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "libc"
-version = "0.2.190"
+version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
+checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "log"
