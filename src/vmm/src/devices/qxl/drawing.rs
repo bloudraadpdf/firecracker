@@ -1,10 +1,10 @@
 // Copyright 2026 Bloudraad.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::bitmap::{Bitmap, ScaledBitmap, chunks};
+use super::bitmap::{Bitmap, ScaleMode, ScaledBitmap, chunks};
 use super::memory::Memory;
 use super::protocol::{DecodeError, Rect, bytes};
-use super::raster::{Operand, RasterOp};
+use super::raster::{Operand, RasterOp, alpha_over, ternary};
 use super::surface::Surface;
 use super::transport::{AddressSpace, TransportError};
 
@@ -120,6 +120,61 @@ impl Mask {
 }
 
 #[derive(Debug)]
+enum ImageAction {
+    Raster(RasterOp),
+    Opaque {
+        brush: Brush,
+        op: RasterOp,
+    },
+    Ternary {
+        brush: Brush,
+        opcode: u8,
+    },
+    Transparent(u32),
+    Alpha {
+        alpha: u8,
+        destination_has_alpha: bool,
+    },
+}
+
+impl ImageAction {
+    fn uses_source(&self) -> bool {
+        match self {
+            Self::Raster(op) | Self::Opaque { op, .. } => op.uses_operand(),
+            Self::Ternary { opcode, .. } => (opcode ^ (opcode >> 2)) & 0x33 != 0,
+            Self::Transparent(_) | Self::Alpha { .. } => true,
+        }
+    }
+
+    fn apply(&self, source: u32, x: u32, y: u32, destination: u32) -> u32 {
+        match self {
+            Self::Raster(op) => op.apply(source, 0, destination),
+            Self::Opaque { brush, op } => op.apply_opaque(source, brush.sample(x, y)),
+            Self::Ternary { brush, opcode } => {
+                ternary(*opcode, source, brush.sample(x, y), destination)
+            }
+            Self::Transparent(color) => {
+                if source & 0xffffff == *color & 0xffffff {
+                    destination
+                } else {
+                    source
+                }
+            }
+            Self::Alpha {
+                alpha,
+                destination_has_alpha,
+            } => alpha_over(source, destination, *alpha, *destination_has_alpha),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ImageSource {
+    bitmap: Bitmap,
+    area: Rect,
+}
+
+#[derive(Debug)]
 enum Operation {
     Nop,
     Fill {
@@ -127,13 +182,44 @@ enum Operation {
         op: RasterOp,
         mask: Option<Mask>,
     },
-    Copy {
-        bitmap: Bitmap,
-        source: Rect,
-        op: RasterOp,
+    Image {
+        source: Option<ImageSource>,
+        action: ImageAction,
+        mode: ScaleMode,
         mask: Option<Mask>,
     },
     CopyBits((i32, i32)),
+}
+
+impl Operation {
+    fn image(
+        memory: &Memory,
+        addresses: &AddressSpace,
+        data: &[u8],
+        action: ImageAction,
+        mode: u8,
+        mask: Option<&[u8]>,
+        bounds: Rect,
+    ) -> Result<Self, TransportError> {
+        let (source, mode) = if action.uses_source() {
+            let bitmap = Bitmap::decode(memory, addresses, u64::from_le_bytes(bytes(data, 0)?))?;
+            let area = Rect::decode(&data[8..24])?;
+            bitmap.validate_rect(area)?;
+            (Some(ImageSource { bitmap, area }), ScaleMode::decode(mode)?)
+        } else {
+            (None, ScaleMode::Nearest)
+        };
+        let mask = mask
+            .map(|data| Mask::decode(memory, addresses, data, bounds))
+            .transpose()?
+            .flatten();
+        Ok(Self::Image {
+            source,
+            action,
+            mode,
+            mask,
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -208,27 +294,47 @@ impl Drawable {
             0 => Operation::Nop,
             1 => {
                 let data = read::<39>(memory, addresses, address, payload)?;
+                let op = RasterOp::decode(u16::from_le_bytes(bytes(&data, 20)?), Operand::Brush)?;
                 Operation::Fill {
-                    brush: Brush::decode(memory, addresses, &data[..20])?,
-                    op: RasterOp::decode(u16::from_le_bytes(bytes(&data, 20)?), Operand::Brush)?,
+                    brush: if op.uses_operand() {
+                        Brush::decode(memory, addresses, &data[..20])?
+                    } else {
+                        Brush::Solid(0)
+                    },
+                    op,
                     mask: Mask::decode(memory, addresses, &data[22..], bounds)?,
                 }
             }
-            3 => {
+            2 => {
+                let data = read::<64>(memory, addresses, address, payload)?;
+                let op = RasterOp::decode(u16::from_le_bytes(bytes(&data, 44)?), Operand::Source)?;
+                let brush = if op.uses_destination() {
+                    Brush::decode(memory, addresses, &data[24..44])?
+                } else {
+                    Brush::Solid(0)
+                };
+                Operation::image(
+                    memory,
+                    addresses,
+                    &data,
+                    ImageAction::Opaque { brush, op },
+                    data[46],
+                    Some(&data[47..]),
+                    bounds,
+                )?
+            }
+            3 | 5 => {
                 let data = read::<44>(memory, addresses, address, payload)?;
-                if data[26] != 1 {
-                    return Err(DecodeError::Parameter.into());
-                }
-                let bitmap =
-                    Bitmap::decode(memory, addresses, u64::from_le_bytes(bytes(&data, 0)?))?;
-                let source = Rect::decode(&data[8..24])?;
-                bitmap.validate_rect(source)?;
-                Operation::Copy {
-                    bitmap,
-                    source,
-                    op: RasterOp::decode(u16::from_le_bytes(bytes(&data, 24)?), Operand::Source)?,
-                    mask: Mask::decode(memory, addresses, &data[27..], bounds)?,
-                }
+                let op = RasterOp::decode(u16::from_le_bytes(bytes(&data, 24)?), Operand::Source)?;
+                Operation::image(
+                    memory,
+                    addresses,
+                    &data,
+                    ImageAction::Raster(op),
+                    data[26],
+                    Some(&data[27..]),
+                    bounds,
+                )?
             }
             4 => Operation::CopyBits(point(&read::<8>(memory, addresses, address, payload)?, 0)?),
             6..=8 => {
@@ -238,6 +344,67 @@ impl Drawable {
                     op: RasterOp::decode(1 << (opcode + 1), Operand::Brush)?,
                     mask: Mask::decode(memory, addresses, &data, bounds)?,
                 }
+            }
+            9 => {
+                let data = read::<63>(memory, addresses, address, payload)?;
+                let opcode = data[44];
+                let brush = if (opcode ^ (opcode >> 4)) & 15 != 0 {
+                    Brush::decode(memory, addresses, &data[24..44])?
+                } else {
+                    Brush::Solid(0)
+                };
+                Operation::image(
+                    memory,
+                    addresses,
+                    &data,
+                    ImageAction::Ternary { brush, opcode },
+                    data[45],
+                    Some(&data[46..]),
+                    bounds,
+                )?
+            }
+            12 => {
+                let data = read::<32>(memory, addresses, address, payload)?;
+                Operation::image(
+                    memory,
+                    addresses,
+                    &data,
+                    ImageAction::Transparent(u32::from_le_bytes(bytes(&data, 28)?)),
+                    1,
+                    None,
+                    bounds,
+                )?
+            }
+            13 => {
+                let (flags, alpha, data) = match layout {
+                    Layout::Modern => {
+                        let data = read::<27>(memory, addresses, address, payload)?;
+                        (
+                            u16::from_le_bytes(bytes(&data, 0)?),
+                            data[2],
+                            bytes::<24>(&data, 3)?,
+                        )
+                    }
+                    Layout::Compat => {
+                        let data = read::<25>(memory, addresses, address, payload)?;
+                        (0, data[0], bytes::<24>(&data, 1)?)
+                    }
+                };
+                if flags & !3 != 0 {
+                    return Err(DecodeError::Parameter.into());
+                }
+                Operation::image(
+                    memory,
+                    addresses,
+                    &data,
+                    ImageAction::Alpha {
+                        alpha,
+                        destination_has_alpha: flags & 1 != 0,
+                    },
+                    0,
+                    None,
+                    bounds,
+                )?
             }
             _ => return Err(DecodeError::Command(u32::from(opcode)).into()),
         };
@@ -268,9 +435,11 @@ impl Drawable {
             None
         };
         let sampler = match &self.operation {
-            Operation::Copy { bitmap, source, .. } => {
-                ScaledBitmap::new(bitmap, *source, self.bounds)?
-            }
+            Operation::Image {
+                source: Some(source),
+                mode,
+                ..
+            } => ScaledBitmap::with_mode(&source.bitmap, source.area, self.bounds, *mode)?,
             Operation::CopyBits(source) => {
                 let bounds = self.bounds.bounds();
                 let x = i64::from(source.0) + i64::from(left) - i64::from(bounds[0]);
@@ -342,12 +511,17 @@ impl Drawable {
                             destination
                         }
                     }
-                    Operation::Copy { op, mask, .. } => {
+                    Operation::Image { action, mask, .. } => {
                         if mask
                             .as_ref()
                             .is_none_or(|mask| mask.covers(x, y, self.bounds))
                         {
-                            op.apply(sampler.as_ref().unwrap().sample(x, y), 0, destination)
+                            action.apply(
+                                sampler.as_ref().map_or(0, |source| source.sample(x, y)),
+                                x,
+                                y,
+                                destination,
+                            )
                         } else {
                             destination
                         }
