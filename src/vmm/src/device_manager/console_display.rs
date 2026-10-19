@@ -4,17 +4,14 @@
 //! PCI and bus mappings for the optional display console.
 
 #[cfg(feature = "windows")]
-mod memory;
-#[cfg(feature = "windows")]
-use memory::FramebufferMemory;
-
-#[cfg(feature = "windows")]
 use std::io;
 #[cfg(target_arch = "x86_64")]
 #[cfg(feature = "windows")]
 use std::io::Read;
+#[cfg(all(feature = "windows", target_arch = "x86_64"))]
+use std::sync::Weak;
 #[cfg(feature = "windows")]
-use std::sync::{Arc, Barrier, Mutex, Weak};
+use std::sync::{Arc, Barrier, Mutex};
 
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "windows")]
@@ -23,6 +20,10 @@ use vm_allocator::{AddressAllocator, AllocPolicy, RangeInclusive};
 #[cfg(feature = "windows")]
 use super::pci_mngr::PciDevices;
 use crate::devices::display::VgaState;
+#[cfg(all(feature = "windows", test))]
+use crate::devices::display::pci::memory::FramebufferMemory;
+#[cfg(feature = "windows")]
+use crate::devices::display::pci::{VgaPci, allocate_mappings, validate_mappings};
 #[cfg(feature = "windows")]
 use crate::devices::display::{FRAMEBUFFER_SIZE, REGISTER_SIZE, Vga};
 use crate::pci::PciSBDF;
@@ -68,15 +69,14 @@ impl DisplayState {
 #[derive(Debug)]
 #[cfg(feature = "windows")]
 pub struct DisplayDevice {
-    framebuffer: FramebufferMemory,
+    graphics: VgaPci,
+    #[cfg(target_arch = "x86_64")]
     vm: Weak<KvmVm>,
     config: PciConfiguration,
     bars: Bars,
-    mapped: [u64; MAPPINGS],
     sbdf: PciSBDF,
     #[cfg(target_arch = "x86_64")]
     rom: Option<ExpansionRom>,
-    pub vga: Arc<Mutex<Vga>>,
 }
 
 #[cfg(feature = "windows")]
@@ -151,50 +151,6 @@ fn regions(
     #[cfg(target_arch = "x86_64")]
     let regions = regions.chain(rom);
     regions
-}
-
-#[cfg(feature = "windows")]
-fn allocate_mappings(
-    allocator: &mut AddressAllocator,
-    sizes: [u64; MAPPINGS],
-) -> io::Result<[u64; MAPPINGS]> {
-    let mut next = allocator.clone();
-    let mut mapped = [0; MAPPINGS];
-    for (base, size) in mapped.iter_mut().zip(sizes) {
-        *base = next
-            .allocate(size, size, AllocPolicy::FirstMatch)
-            .map_err(io_error)?
-            .start();
-    }
-    validate_mappings(&next, mapped.into_iter().zip(sizes))?;
-    *allocator = next;
-    Ok(mapped)
-}
-
-#[cfg(feature = "windows")]
-fn validate_mappings(
-    allocator: &AddressAllocator,
-    regions: impl Iterator<Item = (u64, u64)>,
-) -> io::Result<()> {
-    let start = crate::arch::MEM_32BIT_DEVICES_START;
-    let end = start + crate::arch::MEM_32BIT_DEVICES_SIZE - 1;
-    if allocator.base() != start || allocator.end() != end {
-        return Err(io_error("invalid display allocator window"));
-    }
-    let mut reservations = allocator.clone();
-    for (base, size) in regions {
-        let last = base
-            .checked_add(size - 1)
-            .ok_or_else(|| io_error("display BAR overflow"))?;
-        if base < start || last > end || base % size != 0 {
-            return Err(io_error("invalid display BAR mapping"));
-        }
-        // Freeing a clone verifies that the exact, non-overlapping reservation exists.
-        reservations
-            .free(&RangeInclusive::new(base, last).map_err(io_error)?)
-            .map_err(io_error)?;
-    }
-    Ok(())
 }
 
 #[cfg(feature = "windows")]
@@ -292,22 +248,21 @@ impl DisplayDevice {
             }
             None => configuration(),
         };
-        let vga = Arc::new(Mutex::new(match state {
+        let vga = match state {
             Some(state) => Vga::restore(&state.vga)?,
             None => Vga::default(),
-        }));
-        let framebuffer = FramebufferMemory::new(vm, vga.lock().unwrap().framebuffer_mapping())?;
+        };
+        let mut graphics = VgaPci::new(vm, vga, state.map_or([0; MAPPINGS], |state| state.mapped))?;
         let device = if let Some(state) = state {
             Self {
-                framebuffer,
+                graphics,
+                #[cfg(target_arch = "x86_64")]
                 vm: Arc::downgrade(vm),
                 config,
                 bars: state.bars,
-                mapped: state.mapped,
                 sbdf: state.sbdf,
                 #[cfg(target_arch = "x86_64")]
                 rom: state.rom.clone(),
-                vga,
             }
         } else {
             let sbdf = pci.pci_segment.next_device_sbdf().map_err(io_error)?;
@@ -331,6 +286,7 @@ impl DisplayDevice {
                 })
                 .transpose()?;
             allocator.mmio32_memory = next;
+            graphics.mapped = mapped;
             let [framebuffer_base, registers, ..] = mapped;
             let mut bars = Bars::default();
             bars.set_bar_32(
@@ -346,18 +302,17 @@ impl DisplayDevice {
                 BarPrefetchable::No,
             );
             Self {
-                framebuffer,
+                graphics,
+                #[cfg(target_arch = "x86_64")]
                 vm: Arc::downgrade(vm),
                 config,
                 bars,
-                mapped,
                 #[cfg(target_arch = "x86_64")]
                 rom,
                 sbdf,
-                vga,
             }
         };
-        let mapped = device.mapped;
+        let mapped = device.graphics.mapped;
         let sbdf = device.sbdf;
         let regions = regions(
             mapped,
@@ -390,9 +345,7 @@ impl DisplayDevice {
             {
                 let mut device = device.lock().unwrap();
                 let enabled = device.config.read_reg(1) & 2 != 0;
-                device
-                    .framebuffer
-                    .set_address(enabled.then_some(mapped[0]))?;
+                device.graphics.set_decode(enabled)?;
             }
             #[cfg(target_arch = "x86_64")]
             for (base, size) in [(0x3b0, 0x30), (0x1ce, 4)] {
@@ -435,92 +388,51 @@ impl DisplayDevice {
         DisplayState {
             config: self.config.state(),
             bars: self.bars,
-            mapped: self.mapped,
+            mapped: self.graphics.mapped,
             sbdf: self.sbdf,
             #[cfg(target_arch = "x86_64")]
             rom: self.rom.clone(),
-            vga: self.vga.lock().unwrap().save(),
+            vga: self.graphics.vga.lock().unwrap().save(),
         }
     }
 
-    fn restore_bar_address(&mut self, slot: usize) {
-        #[cfg(target_arch = "x86_64")]
-        if slot == 2 {
-            if let Some(rom) = &mut self.rom {
-                rom.bar = u32::try_from(rom.mapped).unwrap() | (rom.bar & 1);
-            }
-            return;
-        }
-        let bar = if slot == 0 { 0 } else { 2 };
-        let flags = self.bars.bars[bar].encoded_addr & 0xf;
-        self.bars.bars[bar].encoded_addr = u32::try_from(self.mapped[slot]).unwrap() | flags;
+    pub fn vga(&self) -> Arc<Mutex<Vga>> {
+        self.graphics.vga.clone()
     }
 
     fn relocate(&mut self) {
-        let Some(vm) = self.vm.upgrade() else {
-            return;
-        };
-        let mappings = [
-            (
-                0,
-                self.bars.get_bar_addr(0),
-                FRAMEBUFFER_SIZE as u64,
-                self.mapped[0],
-            ),
-            (1, self.bars.get_bar_addr(2), REGISTER_SIZE, self.mapped[1]),
-        ]
-        .into_iter();
+        self.graphics
+            .relocate(&mut self.bars, self.config.read_reg(1));
         #[cfg(target_arch = "x86_64")]
-        let mappings = mappings.chain(
-            self.rom
-                .as_ref()
-                .filter(|rom| !rom.probe && rom.bar & 1 != 0)
-                .map(|rom| (2, u64::from(rom.bar & !0x7ff), rom.region().1, rom.mapped)),
-        );
-        for (slot, new, size, old) in mappings {
-            if slot < MAPPINGS && self.config.read_reg(1) & 2 == 0 {
-                continue;
-            }
+        if let Some(rom) = &mut self.rom
+            && !rom.probe
+            && rom.bar & 1 != 0
+            && let Some(vm) = self.vm.upgrade()
+        {
+            let new = u64::from(rom.bar & !0x7ff);
+            let (old, size) = rom.region();
             if old == new {
-                continue;
-            }
-            if slot < MAPPINGS
-                && new == ((!u64::from(u32::try_from(size - 1).unwrap())) & 0xffff_ffff)
-            {
-                continue;
+                return;
             }
             let mut allocator = vm.resource_allocator();
-            let Ok(range) =
-                allocator
-                    .mmio32_memory
-                    .allocate(size, size, AllocPolicy::ExactMatch(new))
-            else {
-                drop(allocator);
-                self.restore_bar_address(slot);
-                continue;
-            };
-            if vm.common.mmio_bus.move_range(old, new, size).is_err() {
-                let _ = allocator.mmio32_memory.free(&range);
-                drop(allocator);
-                self.restore_bar_address(slot);
-                continue;
-            }
-            if slot == 0 && self.framebuffer.set_address(Some(new)).is_err() {
-                vm.common.mmio_bus.move_range(new, old, size).unwrap();
-                let _ = allocator.mmio32_memory.free(&range);
-                drop(allocator);
-                self.restore_bar_address(slot);
-                continue;
-            }
-            let _ = allocator
+            let moved = allocator
                 .mmio32_memory
-                .free(&RangeInclusive::new(old, old + size - 1).unwrap());
-            if slot < MAPPINGS {
-                self.mapped[slot] = new;
-            }
-            #[cfg(target_arch = "x86_64")]
-            if slot == 2 {
-                self.rom.as_mut().unwrap().mapped = new;
+                .allocate(size, size, AllocPolicy::ExactMatch(new))
+                .is_ok_and(|range| {
+                    if vm.common.mmio_bus.move_range(old, new, size).is_err() {
+                        let _ = allocator.mmio32_memory.free(&range);
+                        false
+                    } else {
+                        let _ = allocator
+                            .mmio32_memory
+                            .free(&RangeInclusive::new(old, old + size - 1).unwrap());
+                        true
+                    }
+                });
+            if moved {
+                rom.mapped = new;
+            } else {
+                rom.bar = u32::try_from(old).unwrap() | (rom.bar & 1);
             }
         }
     }
@@ -589,10 +501,7 @@ impl PciDevice for DisplayDevice {
             }
         }
         let enabled = self.config.read_reg(1) & 2 != 0;
-        if let Err(error) = self
-            .framebuffer
-            .set_address(enabled.then_some(self.mapped[0]))
-        {
+        if let Err(error) = self.graphics.set_decode(enabled) {
             self.config.write_reg(1, old_command);
             crate::logger::error!("Failed to update framebuffer decode: {error}");
         }
@@ -600,68 +509,32 @@ impl PciDevice for DisplayDevice {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
-#[cfg(feature = "windows")]
-fn pio_port(base: u64, offset: u64, command: u32) -> Option<u16> {
-    if command & 1 == 0 || !matches!(base, 0x3b0 | 0x1ce) {
-        return None;
-    }
-    u16::try_from(base.checked_add(offset)?).ok()
-}
-
 #[cfg(feature = "windows")]
 impl BusDevice for DisplayDevice {
     fn read(&mut self, base: u64, offset: u64, bytes: &mut [u8]) {
         bytes.fill(0xff);
         let command = self.config.read_reg(1);
-        let mut vga = self.vga.lock().unwrap();
+        self.graphics.read(base, offset, command, bytes);
         #[cfg(target_arch = "x86_64")]
-        if let Some(port) = pio_port(base, offset, command) {
-            vga.read_port(port, bytes);
-            return;
-        }
-        match base {
-            #[cfg(target_arch = "x86_64")]
-            0xa0000 if command & 2 != 0 => vga.read_legacy(offset, bytes),
-            #[cfg(target_arch = "x86_64")]
-            b if command & 2 != 0
-                && self
-                    .rom
-                    .as_ref()
-                    .is_some_and(|rom| b == rom.mapped && rom.bar & 1 != 0) =>
-            {
-                let rom = self.rom.as_ref().unwrap();
-                if let Ok(start) = usize::try_from(offset) {
-                    for (index, byte) in bytes.iter_mut().enumerate() {
-                        *byte = start
-                            .checked_add(index)
-                            .and_then(|at| rom.bytes.get(at))
-                            .copied()
-                            .unwrap_or(0xff);
-                    }
-                }
+        if command & 2 != 0
+            && let Some(rom) = &self.rom
+            && base == rom.mapped
+            && rom.bar & 1 != 0
+            && let Ok(start) = usize::try_from(offset)
+        {
+            for (index, byte) in bytes.iter_mut().enumerate() {
+                *byte = start
+                    .checked_add(index)
+                    .and_then(|at| rom.bytes.get(at))
+                    .copied()
+                    .unwrap_or(0xff);
             }
-            b if b == self.mapped[0] && command & 2 != 0 => vga.read_framebuffer(offset, bytes),
-            b if b == self.mapped[1] && command & 2 != 0 => vga.read_registers(offset, bytes),
-            _ => {}
         }
     }
 
     fn write(&mut self, base: u64, offset: u64, bytes: &[u8]) -> Option<Arc<Barrier>> {
-        let command = self.config.read_reg(1);
-        let mut vga = self.vga.lock().unwrap();
-        #[cfg(target_arch = "x86_64")]
-        if let Some(port) = pio_port(base, offset, command) {
-            vga.write_port(port, bytes);
-            return None;
-        }
-        match base {
-            #[cfg(target_arch = "x86_64")]
-            0xa0000 if command & 2 != 0 => vga.write_legacy(offset, bytes),
-            b if b == self.mapped[0] && command & 2 != 0 => vga.write_framebuffer(offset, bytes),
-            b if b == self.mapped[1] && command & 2 != 0 => vga.write_registers(offset, bytes),
-            _ => {}
-        }
+        self.graphics
+            .write(base, offset, self.config.read_reg(1), bytes);
         None
     }
 }
@@ -747,11 +620,11 @@ mod tests {
         let mut pci = PciDevices::new(&source).unwrap();
         let device = DisplayDevice::attach(&source, &mut pci, None, None).unwrap();
         let mut locked = device.lock().unwrap();
-        let address = locked.mapped[0];
+        let address = locked.graphics.mapped[0];
         let mut expected = crate::vstate::resources::ResourceAllocator::new().mmio32_memory;
         assert_eq!(
             allocate_mappings(&mut expected, sizes()).unwrap(),
-            locked.mapped
+            locked.graphics.mapped
         );
         assert_eq!(source.resource_allocator().mmio32_memory, expected);
         let absent_rom_address = address + 2 * FRAMEBUFFER_SIZE as u64;
@@ -771,13 +644,14 @@ mod tests {
             .read(absent_rom_address, &mut [0])
             .unwrap_err();
         locked
+            .graphics
             .vga
             .lock()
             .unwrap()
             .write_framebuffer(0, &[17, 29, 53]);
         // Reset an enabled Bochs mode without introducing a ROM.
         {
-            let mut vga = locked.vga.lock().unwrap();
+            let mut vga = locked.graphics.vga.lock().unwrap();
             for (offset, value) in [(0x502, 640u16), (0x504, 480), (0x506, 32), (0x508, 0x81)] {
                 vga.write_registers(offset, &value.to_le_bytes());
             }
@@ -820,16 +694,16 @@ mod tests {
         let rom = rom();
         let device = DisplayDevice::attach(&vm, &mut pci, Some(rom.as_path()), None).unwrap();
         let mut locked = device.lock().unwrap();
-        let original = locked.mapped[0];
+        let original = locked.graphics.mapped[0];
         assert!(!framebuffer_available(&vm, original));
         let original_reg = locked.read_config_register(4);
         locked.write_config_register(4, 0, &u32::MAX.to_le_bytes());
         assert_eq!(locked.read_config_register(4), 0xff00_0008);
-        assert_eq!(locked.mapped[0], original);
+        assert_eq!(locked.graphics.mapped[0], original);
         locked.write_config_register(4, 0, &original_reg.to_le_bytes());
         let destination = original + 2 * FRAMEBUFFER_SIZE as u64;
         locked.write_config_register(4, 0, &u32::try_from(destination).unwrap().to_le_bytes());
-        assert_eq!(locked.mapped[0], destination);
+        assert_eq!(locked.graphics.mapped[0], destination);
         // PCI memory decoding removes/reinstates the actual KVM mapping.
         assert!(framebuffer_available(&vm, original));
         assert!(!framebuffer_available(&vm, destination));
@@ -838,7 +712,7 @@ mod tests {
         locked.write_config_register(1, 0, &3u16.to_le_bytes());
         assert!(!framebuffer_available(&vm, destination));
         locked.write_config_register(4, 0, &0u32.to_le_bytes());
-        assert_eq!(locked.mapped[0], destination);
+        assert_eq!(locked.graphics.mapped[0], destination);
         assert_eq!(
             u64::from(locked.read_config_register(4) & !0xf),
             destination
@@ -867,8 +741,9 @@ mod tests {
         let device =
             DisplayDevice::attach(&source, &mut source_pci, Some(rom.as_path()), None).unwrap();
         let mut locked = device.lock().unwrap();
-        let address = locked.mapped[0];
+        let address = locked.graphics.mapped[0];
         locked
+            .graphics
             .vga
             .lock()
             .unwrap()
