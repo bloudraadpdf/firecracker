@@ -76,12 +76,12 @@ mod tests {
     #[test]
     fn asset_paths_cannot_escape_root() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("web")
+            .join("../../tools/windows/console/web")
             .canonicalize()
             .unwrap();
         assert_eq!(resolve(&root, "/").unwrap(), root.join("vnc.html"));
-        assert!(resolve(&root, "/../Cargo.toml").is_err());
-        assert!(resolve(&root, "/%2e%2e/Cargo.toml").is_err());
-        assert!(resolve(&root, "//etc/passwd").is_err());
+        resolve(&root, "/../Cargo.toml").unwrap_err();
+        resolve(&root, "/%2e%2e/Cargo.toml").unwrap_err();
+        resolve(&root, "//etc/passwd").unwrap_err();
     }
 }

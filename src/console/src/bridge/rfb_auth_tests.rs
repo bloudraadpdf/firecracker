@@ -102,7 +102,7 @@ fn password_validation_does_not_silently_truncate() {
 
 #[test]
 fn failed_authentication_does_not_release_guest_input() {
-    use crate::{Backend, SessionGuard, authenticate_console};
+    use crate::bridge::{Backend, SessionGuard, authenticate_console};
     use std::os::unix::net::UnixListener;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};

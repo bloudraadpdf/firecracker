@@ -1,8 +1,8 @@
 // Copyright 2026 Bloudraad.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{Backend, Frame, invalid, keys};
-use des::cipher::{BlockEncrypt, KeyInit};
+use super::{Backend, Frame, invalid, keys};
+pub(super) use crate::auth::Password;
 use std::io::{self, Read, Write};
 
 const DEFAULT_FORMAT: [u8; 16] = [32, 24, 0, 1, 0, 255, 0, 255, 0, 255, 16, 8, 0, 0, 0, 0];
@@ -13,7 +13,7 @@ fn read<const N: usize>(stream: &mut impl Read) -> io::Result<[u8; N]> {
     Ok(bytes)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct PixelFormat {
     big_endian: bool,
     red: u8,
@@ -109,32 +109,6 @@ fn update(
     stream.flush()
 }
 
-#[derive(Clone)]
-pub struct Password([u8; 8]);
-
-impl Password {
-    pub fn new(value: &str) -> io::Result<Self> {
-        if value.is_empty() || value.len() > 8 || !value.bytes().all(|b| b.is_ascii_graphic()) {
-            return Err(invalid(
-                "VNC password must contain 1..8 printable ASCII characters",
-            ));
-        }
-        let mut key = [0; 8];
-        for (out, byte) in key.iter_mut().zip(value.bytes()) {
-            *out = byte.reverse_bits();
-        }
-        Ok(Self(key))
-    }
-
-    fn response(&self, mut challenge: [u8; 16]) -> [u8; 16] {
-        let cipher = des::Des::new(&self.0.into());
-        for block in challenge.as_chunks_mut::<8>().0 {
-            cipher.encrypt_block(block.into());
-        }
-        challenge
-    }
-}
-
 pub(crate) fn handshake(
     stream: &mut (impl Read + Write),
     password: Option<&Password>,
@@ -170,7 +144,7 @@ pub(crate) fn handshake(
             stream.write_all(&1u32.to_be_bytes())?;
             if version == *b"RFB 003.008\n" {
                 let reason = b"Authentication failed";
-                stream.write_all(&(reason.len() as u32).to_be_bytes())?;
+                stream.write_all(&u32::try_from(reason.len()).unwrap().to_be_bytes())?;
                 stream.write_all(reason)?;
             }
             stream.flush()?;
@@ -188,7 +162,7 @@ fn absolute_axis(position: u16, extent: u16) -> u16 {
     if maximum == 0 {
         return 0;
     }
-    (u32::from(position.min(maximum)) * 32767 / u32::from(maximum)) as u16
+    u16::try_from(u32::from(position.min(maximum)) * 32767 / u32::from(maximum)).unwrap()
 }
 
 #[derive(Clone, Copy, Default)]
@@ -219,7 +193,7 @@ pub fn serve(
     stream.write_all(&frame.height.to_be_bytes())?;
     stream.write_all(&DEFAULT_FORMAT)?;
     let name = b"Firecracker console";
-    stream.write_all(&(name.len() as u32).to_be_bytes())?;
+    stream.write_all(&u32::try_from(name.len()).unwrap().to_be_bytes())?;
     stream.write_all(name)?;
     stream.flush()?;
     let mut size = (frame.width, frame.height);
@@ -304,8 +278,8 @@ pub fn serve(
                 if backend.input_state()?.absolute_pointer {
                     payload[1..3].copy_from_slice(&absolute_axis(x, size.0).to_le_bytes());
                     payload[3..5].copy_from_slice(&absolute_axis(y, size.1).to_le_bytes());
-                    payload[5] =
-                        (i8::from(request[0] & 8 != 0) - i8::from(request[0] & 16 != 0)) as u8;
+                    payload[5] = (i8::from(request[0] & 8 != 0) - i8::from(request[0] & 16 != 0))
+                        .to_ne_bytes()[0];
                     backend.input(6, &payload)?;
                 }
             }
@@ -396,7 +370,7 @@ mod tests {
                 input: io::Cursor::new(input),
                 output: Vec::new(),
             };
-            assert!(handshake(&mut stream, None).is_err());
+            handshake(&mut stream, None).unwrap_err();
         }
     }
     #[test]
@@ -411,10 +385,10 @@ mod tests {
         PixelFormat::parse(format).unwrap().convert(&mut pixels);
         assert_eq!(pixels, [0, 1, 2, 3]);
         format[10] = 8;
-        assert!(PixelFormat::parse(format).is_err());
+        PixelFormat::parse(format).unwrap_err();
         format = DEFAULT_FORMAT;
         format[0] = 16;
-        assert!(PixelFormat::parse(format).is_err());
+        PixelFormat::parse(format).unwrap_err();
     }
     #[test]
     fn cropped_update_and_resize() {
