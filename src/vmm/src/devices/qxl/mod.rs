@@ -3,7 +3,10 @@
 
 //! QXL device protocol used by the existing Windows XP and Windows 7 drivers.
 
+pub mod memory;
 pub mod protocol;
 
+#[cfg(test)]
+mod memory_tests;
 #[cfg(test)]
 mod tests;

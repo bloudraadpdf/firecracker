@@ -15,7 +15,10 @@ virtio GPU used in the Windows 10 checks below.
 
 Native XP/7 graphics through those existing packages is incomplete. The first
 Rust component decodes packed commands, primary surfaces, signed rectangles,
-ring counters and generation-tagged memory-slot pointers. Its layout follows
+ring counters and generation-tagged memory-slot pointers. Shared memory now
+provides a packed ROM with 18 bounded 32bpp modes, command/cursor/release rings,
+atomic control fields, and RAM that shares the existing boot framebuffer.
+Boundary and reset tests check those components. Its layout follows
 the published [QXL device ABI](https://sources.debian.org/src/spice-protocol/0.12.14-1/spice/qxl_dev.h/).
 It does not expose a QXL PCI device yet. Component checks do not establish guest
 driver loading or rendering. Graphics qualification across all agreed guests
