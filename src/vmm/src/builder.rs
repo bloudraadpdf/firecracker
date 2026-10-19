@@ -404,13 +404,7 @@ pub fn build_microvm_for_boot(
     #[cfg(feature = "windows")]
     if let Some(console) = &vm_resources.console {
         device_manager
-            .attach_console(
-                &kvm_vm,
-                console,
-                None,
-                #[cfg(target_arch = "aarch64")]
-                event_manager,
-            )
+            .attach_console(&kvm_vm, console, None, event_manager)
             .map_err(StartMicrovmError::Console)?;
     }
     #[cfg(feature = "windows")]
@@ -1111,6 +1105,8 @@ pub(crate) mod tests {
             pci_enabled: true,
             console: Some(crate::vmm_config::console::ConsoleConfig {
                 socket_path: "console.sock".into(),
+                #[cfg(target_arch = "x86_64")]
+                display: Default::default(),
                 vga_rom_path: None,
                 optical_image_path: None,
             }),
@@ -1167,6 +1163,8 @@ pub(crate) mod tests {
             resources.pci_enabled = true;
             resources.console = Some(ConsoleConfig {
                 socket_path: directory.as_path().join("console.sock"),
+                #[cfg(target_arch = "x86_64")]
+                display: Default::default(),
                 vga_rom_path: Some(rom.as_path().to_owned()),
                 optical_image_path: optical.then(|| iso.as_path().to_owned()),
             });

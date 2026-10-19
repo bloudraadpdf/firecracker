@@ -44,15 +44,70 @@ use super::console_usb::UsbState;
 use super::{DeviceManager, VirtioDevices};
 #[cfg(target_arch = "x86_64")]
 use crate::devices::legacy::I8042State;
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(feature = "windows", target_arch = "aarch64"))]
+use crate::devices::virtio::device::VirtioDevice;
 #[cfg(feature = "windows")]
-use crate::devices::virtio::device::{VirtioDevice, VirtioDeviceType};
+use crate::devices::virtio::device::VirtioDeviceType;
+#[cfg(all(feature = "windows", target_arch = "x86_64"))]
+use crate::devices::virtio::gpu::{GPU_DEV_ID, Gpu};
 #[cfg(target_arch = "aarch64")]
 #[cfg(feature = "windows")]
 use crate::devices::virtio::input::{INPUT_DEV_ID, Input};
 use crate::vmm_config::console::ConsoleConfig;
+#[cfg(all(feature = "windows", target_arch = "x86_64"))]
+use crate::vmm_config::console::DisplayModel;
 #[cfg(feature = "windows")]
 use crate::vstate::vm::KvmVm;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+enum ConsoleDisplayState {
+    Vga(Box<DisplayState>),
+    #[cfg(target_arch = "x86_64")]
+    VirtioGpu,
+}
+
+#[cfg(feature = "windows")]
+impl ConsoleDisplayState {
+    fn vga(&self) -> Option<&DisplayState> {
+        match self {
+            Self::Vga(state) => Some(state),
+            #[cfg(target_arch = "x86_64")]
+            Self::VirtioGpu => None,
+        }
+    }
+
+    #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+    fn has_rom(&self) -> bool {
+        self.vga().is_some_and(DisplayState::has_rom)
+    }
+}
+
+#[cfg(feature = "windows")]
+#[derive(Debug)]
+enum ConsoleDisplay {
+    Vga(Arc<Mutex<DisplayDevice>>),
+    #[cfg(target_arch = "x86_64")]
+    VirtioGpu(Arc<Mutex<crate::devices::display::Vga>>),
+}
+
+#[cfg(feature = "windows")]
+impl ConsoleDisplay {
+    fn vga(&self) -> Arc<Mutex<crate::devices::display::Vga>> {
+        match self {
+            Self::Vga(device) => device.lock().unwrap().vga(),
+            #[cfg(target_arch = "x86_64")]
+            Self::VirtioGpu(vga) => vga.clone(),
+        }
+    }
+
+    fn save(&self) -> ConsoleDisplayState {
+        match self {
+            Self::Vga(device) => ConsoleDisplayState::Vga(Box::new(device.lock().unwrap().save())),
+            #[cfg(target_arch = "x86_64")]
+            Self::VirtioGpu(_) => ConsoleDisplayState::VirtioGpu,
+        }
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConsoleState {
@@ -61,7 +116,7 @@ pub struct ConsoleState {
     system_control: Port92State,
     #[cfg(target_arch = "x86_64")]
     bridge: BridgeState,
-    display: DisplayState,
+    display: ConsoleDisplayState,
     #[cfg(target_arch = "x86_64")]
     input: I8042State,
     #[cfg(target_arch = "x86_64")]
@@ -82,6 +137,8 @@ impl ConsoleState {
     ) -> io::Result<()> {
         self.config.validate_for_firmware(firmware)?;
         #[cfg(target_arch = "x86_64")]
+        self.validate_display(&self.config)?;
+        #[cfg(target_arch = "x86_64")]
         if self.config.vga_rom_path.is_some() != self.display.has_rom() {
             return Err(io::Error::other(
                 "restored VGA ROM configuration and state disagree",
@@ -94,6 +151,21 @@ impl ConsoleState {
 #[cfg(target_arch = "x86_64")]
 #[cfg(feature = "windows")]
 impl ConsoleState {
+    fn validate_display(&self, config: &ConsoleConfig) -> io::Result<()> {
+        if (config.display == DisplayModel::VirtioGpu)
+            != matches!(self.display, ConsoleDisplayState::VirtioGpu)
+        {
+            return Err(io::Error::other(
+                "restored console display model and state disagree",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn uses_gpu(&self) -> bool {
+        matches!(self.display, ConsoleDisplayState::VirtioGpu)
+    }
+
     pub(super) fn has_optical(&self) -> bool {
         self.optical.is_some()
     }
@@ -107,7 +179,8 @@ impl ConsoleState {
     }
 
     pub(super) fn mmio_regions(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
-        self.display.mmio_regions()
+        let ConsoleDisplayState::Vga(display) = &self.display;
+        display.mmio_regions()
     }
 }
 
@@ -141,7 +214,7 @@ pub struct ConsoleHardware {
     system_control: Arc<Mutex<Port92>>,
     #[cfg(target_arch = "x86_64")]
     bridge: Arc<Mutex<ConsoleBridge>>,
-    display: Arc<Mutex<DisplayDevice>>,
+    display: ConsoleDisplay,
     pub(super) server: Arc<Mutex<ConsoleServer>>,
     #[cfg(target_arch = "x86_64")]
     pub(super) usb: Arc<Mutex<UsbDevice>>,
@@ -157,8 +230,6 @@ impl ConsoleHardware {
             .take(crate::devices::display::FRAMEBUFFER_SIZE)
             .collect();
         self.display
-            .lock()
-            .unwrap()
             .vga()
             .lock()
             .unwrap()
@@ -185,8 +256,12 @@ impl DeviceManager {
         vm: &Arc<KvmVm>,
         config: &ConsoleConfig,
         state: Option<&ConsoleState>,
+        events: &mut crate::EventManager,
     ) -> io::Result<()> {
         config.validate()?;
+        if let Some(state) = state {
+            state.validate_display(config)?;
+        }
         if state.is_some_and(|state| config.vga_rom_path.is_some() != state.display.has_rom()) {
             return Err(io::Error::other(
                 "restored VGA ROM configuration and state disagree",
@@ -215,12 +290,44 @@ impl DeviceManager {
             .insert(system_control.clone(), u64::from(SYSTEM_CONTROL_PORT), 1)
             .map_err(|error| io::Error::other(error.to_string()))?;
         let bridge = ConsoleBridge::attach(pci, state.map(|state| &state.bridge))?;
-        let display = DisplayDevice::attach(
-            vm,
-            pci,
-            config.vga_rom_path.as_deref(),
-            state.map(|state| &state.display),
-        )?;
+        let (display, renderer) = match config.display {
+            DisplayModel::Vga => (
+                ConsoleDisplay::Vga(DisplayDevice::attach(
+                    vm,
+                    pci,
+                    config.vga_rom_path.as_deref(),
+                    state.and_then(|state| state.display.vga()),
+                )?),
+                None,
+            ),
+            DisplayModel::VirtioGpu => {
+                if state.is_none() {
+                    let gpu = Arc::new(Mutex::new(Gpu::new(1024, 768).map_err(io::Error::other)?));
+                    pci.attach_pci_virtio_device(vm, GPU_DEV_ID.to_owned(), gpu.clone(), events)
+                        .map_err(io::Error::other)?;
+                    gpu.lock().unwrap().check_registered()?;
+                }
+                let device = pci
+                    .get_device(VirtioDeviceType::Gpu, GPU_DEV_ID)
+                    .ok_or_else(|| io::Error::other("restored console requires its saved GPU"))?;
+                let renderer = device
+                    .lock()
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<Gpu>()
+                    .unwrap()
+                    .renderer();
+                let transport = pci
+                    .get_virtio_device(VirtioDeviceType::Gpu, GPU_DEV_ID)
+                    .unwrap();
+                let vga = transport
+                    .lock()
+                    .unwrap()
+                    .vga()
+                    .ok_or_else(|| io::Error::other("GPU has no boot VGA"))?;
+                (ConsoleDisplay::VirtioGpu(vga), Some(renderer))
+            }
+        };
         let optical = match &config.optical_image_path {
             Some(path) => Some(OpticalDevice::attach(
                 vm,
@@ -241,13 +348,16 @@ impl DeviceManager {
         let usb = UsbDevice::attach(vm, pci, state.map(|state| &state.usb))?;
         let mut server = ConsoleServer::new(
             &config.socket_path,
-            display.lock().unwrap().vga(),
+            display.vga(),
             ConsoleInput::Legacy {
                 keyboard: legacy.i8042.clone(),
                 tablet: Some(usb.clone()),
             },
             optical.clone(),
         )?;
+        if let Some(renderer) = renderer {
+            server.use_gpu(renderer);
+        }
         if let Some(state) = state {
             server.restore_held(&state.held)?;
             server.restore_release_pending(state.release_pending);
@@ -290,10 +400,14 @@ impl DeviceManager {
                 .map_err(io::Error::other)?;
             input
         };
-        let display = DisplayDevice::attach(vm, pci, state.map(|state| &state.display))?;
+        let display = ConsoleDisplay::Vga(DisplayDevice::attach(
+            vm,
+            pci,
+            state.and_then(|state| state.display.vga()),
+        )?);
         let server = ConsoleServer::new(
             &config.socket_path,
-            display.lock().unwrap().vga(),
+            display.vga(),
             ConsoleInput::Virtio(input),
         )?;
         self.console = Some(ConsoleHardware {
@@ -317,7 +431,7 @@ impl DeviceManager {
                 system_control: console.system_control.lock().unwrap().save(),
                 #[cfg(target_arch = "x86_64")]
                 bridge: console.bridge.lock().unwrap().save(),
-                display: console.display.lock().unwrap().save(),
+                display: console.display.save(),
                 #[cfg(target_arch = "x86_64")]
                 held,
                 #[cfg(target_arch = "x86_64")]
@@ -346,15 +460,9 @@ impl DeviceManager {
         &mut self,
         vm: &Arc<KvmVm>,
         state: &ConsoleState,
-        #[cfg(target_arch = "aarch64")] events: &mut crate::EventManager,
+        events: &mut crate::EventManager,
     ) -> io::Result<()> {
-        self.attach_console(
-            vm,
-            &state.config,
-            Some(state),
-            #[cfg(target_arch = "aarch64")]
-            events,
-        )
+        self.attach_console(vm, &state.config, Some(state), events)
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -392,6 +500,122 @@ mod registration_tests {
     use crate::vstate::vm::tests::setup_vm_with_memory;
 
     #[test]
+    fn virtio_console_restores_one_gpu_and_its_boot_display() {
+        use crate::device_manager::DeviceRestoreArgs;
+        use crate::resources::VmResources;
+        use crate::snapshot::Persist;
+        use crate::vstate::resources::ResourceAllocator;
+        use vmm_sys_util::tempdir::TempDir;
+        let directory = TempDir::new_with_prefix("./gpu-console-").unwrap();
+        let config = ConsoleConfig {
+            socket_path: directory.as_path().join("console.sock"),
+            display: DisplayModel::VirtioGpu,
+            vga_rom_path: None,
+            optical_image_path: None,
+        };
+        let mut source = setup_vm_with_memory(128 << 20);
+        source.setup_irqchip(true).unwrap();
+        let source = Arc::new(source);
+        let mut events = EventManager::new().unwrap();
+        let mut manager = DeviceManager::new(
+            &mut events,
+            source.vcpus_exit_evt(),
+            &source,
+            None,
+            None,
+            true,
+            true,
+        )
+        .unwrap();
+        manager.attach_vmgenid_device(&source).unwrap();
+        manager
+            .attach_console(&source, &config, None, &mut events)
+            .unwrap();
+        let pci = crate::device_manager::tests::pci_devices(&manager);
+        let transport = pci
+            .get_virtio_device(VirtioDeviceType::Gpu, GPU_DEV_ID)
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            &manager.console.as_ref().unwrap().display.vga(),
+            &transport.lock().unwrap().vga().unwrap()
+        ));
+        let gpu = pci.get_device(VirtioDeviceType::Gpu, GPU_DEV_ID).unwrap();
+        gpu.lock()
+            .unwrap()
+            .as_mut_any()
+            .downcast_mut::<Gpu>()
+            .unwrap()
+            .resize(1280, 720)
+            .unwrap();
+        let state: crate::device_manager::DevicesState =
+            bitcode::deserialize(&bitcode::serialize(&manager.save().unwrap()).unwrap()).unwrap();
+        assert!(matches!(
+            state.console.as_ref().unwrap().display,
+            ConsoleDisplayState::VirtioGpu
+        ));
+        let allocations = source.resource_allocator().save();
+        drop(gpu);
+        drop(manager);
+        drop(events);
+        drop(source);
+        let mut target = setup_vm_with_memory(128 << 20);
+        target.setup_irqchip(true).unwrap();
+        let target = Arc::new(target);
+        *target.resource_allocator() = ResourceAllocator::restore((), &allocations).unwrap();
+        let mut events = EventManager::new().unwrap();
+        let mut resources = VmResources::default();
+        let mut restore = |state| {
+            DeviceManager::restore(
+                DeviceRestoreArgs {
+                    mem: target.guest_memory(),
+                    vm: &target,
+                    event_manager: &mut events,
+                    vcpus_exit_evt: target.vcpus_exit_evt(),
+                    vm_resources: &mut resources,
+                    instance_id: "gpu-console-test",
+                    vmgenid_notification: Default::default(),
+                    vmclock_notification: Default::default(),
+                },
+                state,
+            )
+        };
+        let mut missing_gpu = state.clone();
+        let crate::device_manager::VirtioDevicesState::Pci(pci) = &mut missing_gpu.virtio_state
+        else {
+            panic!("expected PCI");
+        };
+        pci.gpu_device = None;
+        assert!(
+            restore(&missing_gpu)
+                .unwrap_err()
+                .to_string()
+                .contains("GPU snapshot topology")
+        );
+        let manager = restore(&state).unwrap();
+        let pci = crate::device_manager::tests::pci_devices(&manager);
+        let gpu = pci.get_device(VirtioDeviceType::Gpu, GPU_DEV_ID).unwrap();
+        assert_eq!(
+            gpu.lock()
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Gpu>()
+                .unwrap()
+                .renderer()
+                .lock()
+                .unwrap()
+                .preferred_dimensions(),
+            (1280, 720)
+        );
+        let transport = pci
+            .get_virtio_device(VirtioDeviceType::Gpu, GPU_DEV_ID)
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            &manager.console.as_ref().unwrap().display.vga(),
+            &transport.lock().unwrap().vga().unwrap()
+        ));
+    }
+
+    #[test]
     fn mismatched_optical_snapshot_is_rejected_before_attaching_devices() {
         use std::io::Write;
         use vmm_sys_util::tempdir::TempDir;
@@ -405,6 +629,8 @@ mod registration_tests {
         iso.as_file().set_len(2048).unwrap();
         let config = ConsoleConfig {
             socket_path: directory.as_path().join("console.sock"),
+            #[cfg(target_arch = "x86_64")]
+            display: Default::default(),
             vga_rom_path: Some(rom.as_path().to_owned()),
             optical_image_path: Some(iso.as_path().to_owned()),
         };
@@ -422,7 +648,9 @@ mod registration_tests {
             true,
         )
         .unwrap();
-        source.attach_console(&vm, &config, None).unwrap();
+        source
+            .attach_console(&vm, &config, None, &mut events)
+            .unwrap();
         let saved = source.save_console().unwrap();
 
         saved.validate_for_firmware(None).unwrap();
@@ -440,7 +668,7 @@ mod registration_tests {
             ))
             .unwrap_err();
         let error = source
-            .attach_console(&vm, &missing_rom.config, Some(&missing_rom))
+            .attach_console(&vm, &missing_rom.config, Some(&missing_rom), &mut events)
             .unwrap_err();
         assert_eq!(
             error.to_string(),
@@ -469,7 +697,9 @@ mod registration_tests {
             )
             .unwrap();
             let before = target.resource_allocator().pci_io.clone();
-            let error = manager.restore_console(&target, &state).unwrap_err();
+            let error = manager
+                .restore_console(&target, &state, &mut events)
+                .unwrap_err();
             assert_eq!(
                 error.to_string(),
                 "restored optical configuration and state disagree"

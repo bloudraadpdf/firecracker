@@ -57,6 +57,8 @@ pub struct ConsoleServer {
     timer: TimerFd,
     clients: HashMap<RawFd, Client>,
     vga: Arc<Mutex<Vga>>,
+    #[cfg(target_arch = "x86_64")]
+    gpu: Option<Arc<Mutex<crate::devices::virtio::gpu::renderer::Renderer>>>,
     input: ConsoleInput,
     #[cfg(target_arch = "x86_64")]
     optical: Option<Arc<Mutex<OpticalDevice>>>,
@@ -86,6 +88,8 @@ impl ConsoleServer {
             timer,
             clients: HashMap::new(),
             vga,
+            #[cfg(target_arch = "x86_64")]
+            gpu: None,
             input,
             #[cfg(target_arch = "x86_64")]
             optical,
@@ -94,6 +98,32 @@ impl ConsoleServer {
             #[cfg(target_arch = "x86_64")]
             release_pending: false,
         })
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    pub(super) fn use_gpu(
+        &mut self,
+        renderer: Arc<Mutex<crate::devices::virtio::gpu::renderer::Renderer>>,
+    ) {
+        self.gpu = Some(renderer);
+    }
+
+    fn frame(&self) -> crate::devices::display::Frame {
+        #[cfg(target_arch = "x86_64")]
+        if let Some(gpu) = &self.gpu {
+            let gpu = gpu.lock().unwrap();
+            if gpu.is_native() {
+                return gpu.frame().unwrap_or_else(|| {
+                    let (width, height) = gpu.preferred_dimensions();
+                    crate::devices::display::Frame {
+                        width: u16::try_from(width).unwrap(),
+                        height: u16::try_from(height).unwrap(),
+                        pixels: vec![0; usize::try_from(width * height).unwrap()],
+                    }
+                });
+            }
+        }
+        self.vga.lock().unwrap().render()
     }
 
     /// Check event registration after adding this subscriber to the event manager.
@@ -200,7 +230,7 @@ impl ConsoleServer {
         }
         match request[4] {
             0 if request[5..].iter().all(|byte| *byte == 0) => {
-                let frame = self.vga.lock().unwrap().render();
+                let frame = self.frame();
                 let mut response = Vec::with_capacity(16 + frame.pixels.len() * 4);
                 response.extend_from_slice(b"FCF1");
                 response.extend_from_slice(&u32::from(frame.width).to_le_bytes());
@@ -392,6 +422,7 @@ mod tests {
 
     struct Fixture {
         server: ConsoleServer,
+        path: std::path::PathBuf,
     }
 
     impl Fixture {
@@ -413,7 +444,7 @@ mod tests {
                 None,
             )
             .unwrap();
-            Self { server }
+            Self { server, path }
         }
     }
 
@@ -470,6 +501,72 @@ mod tests {
             response.len() - 16
         );
         assert_eq!(response.len() - 16, expected.pixels.len() * 4);
+    }
+
+    #[test]
+    fn frame_source_follows_native_scanout_blank_and_reset() {
+        use crate::devices::virtio::gpu::protocol::{Command, Rect, ResourceId};
+        use crate::devices::virtio::gpu::renderer::Renderer;
+        let mut server = Fixture::new();
+        let boot = server.handle(&request(0, &[]));
+        let renderer = Arc::new(Mutex::new(Renderer::new(1024, 768).unwrap()));
+        server.use_gpu(renderer.clone());
+        assert_eq!(server.handle(&request(0, &[])), boot);
+        let memory = crate::test_utils::single_region_mem(0x1000);
+        let id = ResourceId::new(1).unwrap();
+        {
+            let mut gpu = renderer.lock().unwrap();
+            gpu.execute(
+                Command::Create2d {
+                    id,
+                    format: 2,
+                    width: 2,
+                    height: 1,
+                },
+                &memory,
+            )
+            .unwrap();
+            gpu.execute(
+                Command::Scanout {
+                    rect: Rect {
+                        x: 0,
+                        y: 0,
+                        width: 2,
+                        height: 1,
+                    },
+                    scanout: 0,
+                    resource: Some(id),
+                },
+                &memory,
+            )
+            .unwrap();
+        }
+        let native = server.handle(&request(0, &[]));
+        assert_eq!(u32::from_le_bytes(native[4..8].try_into().unwrap()), 2);
+        assert_eq!(u32::from_le_bytes(native[8..12].try_into().unwrap()), 1);
+        assert_eq!(&native[16..], &[0; 8]);
+        renderer
+            .lock()
+            .unwrap()
+            .execute(
+                Command::Scanout {
+                    rect: Rect {
+                        x: 0,
+                        y: 0,
+                        width: 0,
+                        height: 0,
+                    },
+                    scanout: 0,
+                    resource: None,
+                },
+                &memory,
+            )
+            .unwrap();
+        let blank = server.handle(&request(0, &[]));
+        assert_eq!(u32::from_le_bytes(blank[4..8].try_into().unwrap()), 1024);
+        assert!(blank[16..].iter().all(|pixel| *pixel == 0));
+        renderer.lock().unwrap().reset();
+        assert_eq!(server.handle(&request(0, &[])), boot);
     }
 
     #[test]
@@ -644,19 +741,19 @@ mod tests {
     #[test]
     fn socket_cleanup_preserves_replacement_and_removes_owned_socket() {
         let server = Fixture::new();
-        let path = server._socket_path.path().to_path_buf();
+        let path = server.path.clone();
         assert!(path.exists());
         drop(server);
         assert!(!path.exists());
         let server = Fixture::new();
-        let path = server._socket_path.path().to_path_buf();
+        let path = server.path.clone();
         std::fs::remove_file(&path).unwrap();
         std::fs::write(&path, b"replacement").unwrap();
         drop(server);
         assert_eq!(std::fs::read(&path).unwrap(), b"replacement");
         std::fs::remove_file(&path).unwrap();
         let server = Fixture::new();
-        let path = server._socket_path.path().to_path_buf();
+        let path = server.path.clone();
         std::fs::remove_file(&path).unwrap();
         let replacement = UnixListener::bind(&path).unwrap();
         drop(server);
@@ -670,7 +767,7 @@ mod tests {
         use super::super::platform::PlatformRegistration;
         let mut events = crate::EventManager::new().unwrap();
         let fixture = Fixture::new();
-        let path = fixture._socket_path.path().to_path_buf();
+        let path = fixture.path.clone();
         let server = Arc::new(Mutex::new(fixture.server));
         let weak = Arc::downgrade(&server);
         let fail_boot = |events: &mut crate::EventManager| -> io::Result<()> {
@@ -691,7 +788,7 @@ mod tests {
     #[test]
     fn failed_restore_before_registration_releases_socket() {
         let mut fixture = Fixture::new();
-        let path = fixture._socket_path.path().to_path_buf();
+        let path = fixture.path.clone();
         fixture.restore_held(&[(0xff, false)]).unwrap_err();
         drop(fixture);
         let replacement = UnixListener::bind(&path).unwrap();
@@ -704,7 +801,7 @@ mod tests {
         use super::super::platform::PlatformRegistration;
         let mut events = crate::EventManager::new().unwrap();
         let fixture = Fixture::new();
-        let path = fixture._socket_path.path().to_path_buf();
+        let path = fixture.path.clone();
         let server = Arc::new(Mutex::new(fixture.server));
         let weak = Arc::downgrade(&server);
         PlatformRegistration::new(&mut events, Some(&server))

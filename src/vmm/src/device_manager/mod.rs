@@ -966,6 +966,31 @@ impl DeviceManager {
         state: &DevicesState,
     ) -> Result<Self, DeviceManagerPersistError> {
         state.validate_windows_support()?;
+        #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+        {
+            let gpu = match &state.virtio_state {
+                VirtioDevicesState::Pci(pci) => pci
+                    .gpu_device
+                    .as_ref()
+                    .map(|device| device.device_id.as_str()),
+                VirtioDevicesState::Mmio(mmio) => mmio
+                    .gpu_device
+                    .as_ref()
+                    .map(|device| device.device_id.as_str()),
+            };
+            let console_gpu = state
+                .console
+                .as_ref()
+                .is_some_and(console::ConsoleState::uses_gpu);
+            if console_gpu != gpu.is_some()
+                || gpu.is_some_and(|id| id != crate::devices::virtio::gpu::GPU_DEV_ID)
+                || (console_gpu && !matches!(state.virtio_state, VirtioDevicesState::Pci(_)))
+            {
+                return Err(DeviceManagerPersistError::Console(std::io::Error::other(
+                    "console and GPU snapshot topology disagree",
+                )));
+            }
+        }
         #[cfg(target_arch = "aarch64")]
         #[cfg(feature = "windows")]
         Self::validate_arm_platform_state(
@@ -1143,7 +1168,6 @@ impl DeviceManager {
                 manager.restore_console(
                     constructor_args.vm,
                     console,
-                    #[cfg(target_arch = "aarch64")]
                     constructor_args.event_manager,
                 )?;
                 constructor_args.vm_resources.console = manager.console_config();

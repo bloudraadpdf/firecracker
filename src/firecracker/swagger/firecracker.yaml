@@ -1403,6 +1403,14 @@ definitions:
       socket_path:
         type: string
         description: Private host Unix socket for the console bridge, at most 107 bytes.
+      display:
+        type: string
+        enum: [vga, virtio-gpu]
+        default: vga
+        description: >-
+          AMD64 display profile. virtio-gpu requires explicit cloud-hv firmware
+          and no VGA option ROM. It uses one PCI function for boot VGA and the
+          native virtio 2D driver. Not accepted on ARM64.
       vga_rom_path:
         type: string
         description: >-
