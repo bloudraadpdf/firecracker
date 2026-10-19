@@ -521,6 +521,12 @@ impl PutRequestsMetrics {
 /// Metrics specific to PATCH API Requests for counting user triggered actions and/or failures.
 #[derive(Debug, Default, Serialize)]
 pub struct PatchRequestsMetrics {
+    /// Number of preferred display-size PATCH requests.
+    #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+    pub display_count: SharedIncMetric,
+    /// Number of failed display request parses.
+    #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+    pub display_fails: SharedIncMetric,
     /// Number of tries to PATCH a block device.
     pub drive_count: SharedIncMetric,
     /// Number of failures in PATCHing a block device.
@@ -550,6 +556,10 @@ impl PatchRequestsMetrics {
     /// Const default construction.
     pub const fn new() -> Self {
         Self {
+            #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+            display_count: SharedIncMetric::new(),
+            #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+            display_fails: SharedIncMetric::new(),
             drive_count: SharedIncMetric::new(),
             drive_fails: SharedIncMetric::new(),
             network_count: SharedIncMetric::new(),

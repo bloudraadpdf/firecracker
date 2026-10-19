@@ -285,6 +285,34 @@ notify the host when it replenishes those buffers. The event queue is required;
 the status queue is optional for virtio input. The graphical firmware must send
 real LED status for the bridge's lock-key synchronisation.
 
+## Request a modern display size
+
+With `display: "virtio-gpu"`, request a preferred mode after VM start:
+
+```sh
+curl --unix-socket firecracker.sock -X PATCH http://localhost/display \
+  -H 'Content-Type: application/json' \
+  -d '{"width":1280,"height":720}'
+```
+
+Both dimensions are required. Each must be 1..4096, and the framebuffer must fit
+within 32 MiB at four bytes per pixel. Invalid requests leave the preferred mode
+unchanged. This endpoint requires the Windows feature on AMD64 and the modern
+GPU; legacy VGA and ARM64 return an unsupported-path or device error.
+
+A 204 response means the preferred mode was accepted and a virtio display-change
+notification was issued when needed. The guest controls its actual scanout. A
+repeated size is a no-op. Saved GPU state retains the preference and pending
+notification; reset retains the preference. Existing VNC and native viewers
+follow the guest's resulting framebuffer size.
+
+For automatic Windows changes, install the matching upstream VioGpu resolution
+service and session helper supplied with the external driver package. The
+[driver's configuration handler](https://github.com/virtio-win/kvm-guest-drivers-windows/blob/d92b9c073ec1108f51846d0bd109c5796b46fd36/viogpu/viogpudo/viogpudo.cpp)
+notifies that service after reading the new display information. A preferred-size
+request alone does not prove that the desktop has changed; inspect the returned
+console frame. No custom guest service or display driver is built into Firecracker.
+
 ## AMD64 installation and reboot
 
 `console.optical_drives` selects at most two read-only ATAPI masters on one PCI

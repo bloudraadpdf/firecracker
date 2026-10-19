@@ -5,6 +5,8 @@ pub mod actions;
 pub mod balloon;
 pub mod boot_source;
 pub mod cpu_configuration;
+#[cfg(all(feature = "windows", target_arch = "x86_64"))]
+pub mod display;
 pub mod drive;
 pub mod entropy;
 pub mod hotplug;

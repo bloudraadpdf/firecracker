@@ -30,6 +30,17 @@ pub struct OpticalDriveConfig {
     pub path_on_host: Option<PathBuf>,
 }
 
+/// Preferred modern display dimensions requested by the host.
+#[cfg(target_arch = "x86_64")]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DisplayUpdateConfig {
+    /// Preferred width in pixels.
+    pub width: u32,
+    /// Preferred height in pixels.
+    pub height: u32,
+}
+
 /// Local console endpoint and architecture-specific installation hardware.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

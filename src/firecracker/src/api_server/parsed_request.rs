@@ -15,6 +15,8 @@ use super::request::actions::parse_put_actions;
 use super::request::balloon::{parse_get_balloon, parse_patch_balloon, parse_put_balloon};
 use super::request::boot_source::parse_put_boot_source;
 use super::request::cpu_configuration::parse_put_cpu_config;
+#[cfg(all(feature = "windows", target_arch = "x86_64"))]
+use super::request::display::parse_patch_display;
 use super::request::drive::{parse_patch_drive, parse_put_drive};
 use super::request::entropy::parse_put_entropy;
 use super::request::instance_info::parse_get_instance_info;
@@ -122,6 +124,10 @@ impl TryFrom<&Request> for ParsedRequest {
             }
             (Method::Put, _, None) => method_to_error(Method::Put),
             (Method::Patch, "balloon", body) => parse_patch_balloon(body, path_tokens),
+            #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+            (Method::Patch, "display", Some(body)) if path_tokens.next().is_none() => {
+                parse_patch_display(body)
+            }
             (Method::Patch, "drives", Some(body)) => parse_patch_drive(body, path_tokens.next()),
             (Method::Patch, "machine-config", Some(body)) => parse_patch_machine_config(body),
             (Method::Patch, "mmds", Some(body)) => parse_patch_mmds(body),
@@ -488,16 +494,33 @@ pub mod tests {
 
     #[cfg(all(feature = "windows", target_arch = "x86_64"))]
     #[test]
-    fn optical_media_route_requires_exactly_one_drive_id() {
-        for (path, valid) in [
-            ("/optical-drives/exec", true),
-            ("/optical-drives", false),
-            ("/optical-drives/exec/extra", false),
+    fn platform_control_routes_require_complete_paths() {
+        for (method, path, body, valid) in [
+            (
+                "PUT",
+                "/optical-drives/exec",
+                r#"{"drive_id":"exec"}"#,
+                true,
+            ),
+            ("PUT", "/optical-drives", r#"{"drive_id":"exec"}"#, false),
+            (
+                "PUT",
+                "/optical-drives/exec/extra",
+                r#"{"drive_id":"exec"}"#,
+                false,
+            ),
+            ("PATCH", "/display", r#"{"width":1280,"height":720}"#, true),
+            (
+                "PATCH",
+                "/display/extra",
+                r#"{"width":1280,"height":720}"#,
+                false,
+            ),
         ] {
             let (mut sender, receiver) = UnixStream::pair().unwrap();
             let mut connection = HttpConnection::new(receiver);
             sender
-                .write_all(http_request("PUT", path, Some(r#"{"drive_id":"exec"}"#)).as_bytes())
+                .write_all(http_request(method, path, Some(body)).as_bytes())
                 .unwrap();
             connection.try_read().unwrap();
             let req = connection.pop_parsed_request().unwrap();

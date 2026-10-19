@@ -339,6 +339,34 @@ paths:
           schema:
             $ref: "#/definitions/Error"
 
+  /display:
+    patch:
+      summary: Requests a preferred modern display size. Post-boot only.
+      description: >-
+        Requires the windows feature on AMD64 and a virtio GPU. Both dimensions
+        are required. The guest controls the actual scanout; automatic Windows
+        desktop changes need the matching external driver resolution service.
+        Invalid dimensions leave the previous preference unchanged.
+      operationId: patchGuestDisplay
+      parameters:
+        - name: body
+          in: body
+          description: Preferred display dimensions in pixels.
+          required: true
+          schema:
+            $ref: "#/definitions/DisplayUpdateConfig"
+      responses:
+        204:
+          description: Preference accepted; changed sizes notify the guest.
+        400:
+          description: Invalid dimensions, absent GPU or pre-boot request.
+          schema:
+            $ref: "#/definitions/Error"
+        default:
+          description: Internal server error.
+          schema:
+            $ref: "#/definitions/Error"
+
   /optical-drives/{drive_id}:
     put:
       summary: Replaces optical media in an attached drive. Post-boot only.
@@ -1419,6 +1447,23 @@ definitions:
       socket_path:
         type: string
         description: Private control socket of a dedicated swtpm TPM 2.0 process (AMD64 only).
+
+  DisplayUpdateConfig:
+    type: object
+    additionalProperties: false
+    required:
+      - width
+      - height
+    description: The framebuffer must fit within 32 MiB at four bytes per pixel.
+    properties:
+      width:
+        type: integer
+        minimum: 1
+        maximum: 4096
+      height:
+        type: integer
+        minimum: 1
+        maximum: 4096
 
   OpticalDriveConfig:
     type: object
