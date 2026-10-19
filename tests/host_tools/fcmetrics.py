@@ -358,6 +358,9 @@ def validate_fc_metrics(metrics):
             "missed_write_count",
         ]
 
+    if {"display_count", "display_fails"} & metrics["patch_api_requests"].keys():
+        firecracker_metrics["patch_api_requests"].extend(["display_count", "display_fails"])
+
     if {"optical_count", "optical_fails"} & metrics["put_api_requests"].keys():
         firecracker_metrics["put_api_requests"].extend(["optical_count", "optical_fails"])
 

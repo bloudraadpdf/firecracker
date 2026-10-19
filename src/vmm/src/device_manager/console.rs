@@ -271,6 +271,24 @@ impl DeviceManager {
     }
 
     #[cfg(target_arch = "x86_64")]
+    pub(crate) fn update_display(
+        &mut self,
+        config: crate::vmm_config::console::DisplayUpdateConfig,
+    ) -> Result<(), crate::devices::virtio::gpu::GpuError> {
+        let gpu = match &self.virtio_devices {
+            VirtioDevices::Pci(pci) => pci.get_device(VirtioDeviceType::Gpu, GPU_DEV_ID),
+            _ => None,
+        }
+        .ok_or_else(|| io::Error::other("virtio GPU is absent"))?;
+        gpu.lock()
+            .unwrap()
+            .as_mut_any()
+            .downcast_mut::<Gpu>()
+            .unwrap()
+            .resize(config.width, config.height)
+    }
+
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn update_optical_drive(
         &mut self,
         config: crate::vmm_config::console::OpticalDriveConfig,
@@ -589,13 +607,30 @@ mod registration_tests {
             &transport.lock().unwrap().vga().unwrap()
         ));
         let gpu = pci.get_device(VirtioDeviceType::Gpu, GPU_DEV_ID).unwrap();
-        gpu.lock()
-            .unwrap()
-            .as_mut_any()
-            .downcast_mut::<Gpu>()
-            .unwrap()
-            .resize(1280, 720)
+        manager
+            .update_display(crate::vmm_config::console::DisplayUpdateConfig {
+                width: 1280,
+                height: 720,
+            })
             .unwrap();
+        manager
+            .update_display(crate::vmm_config::console::DisplayUpdateConfig {
+                width: 4096,
+                height: 4096,
+            })
+            .unwrap_err();
+        assert_eq!(
+            gpu.lock()
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Gpu>()
+                .unwrap()
+                .renderer()
+                .lock()
+                .unwrap()
+                .preferred_dimensions(),
+            (1280, 720)
+        );
         let state: crate::device_manager::DevicesState =
             bitcode::deserialize(&bitcode::serialize(&manager.save().unwrap()).unwrap()).unwrap();
         assert!(matches!(
