@@ -12,6 +12,11 @@ Native VNC viewer -> SSH tunnel -> loopback RFB bridge --+
                                             Firecracker Unix socket
 ```
 
+An optional Rust [native GUI](../../../docs/windows-console.md#optional-native-gui)
+uses the same RFB bridge and SSH tunnel on Linux, macOS and Windows. Its build
+feature is off by default. On a Linux desktop, `firecracker --gui` can own a
+headless VMM child and its private bridge instead.
+
 ## Build and check
 
 Follow the [Rust build prerequisites](../README.md#build-prerequisites). From
@@ -25,7 +30,8 @@ cargo clippy --locked --manifest-path tools/windows/console/Cargo.toml --all-tar
 ```
 
 The shared library is `src/console`; its unit tests run in the root workspace.
-Both workspaces retain their lock files. `Cargo.lock` pins the bridge dependencies. The WebSocket implementation uses
+Both workspaces retain their lock files. `Cargo.lock` pins the bridge dependencies.
+The WebSocket implementation uses
 `tungstenite` 0.30.0. RFB follows
 [RFC 6143](https://www.rfc-editor.org/rfc/rfc6143).
 

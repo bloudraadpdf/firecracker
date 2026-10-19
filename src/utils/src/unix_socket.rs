@@ -6,8 +6,50 @@
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Removes a captured Unix socket on drop only if its device and inode still match.
+#[derive(Debug)]
+pub struct SocketPath {
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+}
+
+impl SocketPath {
+    /// The absolute path captured with the socket identity.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Capture the identity of an existing socket in the caller's private directory.
+    pub fn capture(path: &Path) -> io::Result<Self> {
+        let path = std::env::current_dir()?.join(path);
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if !metadata.file_type().is_socket() {
+            return Err(io::Error::other("path is not a Unix socket"));
+        }
+        Ok(Self {
+            path,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+}
+
+impl Drop for SocketPath {
+    fn drop(&mut self) {
+        if std::fs::symlink_metadata(&self.path).is_ok_and(|metadata| {
+            metadata.file_type().is_socket()
+                && metadata.dev() == self.device
+                && metadata.ino() == self.inode
+        }) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
 
 /// Validate a nonempty filesystem socket path with room for its terminating NUL.
 pub fn validate(path: &Path) -> io::Result<()> {
@@ -60,9 +102,10 @@ pub fn connect(path: &Path) -> io::Result<UnixStream> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::os::unix::net::UnixListener;
     use std::path::PathBuf;
+
+    use super::*;
 
     struct SocketPath(PathBuf);
     impl Drop for SocketPath {

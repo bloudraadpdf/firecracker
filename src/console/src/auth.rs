@@ -1,9 +1,11 @@
 // Copyright 2026 Bloudraad.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::invalid;
-use des::cipher::{BlockEncrypt, KeyInit};
 use std::io;
+
+use des::cipher::{BlockEncrypt, KeyInit};
+
+use crate::invalid;
 
 #[derive(Clone)]
 pub(crate) struct Password([u8; 8]);

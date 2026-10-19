@@ -3,10 +3,10 @@
 
 mod assets;
 mod keys;
+#[cfg(feature = "gui")]
+mod local;
 mod rfb;
 mod websocket;
-
-use crate::{Frame, MAX_FRAME, invalid};
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::unix::net::UnixStream;
@@ -14,6 +14,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+
+#[cfg(feature = "gui")]
+pub use local::LocalBridge;
+
+use crate::{Frame, MAX_FRAME, invalid};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -139,6 +144,27 @@ fn authenticate_console(
     guard.backend.input(3, &[])
 }
 
+fn serve_connection(
+    mut stream: TcpStream,
+    guard: &mut SessionGuard,
+    auth: Option<websocket::Auth>,
+    password: Option<rfb::Password>,
+    mapping: rfb::KeyboardMapping,
+) -> io::Result<()> {
+    configure(&stream)?;
+    let transport = stream.try_clone()?;
+    if let Some(auth) = auth {
+        let mut socket = websocket::accept(stream, &auth)?;
+        authenticate_console(&mut socket, guard, None)?;
+        transport.set_read_timeout(None)?;
+        rfb::serve(&mut socket, &guard.backend, mapping)
+    } else {
+        authenticate_console(&mut stream, guard, password.as_ref())?;
+        transport.set_read_timeout(None)?;
+        rfb::serve(&mut stream, &guard.backend, mapping)
+    }
+}
+
 fn listen(
     address: SocketAddr,
     backend: Backend,
@@ -149,7 +175,8 @@ fn listen(
 ) -> io::Result<()> {
     if !address.ip().is_loopback() {
         return Err(invalid(
-            "console listeners must bind to loopback; use an authenticated remote gateway or SSH tunnel",
+            "console listeners must bind to loopback; use an authenticated remote gateway or SSH \
+             tunnel",
         ));
     }
     let listener = TcpListener::bind(address)?;
@@ -174,21 +201,7 @@ fn listen(
         let auth = auth.clone();
         let password = password.clone();
         std::thread::spawn(move || {
-            let result = (|| {
-                configure(&stream)?;
-                let transport = stream.try_clone()?;
-                if let Some(auth) = auth {
-                    let mut socket = websocket::accept(stream, &auth)?;
-                    authenticate_console(&mut socket, &mut guard, None)?;
-                    transport.set_read_timeout(None)?;
-                    rfb::serve(&mut socket, &guard.backend, mapping)
-                } else {
-                    let mut stream = stream;
-                    authenticate_console(&mut stream, &mut guard, password.as_ref())?;
-                    transport.set_read_timeout(None)?;
-                    rfb::serve(&mut stream, &guard.backend, mapping)
-                }
-            })();
+            let result = serve_connection(stream, &mut guard, auth, password, mapping);
             if let Err(error) = result {
                 eprintln!("Console session ended: {error}");
             }
@@ -198,7 +211,12 @@ fn listen(
 }
 
 pub fn run(mut args: impl Iterator<Item = std::ffi::OsString>) -> io::Result<()> {
-    let socket = args.next().ok_or_else(|| invalid("usage: firecracker-console SOCKET rfb|rfb-macos ADDRESS [PASSWORD_FILE] | SOCKET websocket ADDRESS TOKEN_FILE ORIGIN | WEB_DIR assets ADDRESS"))?;
+    let socket = args.next().ok_or_else(|| {
+        invalid(
+            "usage: firecracker-console SOCKET rfb|rfb-macos ADDRESS [PASSWORD_FILE] | SOCKET \
+             websocket ADDRESS TOKEN_FILE ORIGIN | WEB_DIR assets ADDRESS",
+        )
+    })?;
     let mode = args.next().ok_or_else(|| invalid("missing mode"))?;
     let backend = Backend(PathBuf::from(&socket));
     if mode == "screenshot" {
@@ -301,8 +319,9 @@ pub fn run(mut args: impl Iterator<Item = std::ffi::OsString>) -> io::Result<()>
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::os::unix::net::UnixListener;
+
+    use super::*;
 
     fn read_backend_request(listener: &UnixListener) -> (UnixStream, [u8; 12]) {
         listener.set_nonblocking(true).unwrap();
