@@ -251,3 +251,125 @@ fn mode_change_reset_and_scanout_disable_have_separate_lifetimes() {
     assert!(!renderer.is_native());
     assert_eq!(renderer.preferred, (1920, 1080));
 }
+
+fn saved_pixel(mem: &GuestMemoryMmap) -> RendererState {
+    let mut renderer = Renderer::new(1024, 768).unwrap();
+    mem.write_slice(&[0, 0, 255, 0], GuestAddress(0x1000))
+        .unwrap();
+    submit(&mut renderer, mem, 0x0101, &[1, 2, 1, 1]).unwrap();
+    submit(&mut renderer, mem, 0x0106, &[1, 1, 0x1000, 0, 4, 0]).unwrap();
+    submit(&mut renderer, mem, 0x0105, &[0, 0, 1, 1, 0, 0, 1, 0]).unwrap();
+    submit(&mut renderer, mem, 0x0103, &[0, 0, 1, 1, 0, 1]).unwrap();
+    renderer.cursor = Some(Cursor {
+        x: u32::MAX,
+        y: u32::MAX,
+        hot_x: 63,
+        hot_y: 63,
+        pixels: vec![0x80008000; (CURSOR_SIZE * CURSOR_SIZE) as usize],
+    });
+    renderer.save()
+}
+
+#[test]
+fn restore_keeps_unflushed_resource_pixels_scanout_cursor_and_guest_backing() {
+    let mem = memory();
+    let mut renderer = Renderer::restore(&saved_pixel(&mem), &mem).unwrap();
+    mem.write_slice(&[255, 0, 0, 0], GuestAddress(0x1000))
+        .unwrap();
+    submit(&mut renderer, &mem, 0x0105, &[0, 0, 1, 1, 0, 0, 1, 0]).unwrap();
+    let bytes = bitcode::serialize(&renderer.save()).unwrap();
+    let state: RendererState = bitcode::deserialize(&bytes).unwrap();
+    mem.write_slice(&[0, 255, 0, 0], GuestAddress(0x1000))
+        .unwrap();
+    let mut restored = Renderer::restore(&state, &mem).unwrap();
+    assert!(restored.is_native());
+    assert_eq!(restored.total_bytes, 4);
+    assert_eq!(restored.preferred, (1024, 768));
+    let cursor = restored.cursor.as_ref().unwrap();
+    assert_eq!(
+        (cursor.x, cursor.y, cursor.hot_x, cursor.hot_y),
+        (u32::MAX, u32::MAX, 63, 63)
+    );
+    assert_eq!(cursor.pixels, vec![0x80008000; 4096]);
+    assert_eq!(restored.frame().unwrap().pixels, [0xff0000]);
+    submit(&mut restored, &mem, 0x0104, &[0, 0, 1, 1, 1, 0]).unwrap();
+    assert_eq!(restored.frame().unwrap().pixels, [0x0000ff]);
+    submit(&mut restored, &mem, 0x0105, &[0, 0, 1, 1, 0, 0, 1, 0]).unwrap();
+    submit(&mut restored, &mem, 0x0104, &[0, 0, 1, 1, 1, 0]).unwrap();
+    assert_eq!(restored.frame().unwrap().pixels, [0x00ff00]);
+}
+
+#[test]
+fn restore_rejects_inconsistent_resources_backing_scanout_and_cursor() {
+    let mem = memory();
+    let state = saved_pixel(&mem);
+    let cases: &[fn(&mut RendererState)] = &[
+        |state| state.preferred = (0, 768),
+        |state| state.resources.push(state.resources[0].clone()),
+        |state| {
+            state
+                .resources
+                .resize(MAX_RESOURCES + 1, state.resources[0].clone())
+        },
+        |state| state.resources[0].1.width = u32::MAX,
+        |state| state.resources[0].1.format = 0,
+        |state| state.resources[0].1.pixels.clear(),
+        |state| state.resources[0].1.backing[0].length = 0,
+        |state| state.resources[0].1.backing[0].address = u64::MAX,
+        |state| state.resources[0].1.backing[0].address = 0x20000,
+        |state| {
+            state.resources[0].1.backing.resize(
+                MAX_BACKING_ENTRIES + 1,
+                BackingEntry {
+                    address: 0x1000,
+                    length: 4,
+                },
+            )
+        },
+        |state| state.scanout.as_mut().unwrap().resource = ResourceId::new(2).unwrap(),
+        |state| state.scanout.as_mut().unwrap().rect.width = 0,
+        |state| state.scanout.as_mut().unwrap().rect.x = u32::MAX,
+        |state| state.scanout.as_mut().unwrap().pixels.clear(),
+        |state| state.scanout.as_mut().unwrap().pixels[0] |= 0xff000000,
+        |state| state.cursor.as_mut().unwrap().pixels.clear(),
+        |state| state.cursor.as_mut().unwrap().hot_x = 64,
+        |state| state.native = false,
+    ];
+    for (index, modify) in cases.iter().enumerate() {
+        let mut invalid = state.clone();
+        modify(&mut invalid);
+        assert!(Renderer::restore(&invalid, &mem).is_err(), "case {index}");
+    }
+    Renderer::restore(&state, &mem).unwrap();
+}
+
+#[test]
+fn restore_checks_the_aggregate_resource_budget_before_cloning_pixels() {
+    let mem = memory();
+    let mut state = Renderer::new(1024, 768).unwrap().save();
+    let resource = Resource {
+        width: 4096,
+        height: 2048,
+        format: 2,
+        pixels: vec![0; MAX_RESOURCE_BYTES],
+        backing: vec![],
+    };
+    state.resources = vec![
+        (ResourceId::new(1).unwrap(), resource.clone()),
+        (ResourceId::new(2).unwrap(), resource),
+        (
+            ResourceId::new(3).unwrap(),
+            Resource {
+                width: 1,
+                height: 1,
+                format: 2,
+                pixels: vec![0; 4],
+                backing: vec![],
+            },
+        ),
+    ];
+    assert_eq!(
+        Renderer::restore(&state, &mem).unwrap_err(),
+        RendererError::OutOfMemory
+    );
+}

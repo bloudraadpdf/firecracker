@@ -6,6 +6,9 @@
 pub mod protocol;
 pub mod queue;
 pub mod renderer;
+mod state;
+
+pub use state::RendererState;
 
 #[cfg(test)]
 mod test_utils;
