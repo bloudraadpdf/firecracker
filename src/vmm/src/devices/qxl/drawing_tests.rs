@@ -5,7 +5,7 @@ use super::drawing::{Drawable, Layout};
 use super::memory::{COMMAND_RING, Memory, Region};
 use super::protocol::{PrimarySurface, Rect};
 use super::surface::Surface;
-use super::test_utils::glyph;
+use super::test_utils::{glyph, path};
 use super::transport::{AddressSpace, Queue, Queues, TransportError};
 
 const SLOT: u64 = 0x0101_0000_0000_0000;
@@ -172,6 +172,101 @@ fn text_payload(background: [i32; 4], foreground_color: u32, background_color: u
     data[64..66].copy_from_slice(&8u16.to_le_bytes());
     data[66..68].copy_from_slice(&8u16.to_le_bytes());
     data
+}
+
+fn stroke_payload(foreground: u16) -> Vec<u8> {
+    let mut data = vec![0xa5; 52];
+    data[..8].copy_from_slice(&(SLOT | STRING as u64).to_le_bytes());
+    data[8] = 0;
+    data[12..16].copy_from_slice(&16i32.to_le_bytes());
+    data[28..48].copy_from_slice(&fill(1, 8)[..20]);
+    data[48..50].copy_from_slice(&foreground.to_le_bytes());
+    data
+}
+
+#[test]
+fn cosmetic_strokes_share_clip_union_and_signed_surface_rows() {
+    for layout in [Layout::Modern, Layout::Compat] {
+        let fixture = Fixture::new(-20);
+        fixture.background(7);
+        fixture.store(STRING, &path(&[(3, &[[0, 0], [64, 0]])]));
+        let mut data = command(layout, 10, [0, 0, 4, 4], &stroke_payload(64));
+        fixture.clips(&mut data, layout, &[[1, 0, 3, 1], [1, 0, 3, 1]]);
+        fixture.store(DRAW, &data);
+        fixture.draw(layout);
+        assert_eq!(
+            fixture.surface().frame().unwrap().pixels,
+            [7, 6, 6, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7]
+        );
+    }
+}
+
+#[test]
+fn styled_strokes_paint_background_and_accept_destination_only_operations() {
+    let fixture = Fixture::new(20);
+    fixture.background(7);
+    fixture.store(STRING, &path(&[(3, &[[0, 0], [64, 0]])]));
+    fixture.store(IMAGE, &16i32.to_le_bytes());
+    let mut data = stroke_payload(512);
+    data[8] = 8;
+    data[11] = 1;
+    data[20..28].copy_from_slice(&(SLOT | IMAGE as u64).to_le_bytes());
+    data[28..48].fill(0xa5);
+    data[50..52].copy_from_slice(&0u16.to_le_bytes());
+    fixture.store(DRAW, &command(Layout::Modern, 10, [0, 0, 4, 1], &data));
+    fixture.draw(Layout::Modern);
+    assert_eq!(
+        &fixture.surface().frame().unwrap().pixels[..4],
+        &[0xfffff8, 7, 0xfffff8, 7]
+    );
+    fixture.background(7);
+    data[28..48].copy_from_slice(&fill(1, 8)[..20]);
+    data[48..50].copy_from_slice(&8u16.to_le_bytes());
+    data[50..52].copy_from_slice(&512u16.to_le_bytes());
+    fixture.store(DRAW, &command(Layout::Compat, 10, [0, 0, 4, 1], &data));
+    fixture.draw(Layout::Compat);
+    assert_eq!(
+        &fixture.surface().frame().unwrap().pixels[..4],
+        &[1, 0xfffff8, 1, 0xfffff8]
+    );
+}
+
+#[test]
+fn crossing_stroke_segments_preserve_repeated_raster_operations() {
+    let fixture = Fixture::new(20);
+    fixture.background(7);
+    fixture.store(
+        STRING,
+        &path(&[(3, &[[0, 16], [64, 16]]), (3, &[[16, 0], [16, 64]])]),
+    );
+    fixture.store(
+        DRAW,
+        &command(Layout::Modern, 10, [0, 0, 4, 4], &stroke_payload(64)),
+    );
+    fixture.draw(Layout::Modern);
+    assert_eq!(
+        fixture.surface().frame().unwrap().pixels,
+        [7, 6, 7, 7, 6, 7, 6, 6, 7, 6, 7, 7, 7, 6, 7, 7]
+    );
+}
+
+#[test]
+fn malformed_later_stroke_records_do_not_write_and_nop_ignores_the_brush() {
+    let fixture = Fixture::new(20);
+    fixture.background(7);
+    fixture.store(STRING, &path(&[(3, &[[0, 0], [64, 0]]), (32, &[[0, 0]])]));
+    fixture.store(
+        DRAW,
+        &command(Layout::Modern, 10, [0, 0, 4, 4], &stroke_payload(8)),
+    );
+    fixture.prepare(Layout::Modern).unwrap_err();
+    assert_eq!(fixture.surface().frame().unwrap().pixels, [7; 16]);
+    fixture.store(STRING, &path(&[(3, &[[0, 0], [64, 0]])]));
+    let mut data = stroke_payload(0);
+    data[28..48].fill(0xa5);
+    fixture.store(DRAW, &command(Layout::Modern, 10, [0, 0, 4, 4], &data));
+    fixture.draw(Layout::Modern);
+    assert_eq!(fixture.surface().frame().unwrap().pixels, [7; 16]);
 }
 
 #[test]

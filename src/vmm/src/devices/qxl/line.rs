@@ -61,6 +61,51 @@ impl Line {
         }
     }
 
+    fn major_axis(&self) -> usize {
+        usize::from(self.delta[1].abs() > self.delta[0].abs())
+    }
+
+    fn candidates(&self, major: i64) -> [[i64; 2]; 2] {
+        let axis = self.major_axis();
+        let other = 1 - axis;
+        let denominator = i128::from(self.delta[axis]) * 16;
+        let numerator = i128::from(self.start[other]) * i128::from(self.delta[axis])
+            + (i128::from(major) * 16 - i128::from(self.start[axis]))
+                * i128::from(self.delta[other]);
+        let minor = if denominator < 0 {
+            (-numerator).div_euclid(-denominator)
+        } else {
+            numerator.div_euclid(denominator)
+        };
+        // Endpoints and candidate major coordinates are bounded by Q28.4.
+        [minor, minor + 1].map(|minor| {
+            let minor = i64::try_from(minor).unwrap();
+            if axis == 0 {
+                [major, minor]
+            } else {
+                [minor, major]
+            }
+        })
+    }
+
+    fn extent(&self) -> Option<[i64; 2]> {
+        if self.delta == [0, 0] {
+            return None;
+        }
+        let axis = self.major_axis();
+        let lower = self.start[axis].min(self.end[axis]).div_euclid(16) - 1;
+        let upper = self.start[axis].max(self.end[axis]).div_euclid(16) + 1;
+        let covered = |major| {
+            self.candidates(major)
+                .into_iter()
+                .any(|[x, y]| self.covers(x, y))
+        };
+        Some([
+            (lower..=lower + 3).find(|&major| covered(major))?,
+            (upper - 3..=upper).rev().find(|&major| covered(major))?,
+        ])
+    }
+
     fn corner(&self, point: [i64; 2]) -> Option<Parameter> {
         let [dx, dy] = self.delta;
         let [x, y] = [point[0] - self.start[0], point[1] - self.start[1]];
@@ -77,9 +122,9 @@ impl Line {
             .then_some(parameter)
     }
 
-    fn covers(&self, x: u32, y: u32) -> bool {
+    fn covers(&self, x: i64, y: i64) -> bool {
         let [dx, dy] = self.delta;
-        let [x, y] = [i64::from(x) * 16, i64::from(y) * 16];
+        let [x, y] = [x * 16, y * 16];
         if let Some(parameter) = self.corner([x + 8, y]) {
             let outgoing = dx + dy.abs();
             if (outgoing > 0 || outgoing == 0 && dy < 0)
@@ -171,38 +216,51 @@ pub fn rasterize(
     if line.delta == [0, 0] || width == 0 || height == 0 {
         return Ok(Vec::new());
     }
-    let major_axis = usize::from(line.delta[1].abs() > line.delta[0].abs());
-    let minor_axis = 1 - major_axis;
+    let Some([first, last]) = line.extent() else {
+        return Ok(Vec::new());
+    };
+    let major_axis = line.major_axis();
     let dimensions = [width, height];
-    let denominator = i128::from(line.delta[major_axis]) * 16;
+    let first = first.clamp(0, i64::from(dimensions[major_axis]));
+    let end = (last + 1).clamp(0, i64::from(dimensions[major_axis]));
     let mut pixels = Vec::new();
-    for major in 0..dimensions[major_axis] {
-        let numerator = i128::from(line.start[minor_axis]) * i128::from(line.delta[major_axis])
-            + (i128::from(major) * 16 - i128::from(line.start[major_axis]))
-                * i128::from(line.delta[minor_axis]);
-        let minor = if denominator < 0 {
-            (-numerator).div_euclid(-denominator)
-        } else {
-            numerator.div_euclid(denominator)
-        };
-        // A major-axis step intersects at most two candidate pixel diamonds.
-        for minor in [minor, minor + 1] {
-            let Ok(minor) = u32::try_from(minor) else {
-                continue;
-            };
-            if minor < dimensions[minor_axis] {
-                let pixel = if major_axis == 0 {
-                    [major, minor]
-                } else {
-                    [minor, major]
-                };
-                if line.covers(pixel[0], pixel[1]) {
-                    pixels.push(pixel);
-                }
+    for major in first..end {
+        for [x, y] in line.candidates(major) {
+            if x >= 0
+                && y >= 0
+                && x < i64::from(width)
+                && y < i64::from(height)
+                && line.covers(x, y)
+            {
+                pixels.push([u32::try_from(x).unwrap(), u32::try_from(y).unwrap()]);
             }
         }
     }
     Ok(pixels)
+}
+
+#[derive(Debug)]
+pub(super) struct Progression {
+    axis: usize,
+    first: i64,
+    pub length: u64,
+}
+
+impl Progression {
+    pub fn new(start: [i32; 2], end: [i32; 2]) -> Option<Self> {
+        let line = Line::new(start, end);
+        let [first, last] = line.extent()?;
+        let axis = line.major_axis();
+        Some(Self {
+            axis,
+            first: if line.delta[axis] < 0 { last } else { first },
+            length: first.abs_diff(last) + 1,
+        })
+    }
+
+    pub fn offset(&self, point: [u32; 2]) -> u64 {
+        self.first.abs_diff(i64::from(point[self.axis]))
+    }
 }
 
 #[cfg(test)]
@@ -228,6 +286,34 @@ mod tests {
                 rows[y as usize] |= 1 << x;
             }
             assert_eq!(rows, case.rows, "{:?} -> {:?}", case.start, case.end);
+            if case
+                .start
+                .into_iter()
+                .chain(case.end)
+                .all(|coordinate| (8..=232).contains(&coordinate))
+            {
+                let count = case
+                    .rows
+                    .iter()
+                    .map(|row| u64::from(row.count_ones()))
+                    .sum::<u64>();
+                let progression = Progression::new(case.start, case.end);
+                assert_eq!(
+                    progression
+                        .as_ref()
+                        .map_or(0, |progression| progression.length),
+                    count
+                );
+                if let Some(progression) = progression {
+                    let mut offsets: Vec<_> = rasterize(case.start, case.end, 16, 16)
+                        .unwrap()
+                        .into_iter()
+                        .map(|point| progression.offset(point))
+                        .collect();
+                    offsets.sort_unstable();
+                    assert_eq!(offsets, (0..count).collect::<Vec<_>>());
+                }
+            }
         }
     }
 

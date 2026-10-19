@@ -37,3 +37,21 @@ pub(super) fn glyph(
     bytes.extend(data);
     bytes
 }
+
+pub(super) fn path(segments: &[(u32, &[[i32; 2]])]) -> Vec<u8> {
+    let mut data = Vec::new();
+    for &(flags, points) in segments {
+        data.extend(flags.to_le_bytes());
+        data.extend(u32::try_from(points.len()).unwrap().to_le_bytes());
+        for point in points {
+            data.extend(point.iter().flat_map(|coordinate| coordinate.to_le_bytes()));
+        }
+    }
+    let length = u32::try_from(data.len()).unwrap();
+    let mut result = Vec::new();
+    result.extend(length.to_le_bytes());
+    result.extend(length.to_le_bytes());
+    result.extend([0; 16]);
+    result.extend(data);
+    result
+}

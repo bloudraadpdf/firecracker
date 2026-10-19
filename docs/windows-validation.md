@@ -54,8 +54,20 @@ surface dimensions and uses wide integer arithmetic for coordinate extremes.
 Its pixel output matches 778 captured native GDI cases, including fractional
 starts, short segments, reversed directions and endpoint ties. The reference
 and capture procedure are in [the QXL test data](../tests/data/qxl/README.md).
-This component is not connected to drawing commands yet.
-Stroke, composite, surface-image and self-bitmap operations remain incomplete.
+Stroke commands now decode continued and closed cosmetic paths in both drawing
+layouts. Styles support fixed-point dash lengths, odd-length cycles, initial
+gaps, explicit style resets and phase progression through clipped pixels.
+Foreground and background raster operations share the brush; a zero descriptor
+leaves the destination unchanged. Unused solid-line style and background fields
+are not read. Prepared stroke pixels use the common clip union and retain
+operation order at crossings. Limits are 1 MiB of packed path data, 65,536
+points, 100 style entries, 16,777,216 raster steps and 1,048,576 prepared pixels.
+Checks cover continuation, closure, clipping, reversed dash progression, chunk
+boundaries, malformed records and rejection before writes. The existing Windows
+driver does not advertise hardware Bezier or geometric-wide-line support; GDI
+decomposes those requests before submission. Such packed path commands remain
+unsupported. Native XP/7 stroke and dash rendering still needs validation.
+Composite, surface-image and self-bitmap operations remain incomplete.
 The layout follows
 the published [QXL device ABI](https://sources.debian.org/src/spice-protocol/0.12.14-1/spice/qxl_dev.h/).
 It does not expose a QXL PCI device yet. Component checks do not establish guest
