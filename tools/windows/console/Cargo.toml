@@ -8,11 +8,4 @@ publish = false
 [workspace]
 
 [dependencies]
-des = "=0.8.1"
-getrandom = "=0.4.3"
-tiny_http = "=0.12.0"
-tungstenite = { version = "=0.30.0", default-features = false, features = ["handshake"] }
-utils = { path = "../../../src/utils" }
-
-[dev-dependencies]
-libc = "=0.2.190"
+console = { path = "../../../src/console", features = ["bridge"] }

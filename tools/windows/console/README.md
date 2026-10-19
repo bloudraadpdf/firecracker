@@ -19,11 +19,13 @@ the full repository checkout on the Linux VM host:
 
 ```sh
 cargo build --locked --manifest-path tools/windows/console/Cargo.toml
-cargo test --locked --manifest-path tools/windows/console/Cargo.toml
+cargo test --locked -p console
+cargo clippy --locked -p console --all-targets -- -D warnings
 cargo clippy --locked --manifest-path tools/windows/console/Cargo.toml --all-targets -- -D warnings
 ```
 
-`Cargo.lock` pins the bridge dependencies. The WebSocket implementation uses
+The shared library is `src/console`; its unit tests run in the root workspace.
+Both workspaces retain their lock files. `Cargo.lock` pins the bridge dependencies. The WebSocket implementation uses
 `tungstenite` 0.30.0. RFB follows
 [RFC 6143](https://www.rfc-editor.org/rfc/rfc6143).
 

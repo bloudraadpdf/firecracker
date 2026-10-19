@@ -167,7 +167,7 @@ mod tests {
         let auth = Auth::new(token.clone(), "https://console.example".to_owned()).unwrap();
         let server = std::thread::spawn(move || {
             let (tcp, _) = listener.accept().unwrap();
-            crate::configure(&tcp).unwrap();
+            crate::bridge::configure(&tcp).unwrap();
             let mut stream = accept(tcp, &auth).unwrap();
             stream.write_all(b"RFB 003.008\n").unwrap();
             let mut reply = [0; 12];
@@ -181,7 +181,7 @@ mod tests {
             .headers_mut()
             .insert("origin", "https://console.example".parse().unwrap());
         let tcp = TcpStream::connect(address).unwrap();
-        crate::configure(&tcp).unwrap();
+        crate::bridge::configure(&tcp).unwrap();
         let (mut client, _) = tungstenite::client(request, tcp).unwrap();
         assert_eq!(
             client.read().unwrap().into_data().as_ref(),
