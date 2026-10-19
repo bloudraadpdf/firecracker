@@ -1,7 +1,7 @@
 // Copyright 2026 Bloudraad.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::net::Shutdown;
+use std::net::{Shutdown, TcpListener};
 use std::sync::Mutex;
 use std::thread::JoinHandle;
 
@@ -56,7 +56,7 @@ impl LocalBridge {
                             busy: busy.clone(),
                         };
                         serve_connection(
-                            stream,
+                            transport::Stream::Tcp(stream),
                             &mut guard,
                             None,
                             None,

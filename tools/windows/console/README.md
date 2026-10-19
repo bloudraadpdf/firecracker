@@ -78,6 +78,18 @@ protocol, not transport encryption; retain the SSH tunnel. The bridge rejects
 non-loopback bind addresses. Authenticated sessions remain connected while idle;
 the 30-second read deadline applies to the handshake only.
 
+For a local automation client, replace the TCP address with a Unix socket:
+
+```sh
+build/cargo_target/debug/firecracker-console /run/vm/console.sock rfb unix:/run/vm/vnc.sock
+```
+
+Use a private parent directory. The bridge creates the socket with mode 0600,
+refuses an existing path and removes its own socket on normal exit. After an
+unclean exit, remove the stale socket before restarting the bridge. Unix sockets
+use the same RFB protocol and optional password file as TCP. The `rfb-view` and
+`websocket` modes also accept Unix sockets; `assets` requires loopback TCP.
+
 ## Read-only VNC viewer
 
 Keep the automation bridge in `rfb` mode. Start a separate read-only endpoint

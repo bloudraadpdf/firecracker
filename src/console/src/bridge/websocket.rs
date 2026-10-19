@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::io::{self, Cursor, Read, Write};
-use std::net::TcpStream;
 
 use tungstenite::handshake::server::{Request, Response};
 use tungstenite::{Message, WebSocket};
@@ -84,11 +83,11 @@ impl tungstenite::handshake::server::Callback for Auth {
 }
 
 pub struct Stream {
-    socket: WebSocket<TcpStream>,
+    socket: WebSocket<super::transport::Stream>,
     pending: Cursor<Vec<u8>>,
 }
 
-pub fn accept(stream: TcpStream, auth: &Auth) -> io::Result<Stream> {
+pub fn accept(stream: super::transport::Stream, auth: &Auth) -> io::Result<Stream> {
     let config = tungstenite::protocol::WebSocketConfig::default()
         .max_message_size(Some(1024 * 1024))
         .max_frame_size(Some(1024 * 1024));
@@ -136,6 +135,8 @@ impl Write for Stream {
 
 #[cfg(test)]
 mod tests {
+    use std::net::TcpStream;
+
     use super::*;
     #[test]
     fn origin_and_token_are_both_required() {
@@ -170,7 +171,7 @@ mod tests {
         let server = std::thread::spawn(move || {
             let (tcp, _) = listener.accept().unwrap();
             crate::bridge::configure(&tcp).unwrap();
-            let mut stream = accept(tcp, &auth).unwrap();
+            let mut stream = accept(crate::bridge::transport::Stream::Tcp(tcp), &auth).unwrap();
             stream.write_all(b"RFB 003.008\n").unwrap();
             let mut reply = [0; 12];
             stream.read_exact(&mut reply).unwrap();

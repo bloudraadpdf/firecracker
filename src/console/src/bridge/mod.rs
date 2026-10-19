@@ -6,9 +6,10 @@ mod keys;
 #[cfg(feature = "gui")]
 mod local;
 mod rfb;
+mod transport;
 mod websocket;
 use std::io::{self, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpStream};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -149,13 +150,13 @@ fn authenticate_console(
 }
 
 fn serve_connection(
-    mut stream: TcpStream,
+    mut stream: transport::Stream,
     guard: &mut SessionGuard,
     auth: Option<websocket::Auth>,
     password: Option<rfb::Password>,
     mapping: rfb::KeyboardMapping,
 ) -> io::Result<()> {
-    configure(&stream)?;
+    stream.configure()?;
     let transport = stream.try_clone()?;
     if let Some(auth) = auth {
         let mut socket = websocket::accept(stream, &auth)?;
@@ -170,7 +171,7 @@ fn serve_connection(
 }
 
 fn listen(
-    address: SocketAddr,
+    address: &str,
     backend: Backend,
     auth: Option<websocket::Auth>,
     password: Option<rfb::Password>,
@@ -178,20 +179,14 @@ fn listen(
     busy: Arc<AtomicBool>,
     access: rfb::Access,
 ) -> io::Result<()> {
-    if !address.ip().is_loopback() {
-        return Err(invalid(
-            "console listeners must bind to loopback; use an authenticated remote gateway or SSH \
-             tunnel",
-        ));
-    }
-    let listener = TcpListener::bind(address)?;
+    let listener = transport::Listener::bind(address)?;
     eprintln!(
         "{} console on {}",
         if auth.is_some() { "WebSocket" } else { "RFB" },
-        listener.local_addr()?
+        listener.address()?
     );
-    for connection in listener.incoming() {
-        let stream = connection?;
+    loop {
+        let stream = listener.accept()?;
         if busy
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
@@ -213,7 +208,6 @@ fn listen(
             }
         });
     }
-    Ok(())
 }
 
 pub fn run(mut args: impl Iterator<Item = std::ffi::OsString>) -> io::Result<()> {
@@ -268,17 +262,17 @@ pub fn run(mut args: impl Iterator<Item = std::ffi::OsString>) -> io::Result<()>
         }
         return backend.input(1, &[code, extended, pressed]);
     }
-    let address: SocketAddr = args
-        .next()
-        .ok_or_else(|| invalid("missing bind address"))?
+    let address = args.next().ok_or_else(|| invalid("missing bind address"))?;
+    let address = address
         .to_str()
-        .ok_or_else(|| invalid("invalid bind address"))?
-        .parse()
-        .map_err(|_| invalid("invalid bind address"))?;
+        .ok_or_else(|| invalid("invalid bind address"))?;
     if mode == "assets" {
         if args.next().is_some() {
             return Err(invalid("unexpected argument"));
         }
+        let address: SocketAddr = address
+            .parse()
+            .map_err(|_| invalid("invalid bind address"))?;
         return assets::serve(address, PathBuf::from(socket));
     }
     let mut password = None;
@@ -328,6 +322,7 @@ pub fn run(mut args: impl Iterator<Item = std::ffi::OsString>) -> io::Result<()>
 
 #[cfg(test)]
 mod tests {
+    use std::net::TcpListener;
     use std::os::unix::net::UnixListener;
 
     use super::*;
@@ -523,54 +518,69 @@ mod tests {
 
     #[test]
     fn read_only_session_never_sends_or_releases_guest_input() {
-        let path = PathBuf::from(format!("console-view-{}.sock", std::process::id()));
-        let listener = UnixListener::bind(&path).unwrap();
-        let host = std::thread::spawn(move || {
-            let mut requests = Vec::new();
-            for _ in 0..2 {
-                let (mut stream, request) = read_backend_request(&listener);
-                requests.push(request[4]);
-                write_test_frame(&mut stream);
-            }
-            requests
-        });
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let mut peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        configure(&peer).unwrap();
-        let (stream, _) = listener.accept().unwrap();
-        let busy = Arc::new(AtomicBool::new(true));
-        let session_busy = busy.clone();
-        let backend = Backend(path.clone());
-        let session = std::thread::spawn(move || {
-            let mut guard = SessionGuard {
-                access: rfb::Access::View,
-                input_active: false,
-                backend,
-                busy: session_busy,
+        for unix in [false, true] {
+            let path = PathBuf::from(format!("console-view-{}.sock", std::process::id()));
+            let listener = UnixListener::bind(&path).unwrap();
+            let host = std::thread::spawn(move || {
+                let mut requests = Vec::new();
+                for _ in 0..2 {
+                    let (mut stream, request) = read_backend_request(&listener);
+                    requests.push(request[4]);
+                    write_test_frame(&mut stream);
+                }
+                requests
+            });
+            let endpoint = if unix {
+                format!("unix:console-view-peer-{}.sock", std::process::id())
+            } else {
+                "127.0.0.1:0".to_owned()
             };
-            serve_connection(
-                stream,
-                &mut guard,
-                None,
-                None,
-                rfb::KeyboardMapping::Standard,
-            )
-        });
-        let mut frame = crate::client::handshake(&mut peer, None).unwrap();
-        crate::client::key(&mut peer, 0xffeb, true).unwrap();
-        crate::client::key(&mut peer, 0xffeb, false).unwrap();
-        crate::client::pointer(&mut peer, 1, 1, 0).unwrap();
-        crate::client::request(&mut peer, (frame.width, frame.height)).unwrap();
-        let frame = crate::client::frame(&mut peer, &mut frame).unwrap();
-        assert_eq!(frame.pixels, [3, 2, 1, 0, 6, 5, 4, 0]);
-        drop(peer);
-        assert_eq!(
-            session.join().unwrap().unwrap_err().kind(),
-            io::ErrorKind::UnexpectedEof
-        );
-        assert_eq!(host.join().unwrap(), [0, 0]);
-        assert!(!busy.load(Ordering::Acquire));
-        std::fs::remove_file(path).unwrap();
+            let listener = transport::Listener::bind(&endpoint).unwrap();
+            let mut peer = match &listener {
+                transport::Listener::Tcp(socket) => transport::Stream::Tcp(
+                    TcpStream::connect(socket.local_addr().unwrap()).unwrap(),
+                ),
+                transport::Listener::Unix { socket, .. } => transport::Stream::Unix(
+                    UnixStream::connect(socket.local_addr().unwrap().as_pathname().unwrap())
+                        .unwrap(),
+                ),
+            };
+            peer.configure().unwrap();
+            let stream = listener.accept().unwrap();
+            let busy = Arc::new(AtomicBool::new(true));
+            let session_busy = busy.clone();
+            let backend = Backend(path.clone());
+            let session = std::thread::spawn(move || {
+                let mut guard = SessionGuard {
+                    access: rfb::Access::View,
+                    input_active: false,
+                    backend,
+                    busy: session_busy,
+                };
+                serve_connection(
+                    stream,
+                    &mut guard,
+                    None,
+                    None,
+                    rfb::KeyboardMapping::Standard,
+                )
+            });
+            let mut frame = crate::client::handshake(&mut peer, None).unwrap();
+            crate::client::key(&mut peer, 0xffeb, true).unwrap();
+            crate::client::key(&mut peer, 0xffeb, false).unwrap();
+            crate::client::pointer(&mut peer, 1, 1, 0).unwrap();
+            crate::client::request(&mut peer, (frame.width, frame.height)).unwrap();
+            let frame = crate::client::frame(&mut peer, &mut frame).unwrap();
+            assert_eq!(frame.pixels, [3, 2, 1, 0, 6, 5, 4, 0]);
+            drop(peer);
+            assert_eq!(
+                session.join().unwrap().unwrap_err().kind(),
+                io::ErrorKind::UnexpectedEof
+            );
+            assert_eq!(host.join().unwrap(), [0, 0]);
+            assert!(!busy.load(Ordering::Acquire));
+            std::fs::remove_file(path).unwrap();
+        }
     }
 
     #[test]
