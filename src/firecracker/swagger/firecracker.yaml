@@ -1386,6 +1386,20 @@ definitions:
         type: string
         description: Private control socket of a dedicated swtpm TPM 2.0 process (AMD64 only).
 
+  OpticalDriveConfig:
+    type: object
+    additionalProperties: false
+    required:
+      - drive_id
+    properties:
+      drive_id:
+        type: string
+        minLength: 1
+        description: Unique identifier within this console; list order selects primary then secondary master.
+      path_on_host:
+        type: string
+        description: Optional read-only ISO path; omission or null leaves the drive empty.
+
   ConsoleConfig:
     type: object
     additionalProperties: false
@@ -1418,9 +1432,13 @@ definitions:
           and when no firmware profile is selected; optional with explicit
           cloud-hv firmware, whose GOP driver uses the display BARs directly.
           Omission creates no ROM mapping or ROM BAR. Not accepted on ARM64.
-      optical_image_path:
-        type: string
-        description: Optional AMD64 host path to a read-only installation ISO; not accepted on ARM64.
+      optical_drives:
+        type: array
+        maxItems: 2
+        default: []
+        items:
+          $ref: "#/definitions/OpticalDriveConfig"
+        description: AMD64 optical masters with unique drive IDs; an empty array attaches no IDE controller. Not accepted on ARM64.
 
   FullVmConfiguration:
     type: object

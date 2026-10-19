@@ -54,7 +54,7 @@ const LEGACY_PORTS: [(u64, u64); 4] =
 /// Media identity, transfer state and PCI resources required for restore.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpticalState {
-    core: AtapiState,
+    cores: [Option<AtapiState>; 2],
     config: PciConfigurationState,
     bars: Bars,
     mapped: [u64; 4],
@@ -62,11 +62,12 @@ pub struct OpticalState {
     sbdf: PciSBDF,
 }
 
-/// Two switchable IDE channels with one read-only primary master.
+/// Two switchable IDE channels, each with one optional read-only master.
 #[derive(Debug)]
 #[cfg(feature = "windows")]
 pub struct OpticalDevice {
-    core: Atapi,
+    cores: [Option<Atapi>; 2],
+    irqs: [Option<EventFd>; 2],
     config: PciConfiguration,
     bars: Bars,
     mapped: [u64; 4],
@@ -168,6 +169,15 @@ fn validate_mappings(allocator: &AddressAllocator, state: &OpticalState) -> io::
 
 #[cfg(feature = "windows")]
 impl OpticalState {
+    pub(super) fn matches_drive_count(&self, count: usize) -> bool {
+        (1..=2).contains(&count)
+            && self
+                .cores
+                .iter()
+                .enumerate()
+                .all(|(index, core)| core.is_some() == (index < count))
+    }
+
     fn config_command(&self) -> io::Result<u32> {
         Ok(PciConfiguration::type0_from_state(self.config.clone())
             .map_err(io::Error::other)?
@@ -196,25 +206,19 @@ fn media_identity(media: &mut File) -> io::Result<String> {
 
 #[cfg(feature = "windows")]
 impl OpticalDevice {
-    /// Attaches fixed and native IDE ports. The caller reserves IRQ14 first.
+    /// Attaches fixed and native IDE ports; the caller reserves one IRQ per drive.
     pub fn attach(
         vm: &Arc<KvmVm>,
         pci: &mut PciDevices,
-        path: Option<&Path>,
+        paths: &[Option<&Path>],
         state: Option<&OpticalState>,
     ) -> io::Result<Arc<Mutex<Self>>> {
-        let media = path
-            .map(|path| {
-                let mut media = File::open(path)?;
-                if !media.metadata()?.is_file() {
-                    return Err(io::Error::other("ISO must be a regular file"));
-                }
-                let identity = media_identity(&mut media)?;
-                Ok((media, identity))
-            })
-            .transpose()?;
-        let irq = EventFd::new(libc::EFD_NONBLOCK)?;
-        let (mut core, config, sbdf, modes) = if let Some(state) = state {
+        if !(1..=2).contains(&paths.len())
+            || state.is_some_and(|state| !state.matches_drive_count(paths.len()))
+        {
+            return Err(io::Error::other("optical drive topology disagrees"));
+        }
+        if let Some(state) = state {
             if state.sbdf.segment() != 0
                 || state.sbdf.bus() != 0
                 || state.sbdf.function() != 0
@@ -223,21 +227,44 @@ impl OpticalDevice {
                 return Err(io::Error::other("invalid optical PCI address"));
             }
             validate_mappings(&vm.resource_allocator().pci_io, state)?;
-            (
-                Atapi::restore(media, irq.try_clone()?, &state.core)?,
+        }
+        let mut cores = [None, None];
+        let mut irqs = [None, None];
+        for (channel, path) in paths.iter().enumerate() {
+            let media = path
+                .map(|path| {
+                    let mut media = File::open(path)?;
+                    if !media.metadata()?.is_file() {
+                        return Err(io::Error::other("ISO must be a regular file"));
+                    }
+                    let identity = media_identity(&mut media)?;
+                    Ok((media, identity))
+                })
+                .transpose()?;
+            let irq = EventFd::new(libc::EFD_NONBLOCK)?;
+            cores[channel] = Some(match state {
+                Some(state) => Atapi::restore(
+                    media,
+                    irq.try_clone()?,
+                    state.cores[channel].as_ref().unwrap(),
+                )?,
+                None => Atapi::new(media, irq.try_clone()?)?,
+            });
+            irqs[channel] = Some(irq);
+        }
+        let (config, sbdf, modes) = match state {
+            Some(state) => (
                 restore_configuration(&state.config)?,
                 state.sbdf,
                 state.modes,
-            )
-        } else {
-            (
-                Atapi::new(media, irq.try_clone()?)?,
+            ),
+            None => (
                 configuration(),
                 pci.pci_segment
                     .next_device_sbdf()
                     .map_err(io::Error::other)?,
                 0x0f,
-            )
+            ),
         };
         let mapped = if let Some(state) = state {
             state.mapped
@@ -277,9 +304,16 @@ impl OpticalDevice {
                 return Err(error);
             }
         };
-        core.set_legacy_irq_enabled(modes & 1 == 0 && config.read_reg(1) & 1 != 0);
+        for (channel, core) in cores.iter_mut().enumerate() {
+            if let Some(core) = core {
+                core.set_legacy_irq_enabled(
+                    modes & (1 << (channel * 2)) == 0 && config.read_reg(1) & 1 != 0,
+                );
+            }
+        }
         let device = Arc::new(Mutex::new(Self {
-            core,
+            cores,
+            irqs: [None, None],
             config,
             bars,
             mapped,
@@ -321,8 +355,13 @@ impl OpticalDevice {
                 locked.bound = true;
                 locked.sync_interrupt();
             }
-            vm.register_irq(&irq, IRQ)
-                .map_err(|e| io::Error::from_raw_os_error(e.errno()))?;
+            for (channel, irq) in irqs.iter_mut().enumerate() {
+                if let Some(irq) = irq.take() {
+                    vm.register_irq(&irq, IRQ + u32::try_from(channel).unwrap())
+                        .map_err(|e| io::Error::from_raw_os_error(e.errno()))?;
+                    device.lock().unwrap().irqs[channel] = Some(irq);
+                }
+            }
             Ok(())
         })();
         if let Err(error) = attach {
@@ -345,7 +384,10 @@ impl OpticalDevice {
     /// Saves media, in-flight transfer and PCI mappings.
     pub fn save(&self) -> OpticalState {
         OpticalState {
-            core: self.core.save(),
+            cores: self
+                .cores
+                .each_ref()
+                .map(|core| core.as_ref().map(Atapi::save)),
             config: self.config.state(),
             bars: self.bars,
             mapped: self.mapped,
@@ -355,25 +397,42 @@ impl OpticalDevice {
     }
 
     /// Ejects idle media subject to the guest's removal lock.
-    pub fn eject(&mut self) -> io::Result<()> {
-        self.core.eject()
+    pub fn eject(&mut self, channel: usize) -> io::Result<()> {
+        self.cores
+            .get_mut(channel)
+            .and_then(Option::as_mut)
+            .ok_or_else(|| io::Error::other("optical drive is absent"))?
+            .eject()
+    }
+
+    fn native_pending(&self) -> bool {
+        self.cores.iter().enumerate().any(|(channel, core)| {
+            self.modes & (1 << (channel * 2)) != 0
+                && core.as_ref().is_some_and(Atapi::interrupt_pending)
+        })
     }
 
     fn sync_interrupt(&mut self) {
         let command = self.config.read_reg(1);
-        let native = self.modes & 1 != 0;
-        self.core
-            .set_legacy_irq_enabled(!native && command & 1 != 0);
+        let mut native_enabled = false;
+        for (channel, core) in self.cores.iter_mut().enumerate() {
+            if let Some(core) = core {
+                let native = self.modes & (1 << (channel * 2)) != 0;
+                core.set_legacy_irq_enabled(!native && command & 1 != 0);
+                native_enabled |= native;
+            }
+        }
         if !self.bound {
             return;
         }
+        let pending = self.native_pending();
         let mut group = self.intx.lock().unwrap();
         let result = (|| {
             group.mask(
                 self.sbdf.device(),
-                !native || command & 1 == 0 || command & 0x400 != 0,
+                !native_enabled || command & 1 == 0 || command & 0x400 != 0,
             )?;
-            if native && self.core.interrupt_pending() {
+            if pending {
                 group.raise(self.sbdf.device(), 1)
             } else {
                 group.clear(self.sbdf.device()).map(|_| ())
@@ -458,6 +517,15 @@ impl OpticalDevice {
 #[cfg(feature = "windows")]
 impl Drop for OpticalDevice {
     fn drop(&mut self) {
+        if let Some(vm) = self.vm.upgrade() {
+            for (channel, irq) in self.irqs.iter().enumerate() {
+                if let Some(irq) = irq {
+                    let _ = vm
+                        .fd()
+                        .unregister_irqfd(irq, IRQ + u32::try_from(channel).unwrap());
+                }
+            }
+        }
         if self.bound {
             let _ = self.intx.lock().unwrap().unbind(self.sbdf.device());
         }
@@ -501,7 +569,11 @@ impl PciDevice for OpticalDevice {
         } else if reg_idx == 2 {
             self.config.read_reg(2) | (u32::from(self.modes) << 8)
         } else {
-            self.config.read_reg(reg_idx)
+            let mut value = self.config.read_reg(reg_idx);
+            if reg_idx == 1 && self.native_pending() {
+                value |= 1 << 19;
+            }
+            value
         }
     }
 }
@@ -510,19 +582,28 @@ impl PciDevice for OpticalDevice {
 impl BusDevice for OpticalDevice {
     fn read(&mut self, base: u64, offset: u64, data: &mut [u8]) {
         data.fill(0xff);
-        match self.decode(base, offset) {
-            Some((0, false, register)) => self.core.read(register, data),
-            Some((0, true, _)) if data.len() == 1 => data[0] = self.core.read_control(),
-            Some((1, _, _)) => data.fill(0),
-            _ => {}
+        if let Some((channel, control, register)) = self.decode(base, offset) {
+            if let Some(core) = &mut self.cores[channel] {
+                if !control {
+                    core.read(register, data);
+                } else if data.len() == 1 {
+                    data[0] = core.read_control();
+                }
+            } else {
+                data.fill(0);
+            }
         }
         self.sync_interrupt();
     }
     fn write(&mut self, base: u64, offset: u64, data: &[u8]) -> Option<Arc<Barrier>> {
-        match self.decode(base, offset) {
-            Some((0, false, register)) => self.core.write(register, data),
-            Some((0, true, _)) if data.len() == 1 => self.core.write_control(data[0]),
-            _ => {}
+        if let Some((channel, control, register)) = self.decode(base, offset)
+            && let Some(core) = &mut self.cores[channel]
+        {
+            if !control {
+                core.write(register, data);
+            } else if data.len() == 1 {
+                core.write_control(data[0]);
+            }
         }
         self.sync_interrupt();
         None
@@ -558,7 +639,7 @@ mod tests {
         use crate::snapshot::Persist;
         use crate::vstate::resources::ResourceAllocator;
         let (source, mut pci) = platform();
-        let device = OpticalDevice::attach(&source, &mut pci, None, None).unwrap();
+        let device = OpticalDevice::attach(&source, &mut pci, &[None], None).unwrap();
         let base = device.lock().unwrap().mapped[0];
         source.pio_bus.write(base + 7, &[0xa1]).unwrap();
         let mut status = [0];
@@ -571,7 +652,7 @@ mod tests {
         let target = Arc::new(target);
         *target.resource_allocator() = ResourceAllocator::restore((), &allocation).unwrap();
         let mut pci = PciDevices::new(&target).unwrap();
-        let restored = OpticalDevice::attach(&target, &mut pci, None, Some(&state)).unwrap();
+        let restored = OpticalDevice::attach(&target, &mut pci, &[None], Some(&state)).unwrap();
         let mut first_word = [0; 2];
         target.pio_bus.read(base, &mut first_word).unwrap();
         assert_eq!(u16::from_le_bytes(first_word), 0x8580);
@@ -579,7 +660,114 @@ mod tests {
         let file = iso();
         let (wrong, mut pci) = platform();
         *wrong.resource_allocator() = source.resource_allocator().clone();
-        OpticalDevice::attach(&wrong, &mut pci, Some(file.as_path()), Some(&state)).unwrap_err();
+        OpticalDevice::attach(&wrong, &mut pci, &[Some(file.as_path())], Some(&state)).unwrap_err();
+    }
+
+    #[test]
+    fn channels_keep_independent_transfer_and_interrupt_state() {
+        let (vm, mut pci) = platform();
+        let file = iso();
+        let device =
+            OpticalDevice::attach(&vm, &mut pci, &[Some(file.as_path()), None], None).unwrap();
+        vm.set_gsi_routes().unwrap();
+        let mapped = device.lock().unwrap().mapped;
+        for base in [mapped[0], mapped[2]] {
+            vm.pio_bus.write(base + 7, &[0xa1]).unwrap();
+        }
+        assert_ne!(
+            device.lock().unwrap().read_config_register(1) & (1 << 19),
+            0
+        );
+        let mut status = [0];
+        vm.pio_bus.read(mapped[0] + 7, &mut status).unwrap();
+        assert_ne!(
+            device.lock().unwrap().read_config_register(1) & (1 << 19),
+            0
+        );
+        {
+            let device = device.lock().unwrap();
+            assert!(!device.cores[0].as_ref().unwrap().interrupt_pending());
+            assert!(device.cores[1].as_ref().unwrap().interrupt_pending());
+        }
+        let mut primary = [0; 2];
+        let mut secondary = [0; 2];
+        vm.pio_bus.read(mapped[0], &mut primary).unwrap();
+        vm.pio_bus.read(mapped[2], &mut secondary).unwrap();
+        assert_eq!(primary, secondary);
+        assert_eq!(u16::from_le_bytes(primary), 0x8580);
+        let state = device.lock().unwrap().save();
+        assert!(state.matches_drive_count(2));
+        assert!(!state.matches_drive_count(1));
+        vm.pio_bus.read(mapped[2] + 7, &mut status).unwrap();
+        assert!(
+            !device.lock().unwrap().cores[1]
+                .as_ref()
+                .unwrap()
+                .interrupt_pending()
+        );
+        assert_eq!(
+            device.lock().unwrap().read_config_register(1) & (1 << 19),
+            0
+        );
+        device.lock().unwrap().write_config_register(2, 1, &[0x0a]);
+        for (channel, base) in [COMMAND_PORT, 0x170].into_iter().enumerate() {
+            vm.pio_bus.write(base + 7, &[0xa1]).unwrap();
+            let mut pic = kvm_bindings::kvm_irqchip {
+                chip_id: kvm_bindings::KVM_IRQCHIP_PIC_SLAVE,
+                ..Default::default()
+            };
+            let mut delivered = false;
+            for _ in 0..100 {
+                vm.fd().get_irqchip(&mut pic).unwrap();
+                // SAFETY: KVM returned the slave PIC selected above.
+                if unsafe { pic.chip.pic.irr } & (1 << (6 + channel)) != 0 {
+                    delivered = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            assert!(
+                delivered,
+                "optical channel {channel} did not signal its legacy IRQ"
+            );
+            vm.pio_bus.read(base + 7, &mut status).unwrap();
+            assert_eq!(status, [0x48]);
+        }
+    }
+
+    #[test]
+    fn restore_checks_channel_topology_and_each_medium() {
+        use crate::snapshot::Persist;
+        use crate::vstate::resources::ResourceAllocator;
+        let (vm, mut pci) = platform();
+        let file = iso();
+        let device =
+            OpticalDevice::attach(&vm, &mut pci, &[None, Some(file.as_path())], None).unwrap();
+        let state: OpticalState =
+            bitcode::deserialize(&bitcode::serialize(&device.lock().unwrap().save()).unwrap())
+                .unwrap();
+        let allocation = vm.resource_allocator().save();
+        let mut target = setup_vm_with_memory(0x1000);
+        target.setup_irqchip(true).unwrap();
+        let target = Arc::new(target);
+        *target.resource_allocator() = ResourceAllocator::restore((), &allocation).unwrap();
+        let mut pci = PciDevices::new(&target).unwrap();
+        OpticalDevice::attach(&target, &mut pci, &[None], Some(&state)).unwrap_err();
+        OpticalDevice::attach(
+            &target,
+            &mut pci,
+            &[Some(file.as_path()), None],
+            Some(&state),
+        )
+        .unwrap_err();
+        let restored = OpticalDevice::attach(
+            &target,
+            &mut pci,
+            &[None, Some(file.as_path())],
+            Some(&state),
+        )
+        .unwrap();
+        assert!(restored.lock().unwrap().save().matches_drive_count(2));
     }
 
     #[test]
@@ -598,17 +786,32 @@ mod tests {
     fn native_mapping_switches_to_compatibility_and_obeys_io_enable() {
         let (vm, mut pci) = platform();
         let file = iso();
-        let device = OpticalDevice::attach(&vm, &mut pci, Some(file.as_path()), None).unwrap();
+        let device = OpticalDevice::attach(&vm, &mut pci, &[Some(file.as_path())], None).unwrap();
         let mapped = device.lock().unwrap().mapped;
         assert_eq!(device.lock().unwrap().read_config_register(2), 0x0101_0f00);
         vm.pio_bus.write(mapped[0] + 7, &[0xa1]).unwrap();
-        assert!(device.lock().unwrap().core.interrupt_pending());
+        assert!(
+            device.lock().unwrap().cores[0]
+                .as_ref()
+                .unwrap()
+                .interrupt_pending()
+        );
         let mut status = [0];
         vm.pio_bus.read(mapped[1] + 2, &mut status).unwrap();
         assert_eq!(status, [0x48]);
-        assert!(device.lock().unwrap().core.interrupt_pending());
+        assert!(
+            device.lock().unwrap().cores[0]
+                .as_ref()
+                .unwrap()
+                .interrupt_pending()
+        );
         vm.pio_bus.read(mapped[0] + 7, &mut status).unwrap();
-        assert!(!device.lock().unwrap().core.interrupt_pending());
+        assert!(
+            !device.lock().unwrap().cores[0]
+                .as_ref()
+                .unwrap()
+                .interrupt_pending()
+        );
         vm.pio_bus.read(COMMAND_PORT + 7, &mut status).unwrap();
         assert_eq!(status, [0xff]);
         device.lock().unwrap().write_config_register(2, 1, &[0x0a]);
@@ -628,7 +831,7 @@ mod tests {
     fn bar_probe_relocation_and_collision_preserve_live_ports() {
         let (vm, mut pci) = platform();
         let file = iso();
-        let device = OpticalDevice::attach(&vm, &mut pci, Some(file.as_path()), None).unwrap();
+        let device = OpticalDevice::attach(&vm, &mut pci, &[Some(file.as_path())], None).unwrap();
         let old = device.lock().unwrap().mapped[0];
         device
             .lock()
@@ -666,7 +869,7 @@ mod tests {
             vm.pio_bus.insert(occupied.clone(), port, size).unwrap();
             let before = vm.resource_allocator().pci_io.clone();
             let file = iso();
-            OpticalDevice::attach(&vm, &mut pci, Some(file.as_path()), None).unwrap_err();
+            OpticalDevice::attach(&vm, &mut pci, &[Some(file.as_path())], None).unwrap_err();
             assert_eq!(vm.resource_allocator().pci_io, before);
             assert!(
                 pci.pci_segment
@@ -684,7 +887,7 @@ mod tests {
     fn snapshots_reject_forged_config_bar_shape_and_mapping() {
         let (vm, mut pci) = platform();
         let file = iso();
-        let device = OpticalDevice::attach(&vm, &mut pci, Some(file.as_path()), None).unwrap();
+        let device = OpticalDevice::attach(&vm, &mut pci, &[Some(file.as_path())], None).unwrap();
         let state = device.lock().unwrap().save();
         validate_mappings(&vm.resource_allocator().pci_io, &state).unwrap();
         let mut bad = state.clone();
@@ -710,7 +913,7 @@ mod tests {
 
         let (vm, mut pci) = platform();
         let file = iso();
-        let device = OpticalDevice::attach(&vm, &mut pci, Some(file.as_path()), None).unwrap();
+        let device = OpticalDevice::attach(&vm, &mut pci, &[Some(file.as_path())], None).unwrap();
         let mapped = device.lock().unwrap().mapped;
         vm.pio_bus.write(mapped[0] + 7, &[0xa1]).unwrap();
         let mut first_word = [0; 2];
@@ -728,17 +931,27 @@ mod tests {
         let restored = OpticalDevice::attach(
             &restored_vm,
             &mut restored_pci,
-            Some(file.as_path()),
+            &[Some(file.as_path())],
             Some(&state),
         )
         .unwrap();
         assert_eq!(restored.lock().unwrap().mapped, mapped);
-        assert!(restored.lock().unwrap().core.interrupt_pending());
+        assert!(
+            restored.lock().unwrap().cores[0]
+                .as_ref()
+                .unwrap()
+                .interrupt_pending()
+        );
         let mut actual = [0; 16];
         restored_vm.pio_bus.read(mapped[0], &mut actual).unwrap();
         assert_eq!(actual, expected);
         restored_vm.pio_bus.read(mapped[0] + 7, &mut [0]).unwrap();
-        assert!(!restored.lock().unwrap().core.interrupt_pending());
+        assert!(
+            !restored.lock().unwrap().cores[0]
+                .as_ref()
+                .unwrap()
+                .interrupt_pending()
+        );
         assert_eq!(
             restored_pci.pci_segment.pci_irq_slots[usize::from(state.sbdf.device())],
             16
@@ -750,7 +963,7 @@ mod tests {
         let (vm, mut pci) = platform();
         let weak = Arc::downgrade(&vm);
         let file = iso();
-        let device = OpticalDevice::attach(&vm, &mut pci, Some(file.as_path()), None).unwrap();
+        let device = OpticalDevice::attach(&vm, &mut pci, &[Some(file.as_path())], None).unwrap();
         drop(vm);
         assert!(weak.upgrade().is_none());
         assert_eq!(device.lock().unwrap().read_config_register(0), 0xfc01_1d0f);

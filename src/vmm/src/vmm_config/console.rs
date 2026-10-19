@@ -19,6 +19,17 @@ pub enum DisplayModel {
     VirtioGpu,
 }
 
+/// One AMD64 optical drive; list order selects primary then secondary master.
+#[cfg(target_arch = "x86_64")]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpticalDriveConfig {
+    /// Stable host control-plane identifier.
+    pub drive_id: String,
+    /// Optional read-only ISO; omission leaves the drive empty.
+    pub path_on_host: Option<PathBuf>,
+}
+
 /// Local console endpoint and architecture-specific installation hardware.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -32,9 +43,10 @@ pub struct ConsoleConfig {
     /// Optional with explicit CloudHv firmware; required for SeaBIOS and legacy profiles.
     #[cfg(target_arch = "x86_64")]
     pub vga_rom_path: Option<PathBuf>,
-    /// Optional ISO attached to the primary IDE channel as its master.
+    /// At most two optical masters, in primary/secondary channel order.
     #[cfg(target_arch = "x86_64")]
-    pub optical_image_path: Option<PathBuf>,
+    #[serde(default)]
+    pub optical_drives: Vec<OpticalDriveConfig>,
 }
 
 impl ConsoleConfig {
@@ -47,7 +59,26 @@ impl ConsoleConfig {
                 "virtio GPU does not use a VGA option ROM",
             ));
         }
+        #[cfg(target_arch = "x86_64")]
+        if self.optical_drives.len() > 2
+            || self
+                .optical_drives
+                .iter()
+                .any(|drive| drive.drive_id.is_empty())
+            || (self.optical_drives.len() == 2
+                && self.optical_drives[0].drive_id == self.optical_drives[1].drive_id)
+        {
+            return Err(std::io::Error::other(
+                "optical drives require at most two unique, nonempty drive IDs",
+            ));
+        }
         utils::unix_socket::validate(&self.socket_path)
+    }
+
+    #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+    pub(crate) fn optical_irqs(&self) -> impl Iterator<Item = u32> + '_ {
+        (0..self.optical_drives.len())
+            .map(|channel| crate::devices::legacy::atapi::IRQ + u32::try_from(channel).unwrap())
     }
 
     /// Validate the console against the explicitly selected firmware ABI.
@@ -145,6 +176,25 @@ mod tests {
     }
 
     #[test]
+    fn optical_drives_are_bounded_and_have_unique_ids() {
+        let mut config: ConsoleConfig = serde_json::from_str(r#"{"socket_path":"console.sock","optical_drives":[{"drive_id":"payload","path_on_host":"payload.iso"},{"drive_id":"exec"}]}"#).unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.optical_irqs().collect::<Vec<_>>(), [14, 15]);
+        assert!(config.optical_drives[1].path_on_host.is_none());
+        config.optical_drives[1].drive_id = "payload".into();
+        config.validate().unwrap_err();
+        config.optical_drives[1].drive_id = "".into();
+        config.validate().unwrap_err();
+        config.optical_drives[1].drive_id = "exec".into();
+        config.optical_drives.push(config.optical_drives[1].clone());
+        config.validate().unwrap_err();
+        serde_json::from_str::<ConsoleConfig>(
+            r#"{"socket_path":"console.sock","optical_image_path":"old.iso"}"#,
+        )
+        .unwrap_err();
+    }
+
+    #[test]
     fn console_configuration_rejects_ambiguous_or_invalid_paths() {
         for path in [String::new(), "x".repeat(108), "bad\0path".into()] {
             let config = ConsoleConfig {
@@ -152,12 +202,12 @@ mod tests {
                 #[cfg(target_arch = "x86_64")]
                 display: Default::default(),
                 vga_rom_path: Some("vgabios.bin".into()),
-                optical_image_path: None,
+                optical_drives: Vec::new(),
             };
             config.validate().unwrap_err();
         }
         let config: ConsoleConfig = serde_json::from_str(
-            r#"{"socket_path":"console.sock","vga_rom_path":"vgabios.bin","optical_image_path":"setup.iso"}"#,
+            r#"{"socket_path":"console.sock","vga_rom_path":"vgabios.bin","optical_drives":[{"drive_id":"setup","path_on_host":"setup.iso"}]}"#,
         )
         .unwrap();
         config.validate().unwrap();
@@ -203,7 +253,7 @@ mod arm_tests {
         let config: ConsoleConfig =
             serde_json::from_str(r#"{"socket_path":"console.sock"}"#).unwrap();
         config.validate().unwrap();
-        for property in ["vga_rom_path", "optical_image_path"] {
+        for property in ["vga_rom_path", "optical_drives"] {
             let value = serde_json::json!({"socket_path":"console.sock", (property):"unsupported"});
             serde_json::from_value::<ConsoleConfig>(value).unwrap_err();
         }

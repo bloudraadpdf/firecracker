@@ -273,7 +273,7 @@ impl ConsoleServer {
                 let result = self
                     .optical
                     .as_ref()
-                    .is_some_and(|device| device.lock().unwrap().eject().is_ok());
+                    .is_some_and(|device| device.lock().unwrap().eject(0).is_ok());
                 Self::acknowledge(if result { 0 } else { 2 })
             }
             5 if request[5..].iter().all(|byte| *byte == 0) => {

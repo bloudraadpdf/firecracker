@@ -967,6 +967,10 @@ impl DeviceManager {
     ) -> Result<Self, DeviceManagerPersistError> {
         state.validate_windows_support()?;
         #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+        if let Some(console) = &state.console {
+            console.validate_optical_config()?;
+        }
+        #[cfg(all(feature = "windows", target_arch = "x86_64"))]
         {
             let gpu = match &state.virtio_state {
                 VirtioDevicesState::Pci(pci) => pci
@@ -1080,17 +1084,15 @@ impl DeviceManager {
 
         #[cfg(target_arch = "x86_64")]
         #[cfg(feature = "windows")]
-        if state
-            .console
-            .as_ref()
-            .is_some_and(|console| console.has_optical())
-        {
-            constructor_args
-                .vm
-                .resource_allocator()
-                .gsi_legacy_allocator
-                .allocate_id_at(crate::devices::legacy::atapi::IRQ)
-                .map_err(|error| std::io::Error::other(error.to_string()))?;
+        if let Some(console) = &state.console {
+            for irq in console.optical_irqs() {
+                constructor_args
+                    .vm
+                    .resource_allocator()
+                    .gsi_legacy_allocator
+                    .allocate_id_at(irq)
+                    .map_err(|error| std::io::Error::other(error.to_string()))?;
+            }
         }
         let virtio_devices = match &state.virtio_state {
             VirtioDevicesState::Pci(pci_state) => {
