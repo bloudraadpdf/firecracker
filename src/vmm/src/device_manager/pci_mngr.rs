@@ -18,6 +18,11 @@ use crate::devices::virtio::block::device::Block;
 use crate::devices::virtio::block::persist::{BlockConstructorArgs, BlockState};
 use crate::devices::virtio::device::{VirtioDevice, VirtioDeviceId, VirtioDeviceType};
 #[cfg(feature = "windows")]
+use crate::devices::virtio::gpu::Gpu;
+use crate::devices::virtio::gpu::persist::GpuState;
+#[cfg(feature = "windows")]
+use crate::devices::virtio::gpu::persist::{GpuConstructorArgs, GpuPersistError};
+#[cfg(feature = "windows")]
 use crate::devices::virtio::input::Input;
 #[cfg(feature = "windows")]
 use crate::devices::virtio::input::persist::InputConstructorArgs;
@@ -428,6 +433,8 @@ pub struct PciDevicesState {
     pub memory_device: Option<VirtioDeviceState<VirtioMemState>>,
     /// Keyboard and absolute-pointer device states.
     pub input_device: Option<VirtioDeviceState<InputState>>,
+    /// Graphics device state.
+    pub gpu_device: Option<VirtioDeviceState<GpuState>>,
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -456,6 +463,7 @@ impl PciDevicesState {
                     self.input_device
                         .as_ref()
                         .map(|state| &state.transport_state),
+                    self.gpu_device.as_ref().map(|state| &state.transport_state),
                 ]
                 .into_iter()
                 .flatten(),
@@ -624,6 +632,20 @@ impl<'a> Persist<'a> for PciDevices {
                     #[cfg(not(feature = "windows"))]
                     unreachable!("virtio-input requires the windows build feature");
                 }
+                VirtioDeviceType::Gpu => {
+                    #[cfg(feature = "windows")]
+                    {
+                        let gpu = locked_virtio_dev.as_any().downcast_ref::<Gpu>().unwrap();
+                        state.gpu_device = Some(VirtioDeviceState {
+                            device_id: gpu.id().to_string(),
+                            sbdf,
+                            device_state: gpu.save(),
+                            transport_state,
+                        });
+                    }
+                    #[cfg(not(feature = "windows"))]
+                    unreachable!("virtio-gpu requires the windows build feature");
+                }
                 VirtioDeviceType::Mem => {
                     let mem_dev = locked_virtio_dev
                         .as_mut_any()
@@ -648,7 +670,7 @@ impl<'a> Persist<'a> for PciDevices {
         constructor_args: Self::ConstructorArgs,
         state: &Self::State,
     ) -> Result<Self, Self::Error> {
-        if state.input_device.is_some() {
+        if state.input_device.is_some() || state.gpu_device.is_some() {
             crate::vmm_config::require_windows_support()?;
         }
 
@@ -805,6 +827,36 @@ impl<'a> Persist<'a> for PciDevices {
                 &input_state.transport_state,
                 constructor_args.event_manager,
             )?;
+        }
+
+        #[cfg(feature = "windows")]
+        if let Some(gpu_state) = &state.gpu_device {
+            let device = Arc::new(Mutex::new(Gpu::restore(
+                GpuConstructorArgs { mem: mem.clone() },
+                &gpu_state.device_state,
+            )?));
+            pci_devices.restore_pci_device(
+                constructor_args.vm,
+                device.clone(),
+                &gpu_state.device_id,
+                &gpu_state.transport_state,
+                constructor_args.event_manager,
+            )?;
+            if let Err(error) = device.lock().unwrap().check_registered() {
+                let id = pci_devices
+                    .virtio_devices
+                    .get(&(VirtioDeviceType::Gpu, gpu_state.device_id.clone()))
+                    .unwrap()
+                    .lock()
+                    .unwrap()
+                    .sub_id
+                    .unwrap();
+                constructor_args
+                    .event_manager
+                    .remove_subscriber(id)
+                    .map_err(|error| GpuPersistError::Registration(std::io::Error::other(error)))?;
+                return Err(GpuPersistError::Registration(error).into());
+            }
         }
 
         for pmem_state in &state.pmem_devices {
@@ -1005,6 +1057,25 @@ mod tests {
                 memory_hotplug_config,
             );
 
+            #[cfg(feature = "windows")]
+            {
+                let gpu = Arc::new(Mutex::new(Gpu::new(1024, 768).unwrap()));
+                gpu.lock().unwrap().resize(1280, 720).unwrap();
+                let crate::device_manager::VirtioDevices::Pci(pci) =
+                    &mut vmm.device_manager.virtio_devices
+                else {
+                    unreachable!()
+                };
+                pci.attach_pci_virtio_device(
+                    vmm.vm.as_kvm().unwrap(),
+                    crate::devices::virtio::gpu::GPU_DEV_ID.into(),
+                    gpu.clone(),
+                    &mut event_manager,
+                )
+                .unwrap();
+                gpu.lock().unwrap().check_registered().unwrap();
+            }
+
             vmm.device_manager.prepare_save().unwrap();
             let device_state = vmm.device_manager.save().unwrap();
             serialized_data = bitcode::serialize(&device_state).unwrap();
@@ -1040,6 +1111,36 @@ mod tests {
             event_manager: &mut event_manager,
         };
         let _restored_dev_manager = PciDevices::restore(restore_args, pci_state).unwrap();
+
+        #[cfg(feature = "windows")]
+        {
+            let transport = _restored_dev_manager
+                .virtio_devices
+                .get(&(
+                    VirtioDeviceType::Gpu,
+                    crate::devices::virtio::gpu::GPU_DEV_ID.into(),
+                ))
+                .unwrap();
+            let device = transport.lock().unwrap().virtio_device();
+            let locked = device.lock().unwrap();
+            let gpu = locked.as_any().downcast_ref::<Gpu>().unwrap();
+            gpu.check_registered().unwrap();
+            assert_eq!(gpu.config_as_bytes()[0], 1);
+            assert_eq!(
+                gpu.renderer()
+                    .lock()
+                    .unwrap()
+                    .execute(
+                        crate::devices::virtio::gpu::protocol::Command::DisplayInfo,
+                        kvm_vm.guest_memory()
+                    )
+                    .unwrap(),
+                crate::devices::virtio::gpu::renderer::Reply::DisplayInfo {
+                    width: 1280,
+                    height: 720
+                }
+            );
+        }
 
         let expected_vm_resources = format!(
             r#"{{

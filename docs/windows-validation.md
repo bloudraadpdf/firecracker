@@ -5,13 +5,16 @@ tested guest, installed drivers, firmware, VMM and route. Use the
 [AMD64 guide](windows.md), [console guide](windows-console.md) and
 [secure platform guide](windows-secure-boot.md) to prepare a test.
 
-## Current integration candidate
+## Latest qualified integration baseline
 
-The current AMD64 Windows-feature binary is `6f63cd8d`, built from runtime
+The latest qualified AMD64 Windows-feature binary is `6f63cd8d`, built from runtime
 source `95aaccfb` and using snapshot format 34. Its default counterpart is
 `1c68a888`. Later documentation and secure-helper cleanup changes do not change
 these binaries. The table records completed installed-reference checks on this
 runtime separately from unchanged component results and remaining edition gates.
+
+Current source uses snapshot format 35 for optional GPU device state. The
+format-34 baseline below does not qualify the new GPU or format-35 restore path.
 
 Reuse a recorded result when the inputs relevant to that check are unchanged.
 Retain the guest configuration, driver and firmware hashes, VMM capability and

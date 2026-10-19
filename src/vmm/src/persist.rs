@@ -188,7 +188,7 @@ pub enum CreateSnapshotError {
 }
 
 /// Snapshot version
-pub const SNAPSHOT_VERSION: Version = Version::new(34, 0, 0);
+pub const SNAPSHOT_VERSION: Version = Version::new(35, 0, 0);
 
 /// Creates a Microvm snapshot.
 pub fn create_snapshot(

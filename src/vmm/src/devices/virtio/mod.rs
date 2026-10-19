@@ -16,7 +16,6 @@ pub mod balloon;
 pub mod block;
 pub mod device;
 pub mod generated;
-#[cfg(feature = "windows")]
 pub mod gpu;
 pub mod input;
 mod iov_deque;
@@ -58,6 +57,8 @@ pub const NOTIFY_REG_OFFSET: u32 = 0x50;
 /// Errors triggered when activating a VirtioDevice.
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum ActivateError {
+    /// Device interrupt: {0}
+    Interrupt(crate::vstate::interrupts::InterruptError),
     /// Wrong number of queue for virtio device: expected {expected}, got {got}
     QueueMismatch { expected: usize, got: usize },
     /// Failed to write to activate eventfd

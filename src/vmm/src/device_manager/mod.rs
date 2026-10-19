@@ -713,11 +713,19 @@ impl DevicesState {
     pub(crate) fn validate_windows_support(
         &self,
     ) -> Result<(), crate::vmm_config::WindowsFeatureDisabled> {
-        let input = match &self.virtio_state {
-            VirtioDevicesState::Mmio(state) => state.input_device.is_some(),
-            VirtioDevicesState::Pci(state) => state.input_device.is_some(),
+        let windows_device = match &self.virtio_state {
+            VirtioDevicesState::Mmio(state) => {
+                state.input_device.is_some() || state.gpu_device.is_some()
+            }
+            VirtioDevicesState::Pci(state) => {
+                state.input_device.is_some() || state.gpu_device.is_some()
+            }
         };
-        if self.console.is_some() || self.tpm.is_some() || self.uefi_vars.is_some() || input {
+        if self.console.is_some()
+            || self.tpm.is_some()
+            || self.uefi_vars.is_some()
+            || windows_device
+        {
             crate::vmm_config::require_windows_support()?;
         }
         #[cfg(target_arch = "x86_64")]
@@ -731,6 +739,9 @@ impl DevicesState {
 /// Errors for (de)serialization of the devices.
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum DevicePersistError {
+    #[cfg(feature = "windows")]
+    /// GPU: {0}
+    Gpu(#[from] crate::devices::virtio::gpu::persist::GpuPersistError),
     /// Unsupported build configuration: {0}
     WindowsFeature(#[from] crate::vmm_config::WindowsFeatureDisabled),
     #[cfg(feature = "windows")]
