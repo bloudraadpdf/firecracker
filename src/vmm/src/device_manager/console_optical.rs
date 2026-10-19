@@ -205,6 +205,19 @@ fn media_identity(media: &mut File) -> io::Result<String> {
 }
 
 #[cfg(feature = "windows")]
+fn open_media(path: Option<&Path>) -> io::Result<Option<(File, String)>> {
+    path.map(|path| {
+        let mut media = File::open(path)?;
+        if !media.metadata()?.is_file() {
+            return Err(io::Error::other("ISO must be a regular file"));
+        }
+        let identity = media_identity(&mut media)?;
+        Ok((media, identity))
+    })
+    .transpose()
+}
+
+#[cfg(feature = "windows")]
 impl OpticalDevice {
     /// Attaches fixed and native IDE ports; the caller reserves one IRQ per drive.
     pub fn attach(
@@ -231,16 +244,7 @@ impl OpticalDevice {
         let mut cores = [None, None];
         let mut irqs = [None, None];
         for (channel, path) in paths.iter().enumerate() {
-            let media = path
-                .map(|path| {
-                    let mut media = File::open(path)?;
-                    if !media.metadata()?.is_file() {
-                        return Err(io::Error::other("ISO must be a regular file"));
-                    }
-                    let identity = media_identity(&mut media)?;
-                    Ok((media, identity))
-                })
-                .transpose()?;
+            let media = open_media(*path)?;
             let irq = EventFd::new(libc::EFD_NONBLOCK)?;
             cores[channel] = Some(match state {
                 Some(state) => Atapi::restore(
@@ -403,6 +407,15 @@ impl OpticalDevice {
             .and_then(Option::as_mut)
             .ok_or_else(|| io::Error::other("optical drive is absent"))?
             .eject()
+    }
+
+    /// Replaces one attached drive's medium after verifying its identity.
+    pub fn replace_media(&mut self, channel: usize, path: Option<&Path>) -> io::Result<()> {
+        self.cores
+            .get_mut(channel)
+            .and_then(Option::as_mut)
+            .ok_or_else(|| io::Error::other("optical drive is absent"))?
+            .replace_media(open_media(path)?)
     }
 
     fn native_pending(&self) -> bool {

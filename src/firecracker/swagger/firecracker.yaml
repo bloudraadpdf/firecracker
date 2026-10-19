@@ -339,6 +339,40 @@ paths:
           schema:
             $ref: "#/definitions/Error"
 
+  /optical-drives/{drive_id}:
+    put:
+      summary: Replaces optical media in an attached drive. Post-boot only.
+      description: >-
+        Requires the windows feature on AMD64 and a drive attached at boot.
+        Path and body IDs must match. An omitted or null path removes the medium
+        and opens the tray. Insertion closes the tray. The drive must be idle
+        and unlocked. Failed updates preserve the previous medium and path.
+        Paths must be accessible inside the jail when the jailer is used.
+      operationId: putGuestOpticalMediaByID
+      parameters:
+        - name: drive_id
+          in: path
+          description: ID of an optical drive attached at boot.
+          required: true
+          type: string
+        - name: body
+          in: body
+          description: Replacement medium, or an empty drive.
+          required: true
+          schema:
+            $ref: "#/definitions/OpticalDriveConfig"
+      responses:
+        204:
+          description: Optical medium replaced and saved configuration updated.
+        400:
+          description: Invalid request, inaccessible medium, absent drive, locked drive or active transfer.
+          schema:
+            $ref: "#/definitions/Error"
+        default:
+          description: Internal server error.
+          schema:
+            $ref: "#/definitions/Error"
+
   /pmem/{id}:
     put:
       summary: Creates or updates a pmem device. Pre-boot only.
@@ -1395,7 +1429,7 @@ definitions:
       drive_id:
         type: string
         minLength: 1
-        description: Unique identifier within this console; list order selects primary then secondary master.
+        description: Unique nonempty alphanumeric or underscore identifier within this console; list order selects primary then secondary master.
       path_on_host:
         type: string
         description: Optional read-only ISO path; omission or null leaves the drive empty.

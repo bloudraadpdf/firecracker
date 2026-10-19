@@ -61,15 +61,18 @@ impl ConsoleConfig {
         }
         #[cfg(target_arch = "x86_64")]
         if self.optical_drives.len() > 2
-            || self
-                .optical_drives
-                .iter()
-                .any(|drive| drive.drive_id.is_empty())
+            || self.optical_drives.iter().any(|drive| {
+                drive.drive_id.is_empty()
+                    || !drive
+                        .drive_id
+                        .chars()
+                        .all(|c| c == '_' || c.is_alphanumeric())
+            })
             || (self.optical_drives.len() == 2
                 && self.optical_drives[0].drive_id == self.optical_drives[1].drive_id)
         {
             return Err(std::io::Error::other(
-                "optical drives require at most two unique, nonempty drive IDs",
+                "optical drives require at most two unique alphanumeric or underscore IDs",
             ));
         }
         utils::unix_socket::validate(&self.socket_path)

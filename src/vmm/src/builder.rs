@@ -1175,6 +1175,88 @@ pub(crate) mod tests {
             });
             let mut events = EventManager::new().unwrap();
             let source = boot_test_vm(&resources, &mut events);
+            let mut replacement = None;
+            if optical > 0 {
+                use crate::rpc_interface::{RuntimeApiController, VmmAction, VmmData};
+                use crate::vmm_config::console::OpticalDriveConfig;
+                let mut runtime = RuntimeApiController::new(source.clone());
+                let selected = optical - 1;
+                let config = OpticalDriveConfig {
+                    drive_id: format!("cd{selected}"),
+                    path_on_host: None,
+                };
+                runtime
+                    .handle_request(VmmAction::UpdateOpticalDrive(config.clone()), &mut events)
+                    .unwrap();
+                assert_eq!(
+                    source
+                        .lock()
+                        .unwrap()
+                        .device_manager
+                        .console_config()
+                        .unwrap()
+                        .optical_drives[selected],
+                    config
+                );
+                let invalid = OpticalDriveConfig {
+                    path_on_host: Some(directory.as_path().join("missing.iso")),
+                    ..config.clone()
+                };
+                runtime
+                    .handle_request(VmmAction::UpdateOpticalDrive(invalid), &mut events)
+                    .unwrap_err();
+                assert_eq!(
+                    source
+                        .lock()
+                        .unwrap()
+                        .device_manager
+                        .console_config()
+                        .unwrap()
+                        .optical_drives[selected],
+                    config
+                );
+                runtime
+                    .handle_request(
+                        VmmAction::UpdateOpticalDrive(OpticalDriveConfig {
+                            drive_id: "absent".into(),
+                            path_on_host: None,
+                        }),
+                        &mut events,
+                    )
+                    .unwrap_err();
+                let media = TempFile::new().unwrap();
+                media.as_file().write_all(&[0x42; 4096]).unwrap();
+                let config = OpticalDriveConfig {
+                    path_on_host: Some(media.as_path().to_owned()),
+                    ..config
+                };
+                runtime
+                    .handle_request(VmmAction::UpdateOpticalDrive(config.clone()), &mut events)
+                    .unwrap();
+                let VmmData::FullVmConfig(current) = runtime
+                    .handle_request(VmmAction::GetFullVmConfig, &mut events)
+                    .unwrap()
+                else {
+                    panic!("configuration response expected");
+                };
+                assert_eq!(current.console.unwrap().optical_drives[selected], config);
+                if optical == 2 {
+                    assert_eq!(
+                        source
+                            .lock()
+                            .unwrap()
+                            .device_manager
+                            .console_config()
+                            .unwrap()
+                            .optical_drives[0]
+                            .path_on_host
+                            .as_deref(),
+                        Some(iso.as_path())
+                    );
+                }
+                resources.console.as_mut().unwrap().optical_drives[selected] = config;
+                replacement = Some(media);
+            }
             let (devices, allocations) = {
                 let vmm = source.lock().unwrap();
                 let vm = vmm.vm.as_kvm().unwrap();
@@ -1210,6 +1292,7 @@ pub(crate) mod tests {
             assert!(!allocator.gsi_legacy_allocator.is_allocated(12));
             assert_eq!(allocator.gsi_legacy_allocator.is_allocated(14), optical > 0);
             assert_eq!(allocator.gsi_legacy_allocator.is_allocated(15), optical > 1);
+            drop(replacement);
         }
     }
 

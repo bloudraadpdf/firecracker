@@ -143,6 +143,9 @@ pub enum VmmAction {
     GetFreePageHintingStatus,
     /// Stops a free page hinting run
     StopFreePageHinting,
+    /// Replace media in an attached optical drive after boot.
+    #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+    UpdateOpticalDrive(crate::vmm_config::console::OpticalDriveConfig),
     /// Update existing block device properties such as `path_on_host` or `rate_limiter`.
     UpdateBlockDevice(BlockDeviceUpdateConfig),
     /// Update a network interface, after microVM start. Currently, the only updatable properties
@@ -196,6 +199,9 @@ pub enum VmmActionError {
     #[from(ignore)]
     /// MMDS limit exceeded error: {0}
     MmdsLimitExceeded(data_store::MmdsDatastoreError),
+    /// Optical media update error: {0}
+    #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+    OpticalMedia(std::io::Error),
     /// Network config error: {0}
     NetworkConfig(#[from] NetworkInterfaceError),
     /// The requested operation is not supported: {0}
@@ -525,6 +531,8 @@ impl<'a> PrebootApiController<'a> {
             | GetFreePageHintingStatus
             | StopFreePageHinting
             | HotUnplugDevice(_) => Err(VmmActionError::OperationNotSupportedPreBoot),
+            #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+            UpdateOpticalDrive(_) => Err(VmmActionError::OperationNotSupportedPreBoot),
             #[cfg(target_arch = "x86_64")]
             SendCtrlAltDel => Err(VmmActionError::OperationNotSupportedPreBoot),
         }
@@ -848,6 +856,15 @@ impl RuntimeApiController {
                 .stop_balloon_hinting()
                 .map(|_| VmmData::Empty)
                 .map_err(VmmActionError::BalloonUpdate),
+            #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+            UpdateOpticalDrive(config) => self
+                .vmm
+                .lock()
+                .expect("Poisoned lock")
+                .device_manager
+                .update_optical_drive(config)
+                .map(|_| VmmData::Empty)
+                .map_err(VmmActionError::OpticalMedia),
             UpdateBlockDevice(new_cfg) => self.update_block_device(new_cfg),
             UpdateNetworkInterface(netif_update) => self.update_net_rate_limiters(netif_update),
             UpdatePmemDevice(new_cfg) => self.update_pmem_device(new_cfg),
@@ -1226,6 +1243,13 @@ mod tests {
             );
         }
 
+        #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+        check_unsupported(preboot_request(VmmAction::UpdateOpticalDrive(
+            crate::vmm_config::console::OpticalDriveConfig {
+                drive_id: "exec".into(),
+                path_on_host: None,
+            },
+        )));
         check_unsupported(preboot_request(VmmAction::FlushMetrics));
         check_unsupported(preboot_request(VmmAction::Pause));
         check_unsupported(preboot_request(VmmAction::Resume));

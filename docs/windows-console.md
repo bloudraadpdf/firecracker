@@ -289,7 +289,7 @@ real LED status for the bridge's lock-key synchronisation.
 
 `console.optical_drives` selects at most two read-only ATAPI masters on one PCI
 IDE controller. List order selects primary then secondary; each `drive_id` must
-be unique and nonempty. Omit `path_on_host` to keep a physical drive attached
+be unique, nonempty and contain only letters, digits or underscores. Omit `path_on_host` to keep a physical drive attached
 without a disc. An empty list attaches no controller. The earlier experimental
 `optical_image_path` field is rejected.
 
@@ -311,8 +311,26 @@ Media-event polling reports the latest insertion or removal and current tray
 status. Header-only polls retain the event. A full poll consumes the event
 without clearing unit attention. This follows the
 [MMC-4 section 6.7 polling rules](https://13thmonkey.org/documentation/SCSI/mmc4r05.pdf).
-Pending notifications survive snapshots. The runtime media API follows in a
-separate increment.
+Pending notifications survive snapshots.
+
+After boot, replace one drive's medium through the existing Firecracker API:
+
+```sh
+curl --unix-socket firecracker.sock -X PUT \
+  http://localhost/optical-drives/exec \
+  -H 'Content-Type: application/json' \
+  -d '{"drive_id":"exec","path_on_host":"/media/command.iso"}'
+```
+
+The path and body IDs must match a drive attached at boot. Omit `path_on_host`
+or set it to `null` to remove the disc and open the tray. Insertion closes it.
+A successful update returns204; an absent drive, locked or busy drive, invalid
+ISO, or pre-boot request returns400 with a fault message. Retry a busy drive
+once its transfer ends. Updates also work while the VM is paused. They do not
+add hardware or change the channel order. `GET /vm/config` and subsequent
+snapshots record the new path only after the update succeeds. Under the jailer,
+make each replacement ISO available inside the jail before sending its path.
+Retain immutable replacement files for snapshot restore.
 
 BAR size probing, relocation and mode switching follow the
 [PCI IDE 1.0 rules](https://www.isdaman.com/alsos/hardware/hdc/pciide.pdf).
