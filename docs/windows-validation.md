@@ -28,6 +28,11 @@ decoding covers indexed bit/nibble order, RGB555, RGB24, RGB32, alpha, palettes
 and top-down/bottom-up rows. Direct and chained storage use checked memory-slot
 pointers, with a 32 MiB data limit and at most 4,096 chunks. Tests reject invalid
 dimensions, strides, palette indices, backlinks, truncated chains and cycles.
+Surface raster operations cover source/brush selection, input and result
+inversions, copy, OR, AND, XOR, blackness, whiteness and destination inversion.
+Bitmap copies support source crops, clipped destinations and nearest-neighbour
+scaling while preserving row padding. Tests cover descriptor validity and bit
+truth tables, signed destination strides and rejection before destination writes.
 Guest drawing-command decoding and rendering remain incomplete. Its layout follows
 the published [QXL device ABI](https://sources.debian.org/src/spice-protocol/0.12.14-1/spice/qxl_dev.h/).
 It does not expose a QXL PCI device yet. Component checks do not establish guest

@@ -6,6 +6,7 @@
 pub mod bitmap;
 pub mod memory;
 pub mod protocol;
+pub mod raster;
 pub mod surface;
 pub mod transport;
 
