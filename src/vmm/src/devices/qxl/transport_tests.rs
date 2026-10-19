@@ -106,21 +106,55 @@ fn completed_commands_publish_release_ids_and_terminate_the_guest_chain() {
 }
 
 #[test]
-fn full_release_ring_stops_before_execution_and_resumes_without_duplicates() {
+fn a_full_command_dispatch_publishes_one_complete_release_chain() {
     let (memory, addresses, mut queues) = setup();
-    for sequence in 0..12 {
+    for sequence in 0..32 {
         submit(&memory, sequence, 1);
     }
+    assert_eq!(
+        queues
+            .drain(&memory, &addresses, Queue::Commands, |_| Ok(()))
+            .unwrap(),
+        32
+    );
+    assert_eq!(memory.load(RELEASE_RING + 4).unwrap(), 1);
+    for sequence in 0..32 {
+        let mut next = [0; 8];
+        addresses
+            .read(&memory, pointer(1, sequence * 16), &mut next)
+            .unwrap();
+        assert_eq!(
+            u64::from_le_bytes(next),
+            if sequence == 31 { 0 } else { sequence + 101 }
+        );
+    }
+}
+
+#[test]
+fn full_release_ring_stops_before_execution_and_resumes_without_duplicates() {
+    let (memory, addresses, mut queues) = setup();
     let mut executed = Vec::new();
     let mut execute = |command: super::protocol::Command| {
         executed.push(command.address);
         Ok(())
     };
+    for sequence in 0..8 {
+        submit(&memory, sequence, 1);
+        assert_eq!(
+            queues
+                .drain(&memory, &addresses, Queue::Commands, &mut execute)
+                .unwrap(),
+            1
+        );
+    }
+    for sequence in 8..12 {
+        submit(&memory, sequence, 1);
+    }
     assert_eq!(
         queues
             .drain(&memory, &addresses, Queue::Commands, &mut execute)
             .unwrap(),
-        8
+        0
     );
     assert_eq!(memory.load(COMMAND_RING + 12).unwrap(), 8);
     assert_eq!(memory.load(RELEASE_RING + 16).unwrap(), 1);
@@ -135,6 +169,61 @@ fn full_release_ring_stops_before_execution_and_resumes_without_duplicates() {
     for (sequence, address) in executed.into_iter().enumerate() {
         assert_eq!(address, pointer(1, u64::try_from(sequence).unwrap() * 16));
     }
+}
+
+#[test]
+fn a_failed_later_command_publishes_only_the_successful_prefix() {
+    let (memory, addresses, mut queues) = setup();
+    for sequence in 0..3 {
+        submit(&memory, sequence, 1);
+    }
+    queues
+        .drain(&memory, &addresses, Queue::Commands, |command| {
+            if command.address == pointer(1, 16) {
+                Err(DecodeError::Parameter.into())
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+    assert_eq!(memory.load(COMMAND_RING + 12).unwrap(), 1);
+    assert_eq!(memory.load(RELEASE_RING + 4).unwrap(), 1);
+    let mut id = [0; 8];
+    addresses.read(&memory, pointer(1, 0), &mut id).unwrap();
+    assert_eq!(id, [0; 8]);
+    addresses.read(&memory, pointer(1, 16), &mut id).unwrap();
+    assert_eq!(u64::from_le_bytes(id), 101);
+    assert_eq!(
+        queues
+            .drain(&memory, &addresses, Queue::Commands, |_| Ok(()))
+            .unwrap(),
+        2
+    );
+    assert_eq!(memory.load(RELEASE_RING + 4).unwrap(), 2);
+    addresses.read(&memory, pointer(1, 16), &mut id).unwrap();
+    assert_eq!(u64::from_le_bytes(id), 102);
+}
+
+#[test]
+fn duplicate_release_addresses_do_not_form_cycles_or_execute_twice() {
+    let (memory, addresses, mut queues) = setup();
+    submit(&memory, 0, 1);
+    submit(&memory, 1, 1);
+    memory
+        .write(Region::Ram, COMMAND_RING + 36, &pointer(1, 0).to_le_bytes())
+        .unwrap();
+    let mut executed = 0;
+    queues
+        .drain(&memory, &addresses, Queue::Commands, |_| {
+            executed += 1;
+            Ok(())
+        })
+        .unwrap_err();
+    assert_eq!(executed, 1);
+    assert_eq!(memory.load(COMMAND_RING + 12).unwrap(), 1);
+    let mut next = [0; 8];
+    addresses.read(&memory, pointer(1, 0), &mut next).unwrap();
+    assert_eq!(next, [0; 8]);
 }
 
 #[test]
