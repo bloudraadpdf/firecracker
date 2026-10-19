@@ -79,3 +79,10 @@ pub(super) fn vbe_layout(registers: [u16; 11], limit: usize) -> Option<(usize, u
         .checked_add(usize::from(width) * pixel_bytes)?;
     (end <= limit).then_some((start, stride, pixel_bytes))
 }
+
+#[cfg(target_arch = "x86_64")]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VgaPciState {
+    pub(crate) mapped: [u64; 2],
+    pub(crate) vga: VgaState,
+}

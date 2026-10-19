@@ -418,15 +418,16 @@ it. The PCI transport identifies the GPU as 1af4:1050, with display class 03.
 On AMD64 its capabilities and MSI-X structures use BAR4, leaving BAR0 and BAR2
 for the VGA framebuffer and registers required by the firmware. VGA memory,
 register decode, BAR relocation and KVM slot lifetime have one implementation
-for reuse by both PCI display profiles. Other virtio
-devices keep their existing BAR layout. Cold VGA/GPU attachment and console
-routing are not implemented yet. VGA remains the configured display; Windows
-virtio display drivers cannot bind to it.
+for reuse by both PCI display profiles. Other virtio devices keep their existing
+BAR layout. The AMD64 GPU transport also maps and checkpoints the VGA framebuffer,
+registers and legacy ports, with PCI memory/IO decode and BAR relocation.
+Console selection and native frame routing are not implemented yet. VGA remains
+the configured display; Windows virtio display drivers cannot bind to it.
 
 AMD64 console snapshots contain display memory and registers, keyboard/mouse
 queues, held input, pending releases, keyboard LEDs and pending lock updates,
 USB controller/HID state, PCI state, optical transfer state and media identity.
-The current snapshot format is 35.0.0. Display state adds about 16 MiB; the
+The current snapshot format is 36.0.0. Display state adds about 16 MiB; the
 bounded snapshot reader accepts at most 128 MiB, including GPU state. The guest
 disk remains a separate artifact, as with ordinary Firecracker snapshots.
 
@@ -436,7 +437,7 @@ does not save a second held-key or LED state. Pending frames, partial-frame
 cursor, position, held releases and guest/pending lock LEDs travel with Input.
 Missing, stray or mismatched console/input topology is rejected before backend
 attachment. Format29 through format34 snapshots require their matching older
-binaries; format35 has no decoder for them. Snapshots do not move between AMD64
+binaries; format36 has no decoder for them. Snapshots do not move between AMD64
 and ARM64.
 
 The historical format31 Windows 11 test edition was IoT Enterprise LTSC 2024. It
