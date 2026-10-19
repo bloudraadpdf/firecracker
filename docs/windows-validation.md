@@ -23,8 +23,12 @@ and bounds each command/cursor dispatch to 32 entries. A full release ring
 stops execution before it can lose an acknowledgement. Commands are released
 only after their handler succeeds. Boundary, reset and transport tests check
 those components. Primary-surface checks cover signed row strides, exact frame
-pixels, clipped fills, overlap-safe copies and untouched row padding. Guest
-drawing-command decoding and rendering remain incomplete. Its layout follows
+pixels, clipped fills, overlap-safe copies and untouched row padding. Raw bitmap
+decoding covers indexed bit/nibble order, RGB555, RGB24, RGB32, alpha, palettes
+and top-down/bottom-up rows. Direct and chained storage use checked memory-slot
+pointers, with a 32 MiB data limit and at most 4,096 chunks. Tests reject invalid
+dimensions, strides, palette indices, backlinks, truncated chains and cycles.
+Guest drawing-command decoding and rendering remain incomplete. Its layout follows
 the published [QXL device ABI](https://sources.debian.org/src/spice-protocol/0.12.14-1/spice/qxl_dev.h/).
 It does not expose a QXL PCI device yet. Component checks do not establish guest
 driver loading or rendering. Graphics qualification across all agreed guests
