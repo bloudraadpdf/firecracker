@@ -82,6 +82,15 @@ and raw bitmap fallback when the ROM's compression level is zero, including for
 alpha images. It initialises `self_bitmap` to zero and has no composite command
 producer. The remaining integration and native checks must verify those paths
 with the signed packages.
+
+Cursor commands decode set, move, hide and trail parameters without reading
+unused union fields or guest scratch space. Shape decoding covers alpha,
+monochrome and 4/8/16/24/32-bit colour cursors, palettes and MSB-first masks.
+It reuses bitmap pixel decoding and premultiplied alpha blending. Cursor drawing
+clips the hotspot at display edges and preserves monochrome inversion and the
+colour-mask rules. Shapes are limited to 256 by 256 pixels. The zero-sized
+transparent cursor does not read unused chunk links. Cursor commands and trail
+parameters still need controller integration and native guest validation.
 The layout follows
 the published [QXL device ABI](https://sources.debian.org/src/spice-protocol/0.12.14-1/spice/qxl_dev.h/).
 It does not expose a QXL PCI device yet. Component checks do not establish guest
