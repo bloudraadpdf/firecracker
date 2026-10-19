@@ -113,6 +113,7 @@ impl Frame {
 }
 
 struct SessionGuard {
+    access: rfb::Access,
     input_active: bool,
     backend: Backend,
     busy: Arc<AtomicBool>,
@@ -140,8 +141,11 @@ fn authenticate_console(
     password: Option<&rfb::Password>,
 ) -> io::Result<()> {
     rfb::handshake(stream, password)?;
-    guard.input_active = true;
-    guard.backend.input(3, &[])
+    if guard.access == rfb::Access::Control {
+        guard.input_active = true;
+        guard.backend.input(3, &[])?;
+    }
+    Ok(())
 }
 
 fn serve_connection(
@@ -157,11 +161,11 @@ fn serve_connection(
         let mut socket = websocket::accept(stream, &auth)?;
         authenticate_console(&mut socket, guard, None)?;
         transport.set_read_timeout(None)?;
-        rfb::serve(&mut socket, &guard.backend, mapping)
+        rfb::serve(&mut socket, &guard.backend, mapping, guard.access)
     } else {
         authenticate_console(&mut stream, guard, password.as_ref())?;
         transport.set_read_timeout(None)?;
-        rfb::serve(&mut stream, &guard.backend, mapping)
+        rfb::serve(&mut stream, &guard.backend, mapping, guard.access)
     }
 }
 
@@ -172,6 +176,7 @@ fn listen(
     password: Option<rfb::Password>,
     mapping: rfb::KeyboardMapping,
     busy: Arc<AtomicBool>,
+    access: rfb::Access,
 ) -> io::Result<()> {
     if !address.ip().is_loopback() {
         return Err(invalid(
@@ -194,6 +199,7 @@ fn listen(
             continue;
         }
         let mut guard = SessionGuard {
+            access,
             input_active: false,
             backend: backend.clone(),
             busy: busy.clone(),
@@ -213,7 +219,7 @@ fn listen(
 pub fn run(mut args: impl Iterator<Item = std::ffi::OsString>) -> io::Result<()> {
     let socket = args.next().ok_or_else(|| {
         invalid(
-            "usage: firecracker-console SOCKET rfb|rfb-macos ADDRESS [PASSWORD_FILE] | SOCKET \
+            "usage: firecracker-console SOCKET rfb|rfb-macos|rfb-view ADDRESS [PASSWORD_FILE] | SOCKET \
              websocket ADDRESS TOKEN_FILE ORIGIN | WEB_DIR assets ADDRESS",
         )
     })?;
@@ -281,7 +287,7 @@ pub fn run(mut args: impl Iterator<Item = std::ffi::OsString>) -> io::Result<()>
     } else {
         rfb::KeyboardMapping::Standard
     };
-    let auth = if mode == "rfb" || mode == "rfb-macos" {
+    let auth = if matches!(mode.to_str(), Some("rfb" | "rfb-macos" | "rfb-view")) {
         if let Some(path) = args.next() {
             password = Some(rfb::Password::from_file(Path::new(&path))?);
         }
@@ -299,7 +305,7 @@ pub fn run(mut args: impl Iterator<Item = std::ffi::OsString>) -> io::Result<()>
         Some(websocket::Auth::new(token, origin)?)
     } else {
         return Err(invalid(
-            "mode must be rfb, rfb-macos, websocket, assets, screenshot, key, release or eject",
+            "mode must be rfb, rfb-macos, rfb-view, websocket, assets, screenshot, key, release or eject",
         ));
     };
     if args.next().is_some() {
@@ -312,6 +318,11 @@ pub fn run(mut args: impl Iterator<Item = std::ffi::OsString>) -> io::Result<()>
         password,
         mapping,
         Arc::new(AtomicBool::new(false)),
+        if mode == "rfb-view" {
+            rfb::Access::View
+        } else {
+            rfb::Access::Control
+        },
     )
 }
 
@@ -347,6 +358,15 @@ mod tests {
         }
     }
 
+    fn write_test_frame(stream: &mut UnixStream) {
+        let mut response = b"FCF1".to_vec();
+        for value in [2u32, 1, 8] {
+            response.extend(value.to_le_bytes());
+        }
+        response.extend([3, 2, 1, 0, 6, 5, 4, 0]);
+        stream.write_all(&response).unwrap();
+    }
+
     #[test]
     fn full_backend_backlog_does_not_hold_session() {
         const CHILD: &str = "FIRECRACKER_CONSOLE_BACKLOG_TEST_SOCKET";
@@ -358,6 +378,7 @@ mod tests {
             );
             let busy = Arc::new(AtomicBool::new(true));
             drop(SessionGuard {
+                access: rfb::Access::Control,
                 input_active: true,
                 backend,
                 busy: busy.clone(),
@@ -420,12 +441,7 @@ mod tests {
                     let (mut stream, request) = read_backend_request(&listener);
                     requests.push(request);
                     if request[4] == 0 {
-                        let mut response = b"FCF1".to_vec();
-                        for value in [2u32, 1, 8] {
-                            response.extend(value.to_le_bytes());
-                        }
-                        response.extend([3, 2, 1, 0, 6, 5, 4, 0]);
-                        stream.write_all(&response).unwrap();
+                        write_test_frame(&mut stream);
                     } else {
                         let mut response = [0; 16];
                         response[..4].copy_from_slice(b"FCA1");
@@ -448,7 +464,12 @@ mod tests {
             let (mut server, _) = tcp.accept().unwrap();
             let session = std::thread::spawn(move || {
                 rfb::handshake(&mut server, None)?;
-                rfb::serve(&mut server, &backend, rfb::KeyboardMapping::Standard)
+                rfb::serve(
+                    &mut server,
+                    &backend,
+                    rfb::KeyboardMapping::Standard,
+                    rfb::Access::Control,
+                )
             });
             let mut version = [0; 12];
             client.read_exact(&mut version).unwrap();
@@ -501,6 +522,58 @@ mod tests {
     }
 
     #[test]
+    fn read_only_session_never_sends_or_releases_guest_input() {
+        let path = PathBuf::from(format!("console-view-{}.sock", std::process::id()));
+        let listener = UnixListener::bind(&path).unwrap();
+        let host = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, request) = read_backend_request(&listener);
+                requests.push(request[4]);
+                write_test_frame(&mut stream);
+            }
+            requests
+        });
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        configure(&peer).unwrap();
+        let (stream, _) = listener.accept().unwrap();
+        let busy = Arc::new(AtomicBool::new(true));
+        let session_busy = busy.clone();
+        let backend = Backend(path.clone());
+        let session = std::thread::spawn(move || {
+            let mut guard = SessionGuard {
+                access: rfb::Access::View,
+                input_active: false,
+                backend,
+                busy: session_busy,
+            };
+            serve_connection(
+                stream,
+                &mut guard,
+                None,
+                None,
+                rfb::KeyboardMapping::Standard,
+            )
+        });
+        let mut frame = crate::client::handshake(&mut peer, None).unwrap();
+        crate::client::key(&mut peer, 0xffeb, true).unwrap();
+        crate::client::key(&mut peer, 0xffeb, false).unwrap();
+        crate::client::pointer(&mut peer, 1, 1, 0).unwrap();
+        crate::client::request(&mut peer, (frame.width, frame.height)).unwrap();
+        let frame = crate::client::frame(&mut peer, &mut frame).unwrap();
+        assert_eq!(frame.pixels, [3, 2, 1, 0, 6, 5, 4, 0]);
+        drop(peer);
+        assert_eq!(
+            session.join().unwrap().unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+        assert_eq!(host.join().unwrap(), [0, 0]);
+        assert!(!busy.load(Ordering::Acquire));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn input_state_rejects_undefined_pending_led_bits() {
         let path = PathBuf::from(format!("console-input-flags-{}.sock", std::process::id()));
         let listener = UnixListener::bind(&path).unwrap();
@@ -526,6 +599,7 @@ mod tests {
         let listener = UnixListener::bind(&path).unwrap();
         let busy = Arc::new(AtomicBool::new(true));
         let guard = SessionGuard {
+            access: rfb::Access::Control,
             input_active: true,
             backend: Backend(path.clone()),
             busy: busy.clone(),
@@ -600,6 +674,7 @@ mod tests {
         listener.set_nonblocking(true).unwrap();
         let busy = Arc::new(AtomicBool::new(true));
         drop(SessionGuard {
+            access: rfb::Access::Control,
             input_active: false,
             backend: Backend(path.clone()),
             busy: busy.clone(),

@@ -50,6 +50,7 @@ impl LocalBridge {
                         *peer = Some(stream.try_clone()?);
                         drop(peer);
                         let mut guard = SessionGuard {
+                            access: crate::bridge::rfb::Access::Control,
                             input_active: false,
                             backend: Backend(socket.clone()),
                             busy: busy.clone(),

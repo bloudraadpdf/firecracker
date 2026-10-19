@@ -123,6 +123,7 @@ fn failed_authentication_does_not_release_guest_input() {
     }
     let busy = Arc::new(AtomicBool::new(true));
     let mut guard = SessionGuard {
+        access: crate::bridge::rfb::Access::Control,
         input_active: false,
         backend: Backend(path.clone()),
         busy: busy.clone(),
