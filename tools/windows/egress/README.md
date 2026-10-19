@@ -275,11 +275,11 @@ directory before execution. It copies helper state into each phase directory,
 stops the VMM before its helpers, and creates the next copy only after both
 helpers stop. It reads the copied store generation for the explicit restore
 request; it never sends a host TPM startup command. Snapshot creation still uses
-the normal API: the snapshot embeds both checkpoints. A phase, VMM or helper
-failure discards the destination phase state only after its helpers stop. If a
-helper remains live, cleanup refuses to discard its state. A later proxy
-shutdown failure returns a nonzero controller status and retains the closed
-final helper pair. That run has not passed. A failed phase must not be resumed.
+the normal API: the snapshot embeds both checkpoints. Cleanup retains every
+phase's helper state on success or failure: disk writes may already depend on
+that advanced variable store and TPM state. A cleanup failure returns a nonzero
+controller status and retains ownership of any live helper. That run has not
+passed. A failed phase must not be resumed or paired with an older helper copy.
 Use a short absolute test path: each generated helper directory must be at most
 95 bytes so its Unix socket paths fit. Run helpers and the CONNECT VMM as the
 same user. Preserve the final disk and final phase stores as a matched set if

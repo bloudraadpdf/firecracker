@@ -120,7 +120,6 @@ cleanup() {
  trap '' INT TERM
  stop_vm || cleanup_failed stop-vm "$?"
  secure_stop || cleanup_failed secure-stop "$?"
- if [[ "$result" != 0 ]]; then secure_discard || cleanup_failed secure-discard "$?"; fi
  if kill -0 "$proxy_child" 2>/dev/null; then
   printf '\n' >&3 || cleanup_failed close-proxy-input "$?"
  fi

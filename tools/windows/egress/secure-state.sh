@@ -87,18 +87,3 @@ secure_load() {
     if [[ -z ${WINDOWS_SECURE_SOURCE:-} ]]; then printf '%s' "$1"; return; fi
     jq -nc --argjson request "$1" --slurpfile helpers "$secure_current/load.json" '$request + $helpers[0]'
 }
-secure_discard() {
-    local result=0 code pid
-    for pid in "${secure_pids[@]}"; do
-        if kill -0 "$pid" 2>/dev/null; then
-            printf 'Refusing to discard live secure helper state: %s\n' "$pid" >&2 || true
-            return 1
-        fi
-    done
-    if [[ -n "$secure_current" ]]; then
-        rm -f "$secure_current/store.json" "$secure_current/store.lock" \
-            "$secure_current/store.json.lock" "$secure_current/store.json.pending" || result=$?
-        rm -rf "$secure_current/tpm" || { code=$?; if [[ "$result" == 0 ]]; then result=$code; fi; }
-    fi
-    return "$result"
-}

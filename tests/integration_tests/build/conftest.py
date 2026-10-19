@@ -15,14 +15,14 @@ def windows_cleanup():
     controller = (windows / "legacy-vsock/check.sh").read_text()
     secure = (windows / "egress/secure-state.sh").read_text()
     tap = (windows / "egress/tap-check.sh").read_text()
-    functions = {}
+    functions = {"secure_state": secure}
     for source, prefix, names in [
         (
             controller,
             "",
             ["cleanup_failed", "cleanup", "stop_vm", "remove_sockets", "wait_for_exit"],
         ),
-        (secure, "", ["secure_discard", "secure_stop", "secure_wait_stopped"]),
+        (secure, "", ["secure_stop", "secure_wait_stopped"]),
         (tap, "tap_", ["cleanup_failed", "cleanup", "stop"]),
     ]:
         for name in names:
