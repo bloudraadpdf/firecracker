@@ -4,7 +4,7 @@ The optional console provides a private display/input endpoint without guest
 networking or vsock. The AMD64 profile adds VGA/VBE graphics, a PS/2 keyboard, a
 USB HID pointer and optional read-only ATAPI installation media. The ARM64
 profile adds an MMIO display and one combined virtio keyboard/absolute pointer.
-See the [validation record](windows-validation.md#current-integration-candidate)
+See the [validation record](windows-validation.md#latest-qualified-integration-baseline)
 for the current XP display/input results and historical AMD64 results. ARM64
 guest qualification remains pending.
 
@@ -187,7 +187,21 @@ without `vga_rom_path`. This attaches one virtio-VGA PCI function. Its boot disp
 uses the same VGA framebuffer; the guest driver then supplies native frames and
 cursor updates to both VNC and the optional native viewer. The initial preferred
 mode is 1024x768. Omit `display`, or select `vga`, for the existing XP/7 profile.
-The virtio profile is not yet guest-qualified.
+The Windows 10 candidate has passed native scanout, mode changes and full
+restore. The USB clock correction also passes cold boot and pointer input. See the
+[GPU candidate record](windows-validation.md#virtio-gpu-integration-candidate).
+
+For an installed Windows 10 guest, attach the pinned virtio driver ISO and run
+this in an elevated command prompt, using its actual drive letter:
+
+```bat
+pnputil /add-driver D:\viogpudo\w10\amd64\viogpudo.inf /install
+```
+
+The package supplies `viogpures.exe`. For example, use
+`D:\viogpudo\w10\amd64\viogpures.exe 1280 720` to request that mode. Verify the
+active adapter and its error code in Device Manager after installation and cold
+boot. Windows 11 uses the ISO's `w11` package; it requires separate qualification.
 
 Use `--enable-pci`. The AMD64 console requires at least 64 MiB RAM and ordinary
 pages; huge pages cannot represent its legacy VGA memory aperture. There is no
@@ -432,7 +446,8 @@ registers and legacy ports, with PCI memory/IO decode and BAR relocation.
 Select `"display": "virtio-gpu"` to attach it. The console uses VGA until the
 driver selects a native scanout, shows black when native scanout is disabled,
 and returns to VGA after device reset. This path still requires Windows driver
-qualification; the installed-reference results cover the legacy VGA profile.
+qualification beyond the recorded Windows 10 candidate. The earlier full
+installed-reference matrix covers the legacy VGA profile.
 
 AMD64 console snapshots contain display memory and registers, keyboard/mouse
 queues, held input, pending releases, keyboard LEDs and pending lock updates,

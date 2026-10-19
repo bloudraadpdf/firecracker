@@ -12,7 +12,7 @@ use std::sync::atomic::AtomicU32;
 #[cfg(feature = "windows")]
 use std::sync::{Arc, Barrier, Mutex, Weak};
 #[cfg(feature = "windows")]
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(feature = "windows")]
 use event_manager::{EventOps, Events, MutEventSubscriber};
@@ -72,6 +72,7 @@ pub struct UsbDevice {
     intx: Arc<Mutex<PciIntxGroup>>,
     timer: TimerFd,
     running: bool,
+    last_frame: Instant,
     registered: bool,
     bound: bool,
 }
@@ -198,6 +199,7 @@ impl UsbDevice {
             intx,
             timer: TimerFd::new(),
             running: false,
+            last_frame: Instant::now(),
             registered: false,
             bound: false,
         }));
@@ -262,6 +264,7 @@ impl UsbDevice {
 
     pub fn set_running(&mut self, running: bool) {
         self.running = running;
+        self.last_frame = Instant::now();
         self.timer.arm(
             if running { FRAME } else { Duration::ZERO },
             running.then_some(FRAME),
@@ -288,6 +291,21 @@ impl UsbDevice {
     }
     pub fn release(&mut self) -> io::Result<()> {
         self.core.release()
+    }
+
+    fn advance_frames(&mut self) {
+        let now = Instant::now();
+        if !self.running || self.config.read_reg(1) & 4 == 0 {
+            self.last_frame = now;
+            return;
+        }
+        let count = u32::try_from(now.duration_since(self.last_frame).as_millis().min(32)).unwrap();
+        self.last_frame += FRAME * count;
+        if let Some(vm) = self.vm.upgrade() {
+            for _ in 0..count {
+                self.core.tick(vm.guest_memory());
+            }
+        }
     }
 
     fn sync_interrupt(&mut self) {
@@ -388,6 +406,7 @@ impl PciDevice for UsbDevice {
         offset: u8,
         data: &[u8],
     ) -> Option<Arc<Barrier>> {
+        self.advance_frames();
         if index == 0x30 {
             let mut value = u32::from(self.legacy_support).to_le_bytes();
             if let Some(target) =
@@ -413,6 +432,7 @@ impl PciDevice for UsbDevice {
 #[cfg(feature = "windows")]
 impl BusDevice for UsbDevice {
     fn read(&mut self, base: u64, offset: u64, data: &mut [u8]) {
+        self.advance_frames();
         data.fill(0xff);
         if base == self.mapped && self.config.read_reg(1) & 1 != 0 {
             self.core.read(offset, data);
@@ -420,6 +440,7 @@ impl BusDevice for UsbDevice {
         self.sync_interrupt();
     }
     fn write(&mut self, base: u64, offset: u64, data: &[u8]) -> Option<Arc<Barrier>> {
+        self.advance_frames();
         if base == self.mapped && self.config.read_reg(1) & 1 != 0 {
             self.core.write(offset, data);
         }
@@ -437,15 +458,8 @@ impl MutEventSubscriber for UsbDevice {
         if event.fd() != self.timer.as_raw_fd() {
             return;
         }
-        let count = self.timer.read().min(32);
-        if self.running
-            && self.config.read_reg(1) & 4 != 0
-            && let Some(vm) = self.vm.upgrade()
-        {
-            for _ in 0..count {
-                self.core.tick(vm.guest_memory());
-            }
-        }
+        self.timer.read();
+        self.advance_frames();
         self.sync_interrupt();
     }
 }
@@ -575,6 +589,34 @@ mod tests {
         restored.core.write(2, &8u16.to_le_bytes());
         restored.sync_interrupt();
         assert_eq!(restored.read_config_register(0x30), 0x2000);
+    }
+
+    #[test]
+    fn frame_number_advances_without_event_loop_dispatch() {
+        use crate::vstate::memory::{Bytes, GuestAddress};
+        let (vm, mut pci) = platform();
+        vm.guest_memory()
+            .write_slice(&[1, 0, 0, 0].repeat(1024), GuestAddress(0x1000))
+            .unwrap();
+        let device = UsbDevice::attach(&vm, &mut pci, None).unwrap();
+        let mut usb = device.lock().unwrap();
+        usb.config.write_reg(1, 5);
+        usb.core.write(8, &0x1000u32.to_le_bytes());
+        usb.set_running(true);
+        let base = usb.mapped;
+        usb.write(base, 0, &1u16.to_le_bytes());
+        std::thread::sleep(Duration::from_millis(8));
+        let mut frame = [0; 2];
+        usb.read(base, 6, &mut frame);
+        assert!(
+            u16::from_le_bytes(frame) >= 4,
+            "USB frame clock stopped while timer dispatch was delayed"
+        );
+        usb.set_running(false);
+        let paused = frame;
+        std::thread::sleep(Duration::from_millis(8));
+        usb.read(base, 6, &mut frame);
+        assert_eq!(frame, paused);
     }
 
     #[test]

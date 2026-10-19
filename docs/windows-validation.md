@@ -5,6 +5,45 @@ tested guest, installed drivers, firmware, VMM and route. Use the
 [AMD64 guide](windows.md), [console guide](windows-console.md) and
 [secure platform guide](windows-secure-boot.md) to prepare a test.
 
+## Virtio GPU integration candidate
+
+Runtime source `67ac42dfc` adds the AMD64 `virtio-gpu` console profile. Windows 10
+Enterprise LTSC 2021 x64, build 19044, accepted the pinned virtio-win 0.1.302
+viogpudo package through normal `pnputil` installation, with exit code 0. The
+active `VioGpuDod` service reports Code 0, version `100.103.104.30200` and a
+Microsoft Windows Hardware Compatibility Publisher signature. The installed SYS
+matches SHA-256 `97eb164029d8b14f9529d3b5e1313abf71dead7f3192fc7a2474e6e54dee41bd`.
+
+The GNU development VMM `9a5950db` used the graphical CloudHv firmware
+`730de0fc`, one disposable reference-disk copy, one GPU and no option ROM. It ran
+with `--no-seccomp`; this is display evidence, not production sandbox evidence.
+The original reference disk was preserved.
+
+Native frames pass at 1024x768, 1280x720 and 1920x1080. All 41,600 checked pixels
+inside a guest-drawn rectangle match RGB `0d4795`. A full format-37 snapshot
+restores the active 1920x1080 scanout; the resumed guest accepts keyboard input,
+changes mode to 1024x768 and opens Start and Recycle Bin through absolute pointer
+clicks. The resumed guest reports 59 healthy present devices and completes S5
+with VMM exit 0. The 4 GiB RAM artifact was retired after evidence capture.
+
+Two subsequent unoptimised cold boots retain the healthy GPU but report Code 43
+on the USB controller. The unchanged optimised VMM `85a79d13` starts both devices
+and reports 59 healthy present devices. A regression test reproduces a stopped
+USB frame counter when timer dispatch is delayed. USB now samples monotonic time
+on guest I/O as well as timer events, with bounded catch-up and no advancement
+while the VM is paused. No snapshot field or format change is needed.
+
+The corrected unoptimised candidate `10415388` cold-boots both devices, reports
+59 healthy present devices, opens Start through the absolute pointer and accepts
+elevated keyboard commands. Both GPU and USB report Code 0, and the guest
+completes S5 with VMM exit 0. The six USB integration tests and strict VMM Clippy
+pass with and without Windows support. The clock regression fails on the old
+implementation and passes with the correction, including the paused-clock check.
+
+The result does not qualify Windows 11, fresh installation,
+browser/VNC/native-viewer interaction, host-requested resize, differential GPU
+restore or the remaining Toets integration.
+
 ## Latest qualified integration baseline
 
 The latest qualified AMD64 Windows-feature binary is `6f63cd8d`, built from runtime
