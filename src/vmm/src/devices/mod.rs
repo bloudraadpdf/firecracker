@@ -15,6 +15,8 @@ pub(crate) mod keyboard;
 pub mod legacy;
 pub mod pci;
 pub mod pseudo;
+#[cfg(all(feature = "windows", target_arch = "x86_64"))]
+pub mod qxl;
 pub mod tpm;
 pub mod uefi_vars;
 #[cfg(target_arch = "x86_64")]

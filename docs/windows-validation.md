@@ -5,6 +5,22 @@ tested guest, installed drivers, firmware, VMM and route. Use the
 [AMD64 guide](windows.md), [console guide](windows-console.md) and
 [secure platform guide](windows-secure-boot.md) to prepare a test.
 
+## XP and Windows 7 native graphics work
+
+The pinned virtio-win 0.1.302 ISO includes existing QXL packages for XP x86
+(`5.1.0.10018`) and Windows 7 x64 (`6.1.0.10024`). Their INFs match
+`PCI\VEN_1b36&DEV_0100&SUBSYS_11001af4` and install `qxl.sys` with `qxldd.dll`.
+These packages need the QXL device interface. They do not bind to the modern
+virtio GPU used in the Windows 10 checks below.
+
+Native XP/7 graphics through those existing packages is incomplete. The first
+Rust component decodes packed commands, primary surfaces, signed rectangles,
+ring counters and generation-tagged memory-slot pointers. Its layout follows
+the published [QXL device ABI](https://sources.debian.org/src/spice-protocol/0.12.14-1/spice/qxl_dev.h/).
+It does not expose a QXL PCI device yet. Component checks do not establish guest
+driver loading or rendering. Graphics qualification across all agreed guests
+must finish before work returns to unrelated platform features.
+
 ## Virtio GPU integration candidate
 
 Runtime source `67ac42dfc` adds the AMD64 `virtio-gpu` console profile. Windows 10
