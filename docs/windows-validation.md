@@ -19,35 +19,35 @@ source identity with each result. A documentation change does not require a new
 VMM build or guest run. Repeat a check for changed behaviour or an unresolved
 failure, and retain the earlier failed record.
 
-| Area | Latest qualified result | Remaining gate |
-| ---- | ----------------------- | -------------- |
-| XP SP3 x86 display modes | Unchanged miniport 0.1.2.0 on recorded `93434437`: all 16 advertised 32-bit modes pass full-frame RGB, five pointer targets per mode and saved printable ASCII with Caps Lock. | Normal Keep/Revert/timeout UI, browser/VNC input, other layouts and guests. |
-| XP current input and persistence | Current `6f63cd8d`: nonzero 1024x768x32 cold mode, Windows Run/absolute pointer/raw Caps Lock input, held Shift across full/differential restore, explicit release and exact saved `aAaAAaAAa` pass. | Broader input/UI coverage beyond the tested paths. |
-| XP TAP and CONNECT | Current `6f63cd8d`: both routes pass cold/full/differential transfers, stored data, public verification, both format-34 headers and final S5. | Legacy XP HTTP does not qualify modern TLS; fresh installation and other images remain separate. |
-| Windows 7 SP1 x64 | Current `6f63cd8d`: Windows Run/absolute pointer/raw Caps Lock and saved `aAa`; both TAP and CONNECT pass cold/full/differential transfers, storage, public verification, format-34 headers and S5. TAP generation notifications also pass. | Held-key restore on this guest and fresh installation remain unqualified. |
-| Windows 10 Enterprise LTSC 2021 x64 | Current `6f63cd8d`, 19044.1288: signed driver setup, RTC-policy reboot, normal SYSTEM task, saved `aAa` input and both transport routes pass. | Held-key restore is separately tested on XP; fresh installation remains separate. |
-| Windows 11 IoT Enterprise LTSC x64 | Current `6f63cd8d`, 26100.1742: signed driver setup, RTC-policy reboot, normal SYSTEM task, saved `aAa` input and both transport routes pass. | Fresh installation, other editions and broader input paths remain separate. |
-| Windows 11 Pro x64 | Current `6f63cd8d`, 26300.9457/26H2: input, Secure Boot/TPM, authenticated UEFI cold deletion and TAP/CONNECT cold/full/differential checks pass. | Enabled BitLocker protection, TPM-sealed recovery, attestation and fresh installation are not qualified. |
-| Windows 11 Enterprise Evaluation x64 | Current `6f63cd8d`, 26300.9457/26H2: signed drivers, policy reboot/input/task, Secure Boot/TPM and both TAP/CONNECT cold/full/differential checks pass, including secure checks, public verifiers, two format-34 headers per route and S5. | Fresh installation and other editions remain separate. |
-| Windows Server 2025 Core and Desktop | Core media preparation passes; current installed guest qualification is pending for both profiles. | Installation/input, applicable security, both routes and full/differential restore remain open. |
-| Host regression checks | Current default/Windows unit, documentation, example and benchmark checks, standalone tools, platform module and Linux PMEM/bzImage checks pass; default API, jailer, seccomp and snapshot checks also pass. | Results cover the tested Ryzen 5950X/Linux 7.0 host and Linux 6.1.188 guest; CPU-template skips and supported-host coverage remain open. |
-| ARM64 and performance | Final default/Windows boot and restored-memory measurements complete; the maintained analyser flags executable-text and restored-memory costs. | Native ARM64/KVM qualification and the flagged footprint comparisons remain open. |
+| Area                                       | Latest qualified result                                                                                                                                                                                                                                                                                                                                                                                                        | Remaining gate                                                                                                                           |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| XP SP3 x86 display modes                   | Unchanged miniport 0.1.2.0 on recorded `93434437`: all 16 advertised 32-bit modes pass full-frame RGB, five pointer targets per mode and saved printable ASCII with Caps Lock.                                                                                                                                                                                                                                                 | Normal Keep/Revert/timeout UI, browser/VNC input, other layouts and guests.                                                              |
+| XP current input and persistence           | Current `6f63cd8d`: nonzero 1024x768x32 cold mode, Windows Run/absolute pointer/raw Caps Lock input, held Shift across full/differential restore, explicit release and exact saved `aAaAAaAAa` pass.                                                                                                                                                                                                                           | Broader input/UI coverage beyond the tested paths.                                                                                       |
+| XP TAP and CONNECT                         | Current `6f63cd8d`: both routes pass cold/full/differential transfers, stored data, public verification, both format-34 headers and final S5.                                                                                                                                                                                                                                                                                  | Legacy XP HTTP does not qualify modern TLS; fresh installation and other images remain separate.                                         |
+| Windows 7 SP1 x64                          | Current `6f63cd8d`: Windows Run/absolute pointer/raw Caps Lock and saved `aAa`; both TAP and CONNECT pass cold/full/differential transfers, storage, public verification, format-34 headers and S5. TAP generation notifications also pass.                                                                                                                                                                                    | Held-key restore on this guest and fresh installation remain unqualified.                                                                |
+| Windows 10 Enterprise LTSC 2021 x64        | Current `6f63cd8d`, 19044.1288: signed driver setup, RTC-policy reboot, normal SYSTEM task, saved `aAa` input and both transport routes pass.                                                                                                                                                                                                                                                                                  | Held-key restore is separately tested on XP; fresh installation remains separate.                                                        |
+| Windows 11 IoT Enterprise LTSC x64         | Current `6f63cd8d`, 26100.1742: signed driver setup, RTC-policy reboot, normal SYSTEM task, saved `aAa` input and both transport routes pass.                                                                                                                                                                                                                                                                                  | Fresh installation, other editions and broader input paths remain separate.                                                              |
+| Windows 11 Pro x64                         | Current `6f63cd8d`, 26300.9457/26H2: input, Secure Boot/TPM, authenticated UEFI cold deletion and TAP/CONNECT cold/full/differential checks pass.                                                                                                                                                                                                                                                                              | Enabled BitLocker protection, TPM-sealed recovery, attestation and fresh installation are not qualified.                                 |
+| Windows 11 Enterprise Evaluation x64       | Current `6f63cd8d`, 26300.9457/26H2: signed drivers, policy reboot/input/task, Secure Boot/TPM and both TAP/CONNECT cold/full/differential checks pass, including secure checks, public verifiers, two format-34 headers per route and S5.                                                                                                                                                                                     | Fresh installation and other editions remain separate.                                                                                   |
+| Windows Server 2025 Core x64               | Current `6f63cd8d`, ServerStandardEval 26100.32230: fresh installation and ISO-free boot, signed 2k25 drivers, RTC-policy cold boot, normal SAC input with exact stored `aAa` plus CRLF, 42 healthy present devices and normal SYSTEM task pass. TAP and CONNECT pass cold/full/differential checks, stored data, public verifiers, both format-34 headers per route and normal S5/VMM exit zero.                              | Graphical input and Secure Boot/TPM are not qualified by this ordinary firmware profile.                                                 |
+| Windows Server 2025 Desktop Experience x64 | Current `6f63cd8d`, ServerStandardEval 26100.32230: fresh installation and ISO-free boot, signed 2k25 drivers, RTC-policy cold boot, 48 healthy present devices, Windows Run/absolute pointer/raw Caps Lock with exact stored `aAa`, and normal SYSTEM task/TAP staging pass. TAP and CONNECT pass cold/full/differential checks, stored data, public verifiers, both format-34 headers per route and normal S5/VMM exit zero. | Secure Boot/TPM are not qualified by this ordinary firmware profile.                                                                     |
+| Host regression checks                     | Current default/Windows unit, documentation, example and benchmark checks, standalone tools, platform module and Linux PMEM/bzImage checks pass; default API, jailer, seccomp and snapshot checks also pass.                                                                                                                                                                                                                   | Results cover the tested Ryzen 5950X/Linux 7.0 host and Linux 6.1.188 guest; CPU-template skips and supported-host coverage remain open. |
+| ARM64 and performance                      | Final default/Windows boot and restored-memory measurements complete; the maintained analyser flags executable-text and restored-memory costs.                                                                                                                                                                                                                                                                                 | Native ARM64/KVM qualification and the flagged footprint comparisons remain open.                                                        |
 
-Both Secure Boot references identify Windows 11 x64 26300.9457/26H2;
-Enterprise is the Evaluation edition. No activation or licence changes were
-made. Pro later reached 100%
-encryption; Enterprise's recorded volume was 80% encrypted. Both were unlocked
-with protection off. Clear-key read-only verification does not qualify enabled
-BitLocker protection, TPM-sealed recovery or attestation.
+Both Secure Boot references identify Windows 11 x64 26300.9457/26H2; Enterprise
+is the Evaluation edition. No activation or licence changes were made. Pro later
+reached 100% encryption; Enterprise's recorded volume was 80% encrypted. Both
+were unlocked with protection off. Clear-key read-only verification does not
+qualify enabled BitLocker protection, TPM-sealed recovery or attestation.
 
 Completed current transport rows require all three fresh phase proofs, stored
 bytes, public offline verifier exit zero, both actual format-34 headers and
-normal S5/VMM exit zero. CONNECT also requires three allowed bidirectional
-2 MiB transfers and three zero-payload denials with six sealed accounting
-entries. These checks do not preserve live TCP connections or qualify
-Tokoloshe's Windows job runtime. Original images and failed attempts remain
-preserved; disposable working disks and snapshot RAM were retired only after
-compact proof fetch and hash verification.
+normal S5/VMM exit zero. CONNECT also requires three allowed bidirectional 2 MiB
+transfers and three zero-payload denials with six sealed accounting entries.
+These checks do not preserve live TCP connections or qualify Tokoloshe's Windows
+job runtime. Original images and failed attempts remain preserved; disposable
+working disks and snapshot RAM were retired only after compact proof fetch and
+hash verification.
 
 The retained XP all-mode component result uses one installed Professional SP3
 x86 reference, SeaBIOS and the normally accepted unsigned XPDM warning, without
@@ -184,9 +184,9 @@ the selected format; do not load an older saved state as an upgrade test.
 
 ### Earlier format-34 Windows 7 attempts
 
-The earlier normal `f90f364e` receive failure and `93434437` caller's
-concurrent Docker firewall-rule preservation failure remain retained as failed
-attempts. Docker concurrency was observed, but the exact deletion actor and
+The earlier normal `f90f364e` receive failure and `93434437` caller's concurrent
+Docker firewall-rule preservation failure remain retained as failed attempts.
+Docker concurrency was observed, but the exact deletion actor and
 receive-failure cause were not established. A Debug-logging pass did not repair
 or qualify those failures. The separately completed current `6f63cd8d` runs are
 the qualification entries above.
@@ -222,7 +222,7 @@ firmware-stage snapshots are also unvalidated.
 
 The completed default and Windows measurements retain the failed footprint
 comparisons against the unchanged thresholds, as described above. They do not
-qualify other supported hosts or erase the measured costs. Egress
-passes and process/snapshot consistency do not establish power-loss durability,
-a latency bound or production readiness. Tokoloshe's Windows job runtime is
-outside this guest-platform and egress scope.
+qualify other supported hosts or erase the measured costs. Egress passes and
+process/snapshot consistency do not establish power-loss durability, a latency
+bound or production readiness. Tokoloshe's Windows job runtime is outside this
+guest-platform and egress scope.
