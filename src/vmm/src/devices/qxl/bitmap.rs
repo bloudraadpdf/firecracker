@@ -2,19 +2,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::memory::Memory;
-use super::protocol::DecodeError;
+use super::protocol::{DecodeError, Rect};
 use super::transport::{AddressSpace, TransportError};
 
 const MAX_BYTES: usize = 32 << 20;
 const MAX_DIMENSION: u32 = 4096;
 const MAX_CHUNKS: usize = 4096;
 
-fn chunks(
+pub(super) fn chunks(
     memory: &Memory,
     addresses: &AddressSpace,
     mut address: u64,
     length: usize,
 ) -> Result<Vec<u8>, TransportError> {
+    if length > MAX_BYTES {
+        return Err(DecodeError::Parameter.into());
+    }
     let mut output = Vec::with_capacity(length);
     let mut previous = 0;
     for _ in 0..MAX_CHUNKS {
@@ -51,10 +54,41 @@ pub struct Bitmap {
 }
 
 impl Bitmap {
+    pub(super) fn validate_rect(&self, rect: Rect) -> Result<(), DecodeError> {
+        let [left, top, right, bottom] = rect.bounds();
+        if left < 0
+            || top < 0
+            || right > i32::try_from(self.width).unwrap()
+            || bottom > i32::try_from(self.height).unwrap()
+            || left == right
+            || top == bottom
+        {
+            return Err(DecodeError::Parameter);
+        }
+        Ok(())
+    }
+
     pub fn decode(
         memory: &Memory,
         addresses: &AddressSpace,
         address: u64,
+    ) -> Result<Self, TransportError> {
+        Self::decode_image(memory, addresses, address, false)
+    }
+
+    pub(super) fn decode_mask(
+        memory: &Memory,
+        addresses: &AddressSpace,
+        address: u64,
+    ) -> Result<Self, TransportError> {
+        Self::decode_image(memory, addresses, address, true)
+    }
+
+    fn decode_image(
+        memory: &Memory,
+        addresses: &AddressSpace,
+        address: u64,
+        mask: bool,
     ) -> Result<Self, TransportError> {
         let mut header = [0; 48];
         addresses.read(memory, address, &mut header)?;
@@ -76,6 +110,7 @@ impl Bitmap {
         };
         let length = stride.checked_mul(height as usize);
         if header[8] != 0
+            || (mask && !matches!(format, 1 | 2))
             || header[9] & !3 != 0
             || flags & !7 != 0
             || width == 0
@@ -91,7 +126,11 @@ impl Bitmap {
             return Err(DecodeError::Parameter.into());
         }
         let length = length.unwrap();
-        let palette = Self::palette(memory, addresses, pointer(32), format)?;
+        let palette = if mask {
+            vec![0, 1]
+        } else {
+            Self::palette(memory, addresses, pointer(32), format)?
+        };
         let data = if flags & 1 != 0 {
             let mut bytes = vec![0; length];
             addresses.read(memory, pointer(40), &mut bytes)?;
@@ -110,6 +149,27 @@ impl Bitmap {
             for x in 0..width as usize {
                 pixels.push(Self::pixel(row, x, format, &palette)?);
             }
+        }
+        Ok(Self {
+            width,
+            height,
+            pixels,
+        })
+    }
+
+    pub(super) fn from_pixels(
+        width: u32,
+        height: u32,
+        pixels: Vec<u32>,
+    ) -> Result<Self, DecodeError> {
+        if width == 0
+            || height == 0
+            || width > MAX_DIMENSION
+            || height > MAX_DIMENSION
+            || u64::from(width) * u64::from(height) != pixels.len() as u64
+            || pixels.len() > MAX_BYTES / 4
+        {
+            return Err(DecodeError::Parameter);
         }
         Ok(Self {
             width,
@@ -195,5 +255,39 @@ impl Bitmap {
 
     pub fn pixels(&self) -> &[u32] {
         &self.pixels
+    }
+}
+
+pub(super) struct ScaledBitmap<'a> {
+    bitmap: &'a Bitmap,
+    source: [i64; 4],
+    target: [i64; 4],
+}
+
+impl<'a> ScaledBitmap<'a> {
+    pub fn new(
+        bitmap: &'a Bitmap,
+        source: Rect,
+        target: Rect,
+    ) -> Result<Option<Self>, DecodeError> {
+        bitmap.validate_rect(source)?;
+        let target = target.bounds().map(i64::from);
+        if target[0] == target[2] || target[1] == target[3] {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            bitmap,
+            source: source.bounds().map(i64::from),
+            target,
+        }))
+    }
+
+    pub fn sample(&self, x: u32, y: u32) -> u32 {
+        let [left, top, right, bottom] = self.source;
+        let [target_left, target_top, target_right, target_bottom] = self.target;
+        let x = left + (i64::from(x) - target_left) * (right - left) / (target_right - target_left);
+        let y = top + (i64::from(y) - target_top) * (bottom - top) / (target_bottom - target_top);
+        self.bitmap.pixels
+            [usize::try_from(y).unwrap() * self.bitmap.width as usize + usize::try_from(x).unwrap()]
     }
 }

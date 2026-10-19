@@ -1,14 +1,11 @@
 // Copyright 2026 Bloudraad.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
-
-use vm_memory::MmapRegion;
-
 use super::bitmap::Bitmap;
-use super::memory::{Memory, RAM_HEADER, Region, SURFACE_BYTES};
+use super::memory::{Memory, Region};
 use super::protocol::{PrimarySurface, Rect};
 use super::surface::Surface;
+use super::test_utils::memory as setup;
 use super::transport::AddressSpace;
 
 const POINTER: u64 = 0x0101_0000_0000_0040;
@@ -21,18 +18,6 @@ fn primary(stride: i32) -> PrimarySurface {
     data[12..16].copy_from_slice(&32u32.to_le_bytes());
     data[32..40].copy_from_slice(&POINTER.to_le_bytes());
     PrimarySurface::decode(&data).unwrap()
-}
-
-fn setup() -> (Memory, AddressSpace) {
-    let memory = Memory::new(Arc::new(MmapRegion::new(SURFACE_BYTES).unwrap())).unwrap();
-    let mut addresses = AddressSpace::new(0x8000_0000, 0x8200_0000).unwrap();
-    addresses
-        .add(
-            1,
-            0x8000_0000..0x8000_0000 + u64::try_from(RAM_HEADER).unwrap(),
-        )
-        .unwrap();
-    (memory, addresses)
 }
 
 fn rect(left: i32, top: i32, right: i32, bottom: i32) -> Rect {

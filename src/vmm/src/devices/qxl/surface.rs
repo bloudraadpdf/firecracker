@@ -1,7 +1,7 @@
 // Copyright 2026 Bloudraad.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::bitmap::Bitmap;
+use super::bitmap::{Bitmap, ScaledBitmap};
 use super::memory::{Memory, Region};
 use super::protocol::{DecodeError, PrimarySurface, Rect};
 use super::raster::{Operand, RasterOp};
@@ -56,6 +56,19 @@ impl<'a> Surface<'a> {
     }
 
     pub fn frame(&self) -> Result<Frame, TransportError> {
+        let mut pixels = self.pixels()?;
+        for pixel in &mut pixels {
+            *pixel &= 0x00ff_ffff;
+        }
+        let (width, height) = self.primary.dimensions();
+        Ok(Frame {
+            width: u16::try_from(width).unwrap(),
+            height: u16::try_from(height).unwrap(),
+            pixels,
+        })
+    }
+
+    fn pixels(&self) -> Result<Vec<u32>, TransportError> {
         let (width, height) = self.primary.dimensions();
         let mut pixels = Vec::with_capacity(usize::try_from(width * height).unwrap());
         let mut row = vec![0; usize::try_from(width).unwrap() * 4];
@@ -65,14 +78,19 @@ impl<'a> Surface<'a> {
                 row.as_chunks::<4>()
                     .0
                     .iter()
-                    .map(|pixel| u32::from_le_bytes(*pixel) & 0x00ff_ffff),
+                    .map(|pixel| u32::from_le_bytes(*pixel)),
             );
         }
-        Ok(Frame {
-            width: u16::try_from(width).unwrap(),
-            height: u16::try_from(height).unwrap(),
-            pixels,
-        })
+        Ok(pixels)
+    }
+
+    pub(super) fn snapshot(&self) -> Result<Bitmap, TransportError> {
+        let (width, height) = self.primary.dimensions();
+        Ok(Bitmap::from_pixels(width, height, self.pixels()?)?)
+    }
+
+    pub fn dimensions(&self) -> (u32, u32) {
+        self.primary.dimensions()
     }
 
     pub fn fill(&self, rect: Rect, color: u32) -> Result<(), TransportError> {
@@ -144,33 +162,15 @@ impl<'a> Surface<'a> {
         descriptor: u16,
     ) -> Result<(), TransportError> {
         let op = RasterOp::decode(descriptor, Operand::Source)?;
-        let [left, top, right, bottom] = source.bounds().map(i64::from);
-        let [target_left, target_top, target_right, target_bottom] = target.bounds().map(i64::from);
-        let (width, height) = bitmap.dimensions();
-        if left < 0
-            || top < 0
-            || right > i64::from(width)
-            || bottom > i64::from(height)
-            || left == right
-            || top == bottom
-        {
-            return Err(DecodeError::Parameter.into());
-        }
-        if target_left == target_right || target_top == target_bottom {
+        let Some(source) = ScaledBitmap::new(bitmap, source, target)? else {
             return Ok(());
-        }
+        };
         self.paint(target, |x, y, destination| {
-            let x =
-                left + (i64::from(x) - target_left) * (right - left) / (target_right - target_left);
-            let y =
-                top + (i64::from(y) - target_top) * (bottom - top) / (target_bottom - target_top);
-            let index = usize::try_from(y).unwrap() * usize::try_from(width).unwrap()
-                + usize::try_from(x).unwrap();
-            op.apply(bitmap.pixels()[index], 0, destination)
+            op.apply(source.sample(x, y), 0, destination)
         })
     }
 
-    fn paint(
+    pub(super) fn paint(
         &self,
         rect: Rect,
         mut pixel: impl FnMut(u32, u32, u32) -> u32,
