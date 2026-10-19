@@ -6,14 +6,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use vm_memory::{Bytes, GuestMemoryBackend};
 
 use super::protocol::{BackingEntry, Command, MAX_BACKING_ENTRIES, Rect, ResourceId};
-use super::state::{Cursor, RendererState, Resource, Scanout};
+use super::state::{
+    Cursor, MAX_RESOURCE_BYTES, MAX_RESOURCES, MAX_TOTAL_BYTES, RendererState, Resource,
+    ResourceState, Scanout,
+};
 use crate::devices::display::Frame;
 use crate::vstate::memory::{GuestAddress, GuestMemoryMmap};
 
 const MAX_DIMENSION: u32 = 4096;
-const MAX_RESOURCE_BYTES: usize = 32 * 1024 * 1024;
-const MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
-const MAX_RESOURCES: usize = 64;
 const CURSOR_SIZE: u32 = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -142,12 +142,30 @@ impl Renderer {
     }
 
     pub fn save(&self) -> RendererState {
+        let mut pixels = Vec::with_capacity(self.total_bytes);
+        let mut backing = Vec::new();
+        let resources = self
+            .resources
+            .iter()
+            .map(|(&id, resource)| {
+                let pixel_start = pixels.len();
+                pixels.extend_from_slice(&resource.pixels);
+                let backing_start = backing.len();
+                backing.extend_from_slice(&resource.backing);
+                ResourceState {
+                    id,
+                    width: resource.width,
+                    height: resource.height,
+                    format: resource.format,
+                    pixels: pixel_start..pixels.len(),
+                    backing: backing_start..backing.len(),
+                }
+            })
+            .collect();
         RendererState {
-            resources: self
-                .resources
-                .iter()
-                .map(|(&id, resource)| (id, resource.clone()))
-                .collect(),
+            resources,
+            pixels,
+            backing,
             preferred: self.preferred,
             scanout: self.scanout.clone(),
             cursor: self.cursor.clone(),
@@ -157,33 +175,49 @@ impl Renderer {
 
     pub fn restore(state: &RendererState, mem: &GuestMemoryMmap) -> Result<Self, RendererError> {
         pixel_bytes(state.preferred.0, state.preferred.1)?;
+        if state.pixels.len() > MAX_TOTAL_BYTES {
+            return Err(RendererError::OutOfMemory);
+        }
         if state.resources.len() > MAX_RESOURCES || (!state.native && state.scanout.is_some()) {
             return Err(RendererError::Parameter);
         }
         let mut ids = BTreeSet::new();
-        let mut total_bytes = 0;
-        for (id, resource) in &state.resources {
+        let mut pixel_end = 0;
+        let mut backing_end = 0;
+        for resource in &state.resources {
             let bytes = pixel_bytes(resource.width, resource.height)?;
-            if !ids.insert(*id) || !valid_format(resource.format) || bytes != resource.pixels.len()
+            let pixels = state
+                .pixels
+                .get(resource.pixels.clone())
+                .ok_or(RendererError::Parameter)?;
+            let backing = state
+                .backing
+                .get(resource.backing.clone())
+                .ok_or(RendererError::Parameter)?;
+            if !ids.insert(resource.id)
+                || !valid_format(resource.format)
+                || bytes != pixels.len()
+                || resource.pixels.start != pixel_end
+                || resource.backing.start != backing_end
             {
                 return Err(RendererError::Parameter);
             }
-            total_bytes += bytes;
-            if total_bytes > MAX_TOTAL_BYTES {
-                return Err(RendererError::OutOfMemory);
+            pixel_end = resource.pixels.end;
+            backing_end = resource.backing.end;
+            if !backing.is_empty() {
+                validate_backing(backing, bytes, mem)?;
             }
-            if !resource.backing.is_empty() {
-                validate_backing(&resource.backing, bytes, mem)?;
-            }
+        }
+        if pixel_end != state.pixels.len() || backing_end != state.backing.len() {
+            return Err(RendererError::Parameter);
         }
         if let Some(scanout) = &state.scanout {
             let resource = state
                 .resources
                 .iter()
-                .find(|(id, _)| *id == scanout.resource)
-                .map(|(_, resource)| resource)
+                .find(|resource| resource.id == scanout.resource)
                 .ok_or(RendererError::Resource)?;
-            validate_rect(scanout.rect, resource)?;
+            validate_rect(scanout.rect, resource.width, resource.height)?;
             if pixel_bytes(scanout.rect.width, scanout.rect.height)? / 4 != scanout.pixels.len()
                 || scanout.pixels.iter().any(|pixel| pixel & 0xff00_0000 != 0)
             {
@@ -198,8 +232,23 @@ impl Renderer {
             return Err(RendererError::Parameter);
         }
         Ok(Self {
-            resources: state.resources.iter().cloned().collect(),
-            total_bytes,
+            resources: state
+                .resources
+                .iter()
+                .map(|resource| {
+                    (
+                        resource.id,
+                        Resource {
+                            width: resource.width,
+                            height: resource.height,
+                            format: resource.format,
+                            pixels: state.pixels[resource.pixels.clone()].to_vec(),
+                            backing: state.backing[resource.backing.clone()].to_vec(),
+                        },
+                    )
+                })
+                .collect(),
+            total_bytes: state.pixels.len(),
             preferred: state.preferred,
             scanout: state.scanout.clone(),
             cursor: state.cursor.clone(),
@@ -310,7 +359,7 @@ impl Renderer {
                 .clear(),
             Command::Transfer { rect, offset, id } => {
                 let resource = self.resources.get_mut(&id).ok_or(RendererError::Resource)?;
-                validate_rect(rect, resource)?;
+                validate_rect(rect, resource.width, resource.height)?;
                 if rect.width == 0 || rect.height == 0 {
                     return Ok(Reply::NoData);
                 }
@@ -350,7 +399,7 @@ impl Renderer {
                 }
                 if let Some(id) = resource {
                     let resource = self.resources.get(&id).ok_or(RendererError::Resource)?;
-                    validate_rect(rect, resource)?;
+                    validate_rect(rect, resource.width, resource.height)?;
                     let bytes = pixel_bytes(rect.width, rect.height)?;
                     let mut scanout = Scanout {
                         resource: id,
@@ -366,7 +415,7 @@ impl Renderer {
             }
             Command::Flush { rect, id } => {
                 let resource = self.resources.get(&id).ok_or(RendererError::Resource)?;
-                validate_rect(rect, resource)?;
+                validate_rect(rect, resource.width, resource.height)?;
                 if let Some(scanout) = &mut self.scanout
                     && scanout.resource == id
                 {
@@ -464,9 +513,9 @@ fn validate_backing(
     Ok(())
 }
 
-fn validate_rect(rect: Rect, resource: &Resource) -> Result<(), RendererError> {
-    if u64::from(rect.x) + u64::from(rect.width) > u64::from(resource.width)
-        || u64::from(rect.y) + u64::from(rect.height) > u64::from(resource.height)
+fn validate_rect(rect: Rect, width: u32, height: u32) -> Result<(), RendererError> {
+    if u64::from(rect.x) + u64::from(rect.width) > u64::from(width)
+        || u64::from(rect.y) + u64::from(rect.height) > u64::from(height)
     {
         return Err(RendererError::Parameter);
     }

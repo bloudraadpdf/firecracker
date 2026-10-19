@@ -407,6 +407,9 @@ Renderer checkpoints retain resources, guest backing, preferred dimensions,
 unflushed pixels, the displayed scanout and the copied cursor. Restore validates
 their limits and guest addresses before cloning pixel buffers. Unflushed resource
 pixels remain separate from the displayed pixels across restore.
+Resource pixels and backing entries use bounded flat arrays. Decoding checks
+array lengths before allocating their contents; resource ranges must cover those
+arrays in order, without overlaps, gaps or unused trailing data.
 
 GPU PCI attachment, firmware and device snapshot integration are not implemented
 yet. These components do not change the guest display or snapshot format. VGA
