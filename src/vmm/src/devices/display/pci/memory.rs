@@ -11,7 +11,7 @@ use crate::vstate::vm::KvmVm;
 
 /// Owns a KVM slot and keeps its backing mapped until the slot is removed.
 #[derive(Debug)]
-pub(super) struct FramebufferMemory {
+pub(crate) struct FramebufferMemory {
     vm: Weak<KvmVm>,
     memory: Arc<MmapRegion>,
     slot: u32,
@@ -19,7 +19,7 @@ pub(super) struct FramebufferMemory {
 }
 
 impl FramebufferMemory {
-    pub(super) fn new(vm: &Arc<KvmVm>, memory: Arc<MmapRegion>) -> io::Result<Self> {
+    pub(crate) fn new(vm: &Arc<KvmVm>, memory: Arc<MmapRegion>) -> io::Result<Self> {
         let slot = vm
             .next_kvm_slot(1)
             .ok_or_else(|| io::Error::other("no framebuffer KVM slot"))?;
@@ -31,7 +31,7 @@ impl FramebufferMemory {
         })
     }
 
-    pub(super) fn set_address(&mut self, address: Option<u64>) -> io::Result<()> {
+    pub(crate) fn set_address(&mut self, address: Option<u64>) -> io::Result<()> {
         if self.address == address {
             return Ok(());
         }

@@ -159,7 +159,7 @@ impl ConsoleHardware {
         self.display
             .lock()
             .unwrap()
-            .vga
+            .vga()
             .lock()
             .unwrap()
             .write_framebuffer(0, &bytes);
@@ -241,7 +241,7 @@ impl DeviceManager {
         let usb = UsbDevice::attach(vm, pci, state.map(|state| &state.usb))?;
         let mut server = ConsoleServer::new(
             &config.socket_path,
-            display.lock().unwrap().vga.clone(),
+            display.lock().unwrap().vga(),
             ConsoleInput::Legacy {
                 keyboard: legacy.i8042.clone(),
                 tablet: Some(usb.clone()),
@@ -293,7 +293,7 @@ impl DeviceManager {
         let display = DisplayDevice::attach(vm, pci, state.map(|state| &state.display))?;
         let server = ConsoleServer::new(
             &config.socket_path,
-            display.lock().unwrap().vga.clone(),
+            display.lock().unwrap().vga(),
             ConsoleInput::Virtio(input),
         )?;
         self.console = Some(ConsoleHardware {
@@ -397,7 +397,7 @@ mod registration_tests {
         use vmm_sys_util::tempdir::TempDir;
         use vmm_sys_util::tempfile::TempFile;
 
-        let directory = TempDir::new().unwrap();
+        let directory = TempDir::new_with_prefix("./console-").unwrap();
         let rom = TempFile::new().unwrap();
         rom.as_file().write_all(&[0x55, 0xaa, 1]).unwrap();
         rom.as_file().set_len(512).unwrap();

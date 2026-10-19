@@ -416,7 +416,9 @@ notifications, display-change events, reset and device checkpoints. Device state
 includes queue progress and pending display events; transport restore reactivates
 it. The PCI transport identifies the GPU as 1af4:1050, with display class 03.
 On AMD64 its capabilities and MSI-X structures use BAR4, leaving BAR0 and BAR2
-for the VGA framebuffer and registers required by the firmware. Other virtio
+for the VGA framebuffer and registers required by the firmware. VGA memory,
+register decode, BAR relocation and KVM slot lifetime have one implementation
+for reuse by both PCI display profiles. Other virtio
 devices keep their existing BAR layout. Cold VGA/GPU attachment and console
 routing are not implemented yet. VGA remains the configured display; Windows
 virtio display drivers cannot bind to it.

@@ -12,6 +12,8 @@ use std::time::Instant;
 #[cfg(feature = "windows")]
 mod memory;
 #[cfg(feature = "windows")]
+pub(crate) mod pci;
+#[cfg(feature = "windows")]
 use memory::VideoMemory;
 
 #[cfg(feature = "windows")]
