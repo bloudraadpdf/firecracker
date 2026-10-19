@@ -13,8 +13,8 @@ source `95aaccfb` and using snapshot format 34. Its default counterpart is
 these binaries. The table records completed installed-reference checks on this
 runtime separately from unchanged component results and remaining edition gates.
 
-Current source uses snapshot format 35 for optional GPU device state. The
-format-34 baseline below does not qualify the new GPU or format-35 restore path.
+Current source uses snapshot format 36 for optional GPU device state. The
+format-34 baseline below does not qualify the new GPU or format-36 restore path.
 
 Reuse a recorded result when the inputs relevant to that check are unchanged.
 Retain the guest configuration, driver and firmware hashes, VMM capability and

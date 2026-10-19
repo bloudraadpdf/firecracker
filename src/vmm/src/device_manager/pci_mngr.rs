@@ -180,7 +180,7 @@ impl PciDevices {
         };
 
         self.virtio_devices
-            .insert((device_type, id), virtio_device.clone());
+            .insert((device_type, id.clone()), virtio_device.clone());
 
         self.pci_segment
             .pci_bus
@@ -197,11 +197,17 @@ impl PciDevices {
             .insert(virtio_device.clone(), bar_address, CAPABILITY_BAR_SIZE)?;
         #[cfg(target_arch = "x86_64")]
         if let Some((base, size)) = io_bar_address {
-            vm.pio_bus.insert(virtio_device, base, size)?;
+            vm.pio_bus.insert(virtio_device.clone(), base, size)?;
         }
         #[cfg(target_arch = "aarch64")]
         debug_assert!(io_bar_address.is_none());
 
+        #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+        if let Err(error) = VirtioPciDevice::register_vga(&virtio_device, vm) {
+            drop(virtio_device);
+            self.detach_pci_virtio_device(vm, (device_type, id), event_manager)?;
+            return Err(VirtioPciDeviceError::Vga(error).into());
+        }
         Ok(())
     }
 
@@ -302,6 +308,9 @@ impl PciDevices {
         }
         #[cfg(target_arch = "aarch64")]
         debug_assert!(io_bar_address.is_none());
+
+        #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+        VirtioPciDevice::unregister_vga(&pci_device_arc, vm).map_err(VirtioPciDeviceError::Vga)?;
 
         if let Some(sub_id) = sub_id
             && event_manager.remove_subscriber(sub_id).is_err()

@@ -20,6 +20,8 @@ use memory::VideoMemory;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 mod state;
+#[cfg(target_arch = "x86_64")]
+pub use state::VgaPciState;
 pub use state::VgaState;
 
 /// Framebuffer BAR size, in bytes.

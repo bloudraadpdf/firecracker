@@ -11,13 +11,15 @@ use std::sync::{Arc, Mutex, Weak};
 use vm_allocator::{AddressAllocator, AllocPolicy, RangeInclusive};
 
 use super::{FRAMEBUFFER_SIZE, REGISTER_SIZE, Vga};
+#[cfg(target_arch = "x86_64")]
+use crate::pci::configuration::BarPrefetchable;
 use crate::pci::configuration::Bars;
 use crate::vstate::vm::KvmVm;
 use memory::FramebufferMemory;
 
 const MAPPINGS: usize = 2;
 const BAR_INDICES: [usize; MAPPINGS] = [0, 2];
-const BAR_SIZES: [u64; MAPPINGS] = [FRAMEBUFFER_SIZE as u64, REGISTER_SIZE];
+pub(crate) const BAR_SIZES: [u64; MAPPINGS] = [FRAMEBUFFER_SIZE as u64, REGISTER_SIZE];
 
 fn io_error(error: impl std::fmt::Display) -> io::Error {
     io::Error::other(error.to_string())
@@ -82,6 +84,70 @@ impl VgaPci {
             mapped,
             vga: Arc::new(Mutex::new(vga)),
         })
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) fn allocate_bars(
+        &mut self,
+        allocator: &mut AddressAllocator,
+        bars: &mut Bars,
+    ) -> io::Result<()> {
+        self.mapped = allocate_mappings(allocator, BAR_SIZES)?;
+        for (slot, (bar, size)) in BAR_INDICES.into_iter().zip(BAR_SIZES).enumerate() {
+            bars.set_bar_32(
+                u8::try_from(bar).unwrap(),
+                u32::try_from(self.mapped[slot]).unwrap(),
+                u32::try_from(size).unwrap(),
+                if slot == 0 {
+                    BarPrefetchable::Yes
+                } else {
+                    BarPrefetchable::No
+                },
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) fn save(&self) -> super::VgaPciState {
+        super::VgaPciState {
+            mapped: self.mapped,
+            vga: self.vga.lock().unwrap().save(),
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) fn restore(
+        vm: &Arc<KvmVm>,
+        state: &super::VgaPciState,
+        bars: &Bars,
+        command: u32,
+    ) -> io::Result<Self> {
+        validate_mappings(
+            &vm.resource_allocator().mmio32_memory,
+            state.mapped.into_iter().zip(BAR_SIZES),
+        )?;
+        for (slot, (bar, size)) in BAR_INDICES.into_iter().zip(BAR_SIZES).enumerate() {
+            let mask = !(u32::try_from(size).unwrap() - 1);
+            let saved = &bars.bars[bar];
+            let flags = if slot == 0 { 8 } else { 0 };
+            let address = u64::from(saved.encoded_addr & mask);
+            if saved.encoded_size != mask
+                || saved.encoded_addr & !mask != flags
+                || (command & 2 != 0 && address != state.mapped[slot] && address != u64::from(mask))
+            {
+                return Err(io_error("invalid VGA BAR state"));
+            }
+        }
+        Self::new(vm, Vga::restore(&state.vga)?, state.mapped)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) fn mmio_regions(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
+        self.mapped
+            .into_iter()
+            .zip(BAR_SIZES)
+            .chain(std::iter::once((0xa0000, 0x20000)))
     }
 
     pub(crate) fn set_decode(&mut self, enabled: bool) -> io::Result<()> {

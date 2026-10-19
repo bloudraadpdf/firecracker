@@ -7,6 +7,9 @@
 //
 // SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
 
+#[cfg(all(feature = "windows", target_arch = "x86_64"))]
+mod vga;
+
 use std::cmp;
 use std::fmt::{Debug, Formatter};
 use std::io::Write;
@@ -263,6 +266,8 @@ pub struct VirtioPciDeviceState {
     pub bars: Bars,
     pub msix_config_cap_offset: u16,
     pub bar_address: u64,
+    #[cfg(target_arch = "x86_64")]
+    pub vga: Option<crate::devices::display::VgaPciState>,
 }
 
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
@@ -283,6 +288,8 @@ pub enum VirtioPciDeviceError {
     UnexpectedMsixVectorCount(usize, usize),
     /// Restored queue vector assignments ({0}) do not match the queue count ({1}).
     UnexpectedQueueVectorCount(usize, usize),
+    /// Invalid VGA configuration or mapping: {0}
+    Vga(#[from] std::io::Error),
     /// Could not activate restored device: {0}
     Activate(#[from] ActivateError),
 }
@@ -302,6 +309,10 @@ pub struct VirtioPciDevice {
     // PCI configuration registers.
     configuration: PciConfiguration,
     capability_bar: u8,
+    #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+    vga: Option<crate::devices::display::pci::VgaPci>,
+    #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+    vga_registered: bool,
     // BARs region from configuration space handled separately
     bars: Bars,
 
@@ -513,6 +524,11 @@ impl VirtioPciDevice {
                 u32::try_from(size).unwrap(),
             );
         }
+        #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+        if let Some(vga) = &mut self.vga {
+            vga.allocate_bars(&mut allocator.mmio32_memory, &mut self.bars)
+                .unwrap();
+        }
         self.add_pci_capabilities();
     }
 
@@ -536,6 +552,19 @@ impl VirtioPciDevice {
                 .pci_io
                 .free(&range)
                 .expect("virtio-pci I/O BAR is not allocated");
+        }
+        #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+        if let Some(vga) = &self.vga {
+            for (base, size) in vga
+                .mapped
+                .into_iter()
+                .zip(crate::devices::display::pci::BAR_SIZES)
+            {
+                allocator
+                    .mmio32_memory
+                    .free(&RangeInclusive::new(base, base + size - 1).unwrap())
+                    .unwrap();
+            }
         }
         self.bar_address = 0;
     }
@@ -587,6 +616,18 @@ impl VirtioPciDevice {
             sbdf,
             configuration: pci_config,
             capability_bar: Self::capability_bar(device_type, legacy_id.is_some()),
+            #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+            vga: (device_type == VirtioDeviceType::Gpu)
+                .then(|| {
+                    crate::devices::display::pci::VgaPci::new(
+                        vm,
+                        crate::devices::display::Vga::default(),
+                        [0; 2],
+                    )
+                })
+                .transpose()?,
+            #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+            vga_registered: false,
             common_config: virtio_common_config,
             device,
             device_activated: Arc::new(AtomicBool::new(false)),
@@ -629,6 +670,14 @@ impl VirtioPciDevice {
             return Err(VirtioPciDeviceError::InvalidIoBar);
         }
         let bar_index = Self::capability_bar(device_type, legacy);
+        #[cfg(target_arch = "x86_64")]
+        if state.vga.is_some() != (device_type == VirtioDeviceType::Gpu) {
+            return Err(std::io::Error::other("GPU and VGA snapshot topology disagree").into());
+        }
+        #[cfg(all(not(feature = "windows"), target_arch = "x86_64"))]
+        if state.vga.is_some() {
+            return Err(std::io::Error::other("VGA restore requires Windows support").into());
+        }
         let io_size = Self::legacy_io_bar_size(&*device.lock().unwrap());
         if let Some(base) = state.io_bar_address
             && (base < 0x1000
@@ -678,6 +727,20 @@ impl VirtioPciDevice {
         let msix_config = Arc::new(Mutex::new(msix_config));
 
         let pci_config = PciConfiguration::type0_from_state(state.pci_configuration_state)?;
+        if device_type == VirtioDeviceType::Gpu {
+            let expected = Self::pci_configuration(device_type, None);
+            if [0, 2, 11]
+                .into_iter()
+                .any(|index| expected.read_reg(index) != pci_config.read_reg(index))
+                || (cfg!(target_arch = "x86_64")
+                    && [1, 3].into_iter().any(|bar| {
+                        state.bars.bars[bar].encoded_size != 0
+                            || state.bars.bars[bar].encoded_addr != 0
+                    }))
+            {
+                return Err(std::io::Error::other("invalid GPU PCI identity or BAR layout").into());
+            }
+        }
         let virtio_common_config = VirtioPciCommonConfig::new(state.pci_dev_state);
 
         if state.device_activated {
@@ -730,6 +793,20 @@ impl VirtioPciDevice {
             .status
             .store(state.interrupt_status, Ordering::Release);
 
+        #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+        let vga = state
+            .vga
+            .as_ref()
+            .map(|vga| {
+                crate::devices::display::pci::VgaPci::restore(
+                    vm,
+                    vga,
+                    &state.bars,
+                    pci_config.read_reg(COMMAND_REG),
+                )
+            })
+            .transpose()?;
+
         let virtio_pci_device = VirtioPciDevice {
             legacy_interface: state.legacy_interface,
             io_bar_address: state.io_bar_address,
@@ -739,6 +816,10 @@ impl VirtioPciDevice {
             sbdf: state.sbdf,
             configuration: pci_config,
             capability_bar: bar_index,
+            #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+            vga,
+            #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+            vga_registered: false,
             common_config: virtio_common_config,
             device,
             device_activated: Arc::new(AtomicBool::new(state.device_activated)),
@@ -883,9 +964,17 @@ impl VirtioPciDevice {
         let bar = self.cap_pci_cfg_info.cap.cap.pci_bar;
         if bar == self.capability_bar_index() {
             Some(self.bar_address)
-        } else if bar == 0 {
+        } else if bar == 0 && self.io_bar_address.is_some() {
             self.io_bar_address()
         } else {
+            #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+            if let Some(vga) = &self.vga {
+                return match bar {
+                    0 => Some(vga.mapped[0]),
+                    2 => Some(vga.mapped[1]),
+                    _ => None,
+                };
+            }
             None
         }
     }
@@ -1372,6 +1461,19 @@ impl VirtioPciDevice {
             bars: self.bars,
             msix_config_cap_offset: self.msix_config_cap_offset,
             bar_address: self.bar_address,
+            #[cfg(target_arch = "x86_64")]
+            vga: {
+                #[cfg(feature = "windows")]
+                {
+                    self.vga
+                        .as_ref()
+                        .map(crate::devices::display::pci::VgaPci::save)
+                }
+                #[cfg(not(feature = "windows"))]
+                {
+                    None
+                }
+            },
         }
     }
 }
@@ -1629,7 +1731,9 @@ impl PciDevice for VirtioPciDevice {
         let in_bars = BAR0_REG_IDX <= reg_idx && reg_idx < BAR0_REG_IDX + u16::from(NUM_BAR_REGS);
         let in_msix_cap_header = reg_idx * 4 == self.msix_config_cap_offset;
         let in_pci_cfg = self.cap_pci_cfg_info.in_range(reg_idx, offset, data.len());
-        if in_bars {
+        #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+        let old_command = self.configuration.read_reg(COMMAND_REG);
+        let result = if in_bars {
             // reg_idx is in [BAR0_REG_IDX, BAR0_REG_IDX+NUM_BAR_REGS), so the difference is 0..5.
             #[allow(clippy::cast_possible_truncation)]
             let bar_idx = (reg_idx - BAR0_REG_IDX) as u8;
@@ -1665,7 +1769,17 @@ impl PciDevice for VirtioPciDevice {
             }
             self.update_intx_mask();
             None
+        };
+        #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+        if let Some(vga) = &mut self.vga {
+            let command = self.configuration.read_reg(COMMAND_REG);
+            vga.relocate(&mut self.bars, command);
+            if let Err(error) = vga.set_decode(command & COMMAND_MEMORY_SPACE_ENABLE != 0) {
+                self.configuration.write_reg(COMMAND_REG, old_command);
+                error!("Failed to update GPU VGA decode: {error}");
+            }
         }
+        result
     }
 
     fn read_config_register(&mut self, reg_idx: u16) -> u32 {
@@ -1705,6 +1819,14 @@ impl PciDevice for VirtioPciDevice {
     }
 
     fn read_bar(&mut self, base: u64, offset: u64, data: &mut [u8]) {
+        #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+        if base != self.bar_address
+            && let Some(vga) = &self.vga
+        {
+            data.fill(0xff);
+            vga.read(base, offset, self.configuration.read_reg(COMMAND_REG), data);
+            return;
+        }
         if self.io_bar_address() == Some(base) {
             self.read_legacy_bar(offset, data);
             return;
@@ -1769,6 +1891,13 @@ impl PciDevice for VirtioPciDevice {
     }
 
     fn write_bar(&mut self, base: u64, offset: u64, data: &[u8]) -> Option<Arc<Barrier>> {
+        #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+        if base != self.bar_address
+            && let Some(vga) = &self.vga
+        {
+            vga.write(base, offset, self.configuration.read_reg(COMMAND_REG), data);
+            return None;
+        }
         if self.io_bar_address() == Some(base) {
             self.write_legacy_bar(offset, data);
             return None;
@@ -3133,17 +3262,41 @@ mod tests {
         );
         assert_eq!(device.io_bar_address(), None);
         if cfg!(target_arch = "x86_64") {
-            for index in 0..4 {
+            assert_eq!(device.read_config_register(BAR0_REG_IDX) & 0xf, 8);
+            assert_eq!(device.read_config_register(BAR0_REG_IDX + 2) & 0xf, 0);
+            for index in [1, 3] {
                 assert_eq!(device.read_config_register(BAR0_REG_IDX + index), 0);
             }
         }
         check_device_capabilities(&mut device, bar);
+        #[cfg(target_arch = "x86_64")]
+        device
+            .vga
+            .as_ref()
+            .unwrap()
+            .vga
+            .lock()
+            .unwrap()
+            .write_framebuffer(0, &[17, 29, 53]);
         let state = device.state();
         drop(device);
         let mut restored =
             VirtioPciDevice::new_from_state("gpu".to_owned(), &vm, gpu, state).unwrap();
         check_device_capabilities(&mut restored, bar);
         assert_eq!(restored.capability_bar_index(), bar);
+        #[cfg(target_arch = "x86_64")]
+        {
+            let mut bytes = [0; 3];
+            restored
+                .vga
+                .as_ref()
+                .unwrap()
+                .vga
+                .lock()
+                .unwrap()
+                .read_framebuffer(0, &mut bytes);
+            assert_eq!(bytes, [17, 29, 53]);
+        }
     }
 
     fn check_capabilities(mode: crate::pci::PciTransportMode, bar: u8) {
