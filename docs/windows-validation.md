@@ -44,6 +44,40 @@ The result does not qualify Windows 11, fresh installation,
 browser/VNC/native-viewer interaction, host-requested resize, differential GPU
 restore or the remaining Toets integration.
 
+## Runtime optical media candidate
+
+Source `d8e5bed69`, GNU development binary `6a307899`, cold-boots the same
+Windows 10 reference with two optical masters and snapshot format40. The primary
+starts loaded as D:; the secondary starts empty as E:. Both enumerate as healthy
+`FC Virtual CD-ROM ATA Device` instances.
+
+One bounded guest session records these states in order:
+
+```text
+D: primary-a   E: empty
+D: primary-a   E: secondary-b
+D: primary-c   E: secondary-b
+D: primary-c   E: empty
+D: empty       E: empty
+D: primary-a   E: empty
+D: primary-a   E: secondary-b
+D: primary-a   E: finish
+```
+
+All 57 observations have no read errors; each loaded disc has the expected label,
+sentinel and SHA-256. Seven runtime PUT updates succeed. A missing replacement
+ISO returns400 and leaves the reported secondary path unchanged. All 60 present
+PnP devices report healthy. The finish disc ends the monitor, Windows completes
+S5 and Firecracker exits0. Collection uses the stopped disk through a read-only
+loop and NTFS mount; both are detached afterwards. No new VM disk or snapshot
+RAM file is required.
+
+This run uses the retained graphical firmware and installed drivers, with
+`--no-seccomp`. It qualifies these Windows 10 media changes, not production
+sandboxing, fresh installation, other Windows versions or real format40 guest
+restore. Component tests cover pending notifications and full device-manager
+restore. The inherited guest clock offset is unchanged and unqualified.
+
 ## Latest qualified integration baseline
 
 The latest qualified AMD64 Windows-feature binary is `6f63cd8d`, built from runtime
@@ -54,7 +88,7 @@ runtime separately from unchanged component results and remaining edition gates.
 
 Current source uses snapshot format 40 for two-channel optical state and pending
 media-change notifications. The
-format-34 baseline below does not qualify the GPU or format-39 restore path.
+format-34 baseline below does not qualify the GPU or format-40 restore path.
 The GPU candidate above records actual format-37 restore evidence; it does not
 qualify the later optical state format.
 
