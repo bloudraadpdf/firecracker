@@ -3,7 +3,7 @@
 Historical tests ran AMD64 Windows Server 2025 Core, Windows 10, Windows 11, XP
 x86 and Windows 7 x64 on Linux/KVM with virtio PCI storage, networking and
 full/differential snapshots. Support is experimental; the
-[validation record](windows-validation.md#current-integration-candidate)
+[validation record](windows-validation.md#latest-qualified-integration-baseline)
 distinguishes recorded results from open qualification. This adds no Windows
 host backend. See the [ARM64 guide](windows-arm64.md) for the separate firmware
 path and its validation status.

@@ -3,7 +3,7 @@
 Standard Windows 11 Pro and Enterprise are in the acceptance scope. Historical
 format-31 Enterprise Evaluation tests passed installation, Secure Boot, TPM,
 cold/full/differential restore and both egress paths on the recorded build. The
-[validation record](windows-validation.md#current-integration-candidate)
+[validation record](windows-validation.md#latest-qualified-integration-baseline)
 separates those results from current qualification. Support is experimental. The
 prior IoT Enterprise LTSC result does not qualify these editions. Do not bypass
 Setup's hardware checks. Current Pro and Enterprise Evaluation observations use
