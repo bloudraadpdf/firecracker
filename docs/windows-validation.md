@@ -21,7 +21,10 @@ atomic control fields, and RAM that shares the existing boot framebuffer.
 The transport validates registered RAM/VRAM slots, rejects stale generations,
 and bounds each command/cursor dispatch to 32 entries. A full release ring
 stops execution before it can lose an acknowledgement. Commands are released
-only after their handler succeeds. Boundary, reset and transport tests check
+only after their handler succeeds. Each dispatch publishes one linked release
+chain. If a later command fails, its successful prefix is still released and
+the failed command remains pending. Duplicate addresses cannot form a chain
+cycle. Boundary, reset and transport tests check
 those components. Primary-surface checks cover signed row strides, exact frame
 pixels, clipped fills, overlap-safe copies and untouched row padding. Raw bitmap
 decoding covers indexed bit/nibble order, RGB555, RGB24, RGB32, alpha, palettes
