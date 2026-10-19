@@ -7,17 +7,11 @@ tested guest, installed drivers, firmware, VMM and route. Use the
 
 ## Current integration candidate
 
-The current combined AMD64 runtime is built from `95aaccfb`; subsequent changes
-only affect documentation. Its Windows-feature binary is `6f63cd8d` and its
-default counterpart is `1c68a888`, using snapshot format 34. Normal Linux and
-host checks below qualify these binaries. The Windows edition, installation,
-input and egress matrix still requires separate guest qualification.
-
-The latest Windows guest-qualified VMM remains `93434437`. Its source is the
-recorded `9eb13bb7` base plus the Rust USB tablet zero-coordinate correction; it
-is not an unchanged build of that Git commit. The preceding `f90f364e` and
-combined `8b8c6932` binaries also use format 34. Neither format compatibility
-nor a successful build carries a runtime result forward to changed code.
+The current AMD64 Windows-feature binary is `6f63cd8d`, built from runtime
+source `95aaccfb` and using snapshot format 34. Its default counterpart is
+`1c68a888`. Later documentation and secure-helper cleanup changes do not change
+these binaries. The table records completed installed-reference checks on this
+runtime separately from unchanged component results and remaining edition gates.
 
 Reuse a recorded result when the inputs relevant to that check are unchanged.
 Retain the guest configuration, driver and firmware hashes, VMM capability and
@@ -25,44 +19,42 @@ source identity with each result. A documentation change does not require a new
 VMM build or guest run. Repeat a check for changed behaviour or an unresolved
 failure, and retain the earlier failed record.
 
-| Area                                        | Latest qualified result                                                                                                                                                                                      | Remaining gate                                                                                                                                    |
-| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| XP SP3 x86 display and direct console input | VMM `93434437`, unsigned XPDM miniport 0.1.2.0: all 16 advertised 32-bit modes pass full-frame RGB comparison, five pointer targets per mode and saved printable ASCII with Caps Lock on.                    | Normal Windows Keep/Revert/timeout UI, browser/VNC input, other layouts and guests.                                                               |
-| XP mode and input persistence               | The helper restores the original 640x480x32, 60 Hz mode, exits zero and the guest shuts down through normal S5.                                                                                              | Nonzero-mode cold boot and full/differential restore of display and held input state.                                                             |
-| XP TAP and CONNECT                          | Earlier installed-reference results exist.                                                                                                                                                                   | Both routes on the latest candidate, with current drivers and generation/storage verification.                                                    |
-| Windows 7 TAP                               | Preceding VMM `f90f364e`: installed Enterprise SP1 x64 reference passes cold/full/differential egress, storage and generation checks.                                                                        | Qualify the current candidate `6f63cd8d`; the installed-reference result does not qualify a fresh installation.                                   |
-| Windows 7 CONNECT                           | Normal VMM `93434437`: installed-reference cold/full/differential transfers, denials, storage, public verifier and final S5 pass. The outer caller fails firewall-rule preservation.                         | Explain the two removed Docker rules and the earlier normal `f90f364e` failure; qualify the combined candidate separately.                        |
-| Modern installation and security            | Earlier binary/format-specific installation, Secure Boot, TPM and variable-service results exist.                                                                                                            | Current Windows 10/11/Server installation, security, persistence and route matrix; Windows 11 Pro and remaining editions remain unqualified.      |
-| Host regression checks                      | Current default/Windows unit, documentation, example and benchmark checks, standalone tools, platform module and Linux PMEM/bzImage checks pass; default API, jailer, seccomp and snapshot checks also pass. | Results cover the tested Ryzen 5950X/Linux 7.0 host and Linux 6.1.188 guest. CPU-template skips and the supported-host matrix remain unqualified. |
-| ARM64 and performance                       | Final default/Windows boot and restored-memory measurements complete. The maintained analyser flags increased executable text and restored memory overhead; no boot metric is flagged.                       | Native ARM64/KVM qualification remains open. Preserve the measured footprint costs below; the performance comparison is not an overall pass.      |
+| Area | Latest qualified result | Remaining gate |
+| ---- | ----------------------- | -------------- |
+| XP SP3 x86 display modes | Unchanged miniport 0.1.2.0 on recorded `93434437`: all 16 advertised 32-bit modes pass full-frame RGB, five pointer targets per mode and saved printable ASCII with Caps Lock. | Normal Keep/Revert/timeout UI, browser/VNC input, other layouts and guests. |
+| XP current input and persistence | Current `6f63cd8d`: nonzero 1024x768x32 cold mode, Windows Run/absolute pointer/raw Caps Lock input, held Shift across full/differential restore, explicit release and exact saved `aAaAAaAAa` pass. | Broader input/UI coverage beyond the tested paths. |
+| XP TAP and CONNECT | Current `6f63cd8d`: both routes pass cold/full/differential transfers, stored data, public verification, both format-34 headers and final S5. | Legacy XP HTTP does not qualify modern TLS; fresh installation and other images remain separate. |
+| Windows 7 SP1 x64 | Current `6f63cd8d`: Windows Run/absolute pointer/raw Caps Lock and saved `aAa`; both TAP and CONNECT pass cold/full/differential transfers, storage, public verification, format-34 headers and S5. TAP generation notifications also pass. | Held-key restore on this guest and fresh installation remain unqualified. |
+| Windows 10 Enterprise LTSC 2021 x64 | Current `6f63cd8d`, 19044.1288: signed driver setup, RTC-policy reboot, normal SYSTEM task, saved `aAa` input and both transport routes pass. | Held-key restore is separately tested on XP; fresh installation remains separate. |
+| Windows 11 IoT Enterprise LTSC x64 | Current `6f63cd8d`, 26100.1742: signed driver setup, RTC-policy reboot, normal SYSTEM task, saved `aAa` input and both transport routes pass. | Fresh installation, other editions and broader input paths remain separate. |
+| Windows 11 Pro x64 | Current `6f63cd8d`, 26300.9457/26H2: input, Secure Boot/TPM, authenticated UEFI cold deletion and TAP/CONNECT cold/full/differential checks pass. | Enabled BitLocker protection, TPM-sealed recovery, attestation and fresh installation are not qualified. |
+| Windows 11 Enterprise Evaluation x64 | Current `6f63cd8d`, 26300.9457/26H2: signed drivers, policy reboot/input/task, Secure Boot/TPM and both TAP/CONNECT cold/full/differential checks pass, including secure checks, public verifiers, two format-34 headers per route and S5. | Fresh installation and other editions remain separate. |
+| Windows Server 2025 Core and Desktop | Core media preparation passes; current installed guest qualification is pending for both profiles. | Installation/input, applicable security, both routes and full/differential restore remain open. |
+| Host regression checks | Current default/Windows unit, documentation, example and benchmark checks, standalone tools, platform module and Linux PMEM/bzImage checks pass; default API, jailer, seccomp and snapshot checks also pass. | Results cover the tested Ryzen 5950X/Linux 7.0 host and Linux 6.1.188 guest; CPU-template skips and supported-host coverage remain open. |
+| ARM64 and performance | Final default/Windows boot and restored-memory measurements complete; the maintained analyser flags executable-text and restored-memory costs. | Native ARM64/KVM qualification and the flagged footprint comparisons remain open. |
 
-The XP pass uses one installed Professional SP3 x86 reference, SeaBIOS,
-`vmclock: false`, one vCPU and 2 GiB RAM. Its normal unsigned-driver warning was
-accepted; no signing-policy or registry repair bypass was used. All 16 saved
-files contain exactly bytes 32 through 126, without a BOM or newline. The
-stopped probe log confirms all mode tests/applications, 80 accepted pointer
-coordinates including each top-left `(0,0)`, successful writes/flushes/closes,
-restoration and final status zero. These checks complement the RGB frames; input
-acknowledgements or screenshots alone do not prove saved data.
+Both Secure Boot references identify Windows 11 x64 26300.9457/26H2;
+Enterprise is the Evaluation edition. No activation or licence changes were
+made. Pro later reached 100%
+encryption; Enterprise's recorded volume was 80% encrypted. Both were unlocked
+with protection off. Clear-key read-only verification does not qualify enabled
+BitLocker protection, TPM-sealed recovery or attestation.
 
-A separate normal Windows 7 CONNECT run on `93434437` passes all three phases
-with a guest probe update that adds failure diagnostics. Six sealed proxy
-entries confirm three allowed 2 MiB transfers in each direction and three
-zero-payload denials. The stopped transcript, final disk bytes,
-full/differential restore logs, both format-34 headers, public verifier and
-normal S5 agree. This qualifies fresh connections on the installed reference,
-with generation checks disabled. The overall caller remains failed: two Docker
-PREROUTING DROP rules present before the run are absent afterwards. The
-responsible actor and cause are not established; owned VM, proxy, mount and loop
-closure passes.
+Completed current transport rows require all three fresh phase proofs, stored
+bytes, public offline verifier exit zero, both actual format-34 headers and
+normal S5/VMM exit zero. CONNECT also requires three allowed bidirectional
+2 MiB transfers and three zero-payload denials with six sealed accounting
+entries. These checks do not preserve live TCP connections or qualify
+Tokoloshe's Windows job runtime. Original images and failed attempts remain
+preserved; disposable working disks and snapshot RAM were retired only after
+compact proof fetch and hash verification.
 
-The earlier normal `f90f364e` failure remains unresolved. Its cold transfer
-passes, but after full restore the proxy accounts 162,816 bytes in each
-direction before the guest reports a receive failure and requests S5. The older
-probe does not record enough detail to classify EOF or timeout. A separate
-Debug-logging run passes; neither that result nor the later normal pass
-establishes a cause or a repair. The new vsock correction has no guest-cause
-attribution from these runs.
+The retained XP all-mode component result uses one installed Professional SP3
+x86 reference, SeaBIOS and the normally accepted unsigned XPDM warning, without
+a signing-policy or registry repair bypass. Its 16 files contain exact printable
+ASCII bytes 32 through 126; logs confirm 80 accepted pointer targets including
+(0,0), mode application and restoration. The current persistence test separately
+retains exact nine-byte saved input across cold/full/differential execution.
 
 ## Measured footprint
 
@@ -190,6 +182,15 @@ off. The existing validation artifacts retain exact binary, firmware, media,
 driver and source identities, failed runs and full logs. Rebuild snapshots for
 the selected format; do not load an older saved state as an upgrade test.
 
+### Earlier format-34 Windows 7 attempts
+
+The earlier normal `f90f364e` receive failure and `93434437` caller's
+concurrent Docker firewall-rule preservation failure remain retained as failed
+attempts. Docker concurrency was observed, but the exact deletion actor and
+receive-failure cause were not established. A Debug-logging pass did not repair
+or qualify those failures. The separately completed current `6f63cd8d` runs are
+the qualification entries above.
+
 ### Recorded Windows 7 reference
 
 The historical format-33 Enterprise SP1 x64 reference retains signed NetKVM and
@@ -219,10 +220,9 @@ historical emulated results. Native ARM64 installation, input, security and
 network/restore qualification remain open. Cross-host migration and
 firmware-stage snapshots are also unvalidated.
 
-Performance acceptance remains open: earlier memory comparisons exceeded the
-unchanged thresholds and do not measure the current default Linux profile.
-Measure default and Windows builds separately against the registered consumer
-base `c6655e5`, using the existing gates and supported host matrix. Egress
+The completed default and Windows measurements retain the failed footprint
+comparisons against the unchanged thresholds, as described above. They do not
+qualify other supported hosts or erase the measured costs. Egress
 passes and process/snapshot consistency do not establish power-loss durability,
 a latency bound or production readiness. Tokoloshe's Windows job runtime is
 outside this guest-platform and egress scope.
