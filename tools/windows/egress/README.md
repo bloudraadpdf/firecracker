@@ -200,6 +200,14 @@ optional console at `console.sock` in the test directory. It also copies its
 controller before execution. Require three passes, six sealed accounting
 entries, clean S5 and exit zero.
 
+Tokoloshe socket grants require nonzero user and group IDs. Run the CONNECT
+controller, VMM, snapshot editor, proxy, sidecar and secure helpers as the same
+ordinary user, with `WINDOWS_CONNECT_UID` and `WINDOWS_CONNECT_GID` set to that
+user. Setting those variables while leaving the controller as root is not the
+tested route. Give that account access to the disposable working disk and its
+matched helper copy; preserve the original matched set. Network setup and
+stopped, offline verification remain root operations.
+
 Run `connect-verify.sh` as root after shutdown. Set `WINDOWS_CONNECT_BASE`,
 `WINDOWS_CONNECT_PREFIX`, `WINDOWS_CONNECT_TAG`, `WINDOWS_CONNECT_DISK`,
 `WINDOWS_CONNECT_OFFSET`, `WINDOWS_CONNECT_IDENTITY`, and, for Windows 7,
@@ -256,8 +264,15 @@ matching `PASS UEFI_RUNTIME phase=1`, `2` and `3` in order. It accepts no
 missing, duplicate or failed runtime block. Nonzero Win32 errors are recorded
 without inferring EFI status codes. A later cold boot must retain value 3 and
 pass authenticated deletion and absence through the separate
-[cold-boot procedure](../uefi/README.md#check-a-later-cold-boot). These runtime
-checks do not qualify firmware-stage behaviour. Both baselines use fixed paths,
+[cold-boot procedure](../uefi/README.md#check-a-later-cold-boot). Before a new
+phase-1 sequence, the owned test variable must be absent. If the matched seed
+already completed phase 3, first perform that separate normal cold boot and run
+`uefi-runtime.exe cold`; require exit zero and `PASS UEFI_RUNTIME phase=cold`.
+The probe checks the retained value 3, authenticates its deletion and verifies
+absence. Complete this transition before the first TAP sequence on such a seed,
+and again between completed TAP and CONNECT sequences. Keep its cold proof and
+advance the disk and helper stores together. These runtime checks do not qualify
+firmware-stage behaviour. Both baselines use fixed paths,
 regardless of the script directory. Keep `verify-secure-state.sh` beside both
 verifiers. A missing persistent object fails acceptance; the probe does not
 create one.
