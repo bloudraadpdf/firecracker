@@ -3,7 +3,7 @@
 
 use std::io;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
 use vm_memory::{Bytes, MmapRegion, VolatileMemory};
 
@@ -154,25 +154,42 @@ impl Memory {
         Ok(())
     }
 
-    fn atomic(&self, offset: usize) -> io::Result<&AtomicU32> {
-        Self::validate(Region::Ram, offset, 4)?;
-        let (bank, position) = self.bank(Region::Ram, offset);
+    fn atomic(&self, region: Region, offset: usize) -> io::Result<&AtomicU32> {
+        Self::validate(region, offset, 4)?;
+        let (bank, position) = self.bank(region, offset);
         bank.get_atomic_ref::<AtomicU32>(position)
             .map_err(io::Error::other)
     }
 
     pub fn load(&self, offset: usize) -> io::Result<u32> {
-        Ok(u32::from_le(self.atomic(offset)?.load(Ordering::Acquire)))
+        Ok(u32::from_le(
+            self.atomic(Region::Ram, offset)?.load(Ordering::Acquire),
+        ))
     }
 
     pub fn store(&self, offset: usize, value: u32) -> io::Result<()> {
-        self.atomic(offset)?.store(value.to_le(), Ordering::Release);
+        self.atomic(Region::Ram, offset)?
+            .store(value.to_le(), Ordering::Release);
         Ok(())
     }
 
     pub fn interrupt(&self, bits: u32) -> io::Result<()> {
-        self.atomic(RAM_HEADER + 4)?
+        self.atomic(Region::Ram, RAM_HEADER + 4)?
             .fetch_or(bits.to_le(), Ordering::AcqRel);
+        Ok(())
+    }
+
+    pub(super) fn set_rom_word(&self, offset: usize, value: u32) -> io::Result<()> {
+        self.atomic(Region::Rom, offset)?
+            .store(value.to_le(), Ordering::Release);
+        Ok(())
+    }
+
+    pub(super) fn set_generation(&self, generation: u8) -> io::Result<()> {
+        self.rom
+            .get_atomic_ref::<AtomicU8>(68)
+            .map_err(io::Error::other)?
+            .store(generation, Ordering::Release);
         Ok(())
     }
 

@@ -4,6 +4,7 @@
 //! QXL device protocol used by the existing Windows XP and Windows 7 drivers.
 
 pub mod bitmap;
+pub mod controller;
 pub mod cursor;
 pub mod drawing;
 mod glyph;
@@ -17,6 +18,8 @@ pub mod transport;
 
 #[cfg(test)]
 mod bitmap_tests;
+#[cfg(test)]
+mod controller_tests;
 #[cfg(test)]
 mod cursor_tests;
 #[cfg(test)]
