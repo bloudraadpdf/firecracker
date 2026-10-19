@@ -1,10 +1,11 @@
 // Copyright 2026 Bloudraad.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::*;
 use std::os::unix::net::UnixStream;
 use std::thread::JoinHandle;
 use std::time::Duration;
+
+use super::*;
 
 fn session(version: &[u8; 12]) -> (UnixStream, JoinHandle<io::Result<()>>) {
     let (mut client, mut server) = UnixStream::pair().unwrap();
@@ -102,10 +103,11 @@ fn password_validation_does_not_silently_truncate() {
 
 #[test]
 fn failed_authentication_does_not_release_guest_input() {
-    use crate::bridge::{Backend, SessionGuard, authenticate_console};
     use std::os::unix::net::UnixListener;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    use crate::bridge::{Backend, SessionGuard, authenticate_console};
 
     let path = std::path::PathBuf::from(format!("rfb-auth-test-{}.sock", std::process::id()));
     let backend = UnixListener::bind(&path).unwrap();

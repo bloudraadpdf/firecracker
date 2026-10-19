@@ -10,6 +10,8 @@ compile_error!(
 mod api_server;
 mod api_server_adapter;
 mod generated;
+#[cfg(feature = "gui")]
+mod gui;
 mod launch_io;
 mod metrics;
 mod seccomp;
@@ -346,6 +348,21 @@ fn main_exec() -> Result<(), MainError> {
                     .help("Enables PCIe support."),
             );
 
+    arg_parser = arg_parser
+        .arg(Argument::new("gui").takes_value(false).help(
+            "Launch a native console and VMM (requires gui feature, config-file and no-api).",
+        ))
+        .arg(
+            Argument::new("gui-connect")
+                .takes_value(true)
+                .help("View an existing loopback RFB console at IP:port (requires gui feature)."),
+        )
+        .arg(
+            Argument::new("gui-password-file")
+                .takes_value(true)
+                .help("VNC password file for gui-connect."),
+        );
+
     arg_parser.parse_from_cmdline()?;
     let arguments = arg_parser.arguments();
 
@@ -368,6 +385,18 @@ fn main_exec() -> Result<(), MainError> {
     if let Some(snapshot_path) = arguments.single_value("describe-snapshot") {
         print_snapshot_data_format(snapshot_path)?;
         return Ok(());
+    }
+
+    if arguments.flag_present("gui")
+        || arguments.single_value("gui-connect").is_some()
+        || arguments.single_value("gui-password-file").is_some()
+    {
+        #[cfg(feature = "gui")]
+        return gui::run(arguments).map_err(MainError::LaunchIo);
+        #[cfg(not(feature = "gui"))]
+        return Err(MainError::LaunchIo(io::Error::other(
+            "native GUI is disabled; rebuild with --features gui",
+        )));
     }
 
     // It's safe to unwrap here because the field's been provided with a default value.

@@ -8,12 +8,16 @@ publish = false
 [features]
 default = ["bridge"]
 bridge = ["dep:getrandom", "dep:tiny_http", "dep:tungstenite", "dep:utils"]
+gui = ["dep:pollster", "dep:wgpu", "dep:winit"]
 
 [dependencies]
 des = "=0.8.1"
 getrandom = { version = "=0.4.3", optional = true }
 tiny_http = { version = "=0.12.0", optional = true }
 tungstenite = { version = "=0.30.0", default-features = false, features = ["handshake"], optional = true }
+pollster = { version = "=0.4.0", optional = true }
+wgpu = { version = "=30.0.1", default-features = false, features = ["std", "dx12", "metal", "vulkan", "wgsl"], optional = true }
+winit = { version = "=0.30.12", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 utils = { path = "../utils", optional = true }
@@ -21,5 +25,13 @@ utils = { path = "../utils", optional = true }
 [dev-dependencies]
 libc = "0.2.186"
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+x11-dl = "=2.21.0"
+
 [lints]
 workspace = true
+
+[[bin]]
+name = "firecracker-viewer"
+path = "src/main.rs"
+required-features = ["gui"]
