@@ -19,3 +19,21 @@ pub(super) fn memory() -> (Memory, AddressSpace) {
         .unwrap();
     (memory, addresses)
 }
+
+pub(super) fn glyph(
+    position: [i32; 2],
+    origin: [i32; 2],
+    width: u16,
+    height: u16,
+    data: &[u8],
+) -> Vec<u8> {
+    let mut bytes: Vec<u8> = position
+        .into_iter()
+        .chain(origin)
+        .flat_map(i32::to_le_bytes)
+        .collect();
+    bytes.extend(width.to_le_bytes());
+    bytes.extend(height.to_le_bytes());
+    bytes.extend(data);
+    bytes
+}

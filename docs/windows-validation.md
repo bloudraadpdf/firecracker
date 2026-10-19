@@ -44,8 +44,13 @@ all 256 ROP3 operations, true-colour transparency and premultiplied alpha with
 constant opacity. Alpha commands decode both layouts and honour destination
 alpha. Unused source and brush fields are not dereferenced. Scaling supports
 nearest pixels and bilinear interpolation with source-edge clamping.
-Text, stroke, composite, surface-image and self-bitmap operations remain
-incomplete. The layout follows
+Text commands decode positioned A1, A4 and A8 glyphs, top-down and bottom-up
+rows, foreground raster operations and optional backgrounds. Overlapping glyphs
+form one coverage mask before clipping and painting. Counts, packed data and
+coverage allocations are bounded; malformed later glyphs cannot leave a partly
+painted background. The existing driver's A4 coverage uses 16-step A8 levels.
+Stroke, composite, surface-image and self-bitmap operations remain incomplete.
+The layout follows
 the published [QXL device ABI](https://sources.debian.org/src/spice-protocol/0.12.14-1/spice/qxl_dev.h/).
 It does not expose a QXL PCI device yet. Component checks do not establish guest
 driver loading or rendering. Graphics qualification across all agreed guests

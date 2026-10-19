@@ -5,13 +5,15 @@ use super::drawing::{Drawable, Layout};
 use super::memory::{COMMAND_RING, Memory, Region};
 use super::protocol::{PrimarySurface, Rect};
 use super::surface::Surface;
-use super::transport::{AddressSpace, Queue, Queues};
+use super::test_utils::glyph;
+use super::transport::{AddressSpace, Queue, Queues, TransportError};
 
 const SLOT: u64 = 0x0101_0000_0000_0000;
 const DRAW: usize = 1024;
 const CLIPS: usize = 2048;
 const IMAGE: usize = 4096;
 const MASK: usize = 8192;
+const STRING: usize = 16384;
 
 struct Fixture {
     memory: Memory,
@@ -48,8 +50,12 @@ impl Fixture {
         Surface::open(&self.memory, &self.addresses, self.primary).unwrap()
     }
 
-    fn draw(&self, layout: Layout) {
+    fn prepare(&self, layout: Layout) -> Result<Drawable, TransportError> {
         Drawable::decode(&self.memory, &self.addresses, SLOT | DRAW as u64, layout)
+    }
+
+    fn draw(&self, layout: Layout) {
+        self.prepare(layout)
             .unwrap()
             .render(&self.surface())
             .unwrap();
@@ -57,6 +63,18 @@ impl Fixture {
 
     fn store(&self, offset: usize, bytes: &[u8]) {
         self.memory.write(Region::Ram, offset, bytes).unwrap();
+    }
+
+    fn string(&self, flags: u16, count: u16, glyphs: &[u8]) {
+        let length = u32::try_from(glyphs.len()).unwrap();
+        let mut data = Vec::new();
+        data.extend(length.to_le_bytes());
+        data.extend(count.to_le_bytes());
+        data.extend(flags.to_le_bytes());
+        data.extend(length.to_le_bytes());
+        data.extend([0; 16]);
+        data.extend(glyphs);
+        self.store(STRING, &data);
     }
 
     fn image(&self, address: usize, format: u8, width: u32, height: u32, data: &[u8]) {
@@ -143,6 +161,109 @@ fn image_payload(length: usize) -> Vec<u8> {
     data[..8].copy_from_slice(&(SLOT | IMAGE as u64).to_le_bytes());
     data[8..24].copy_from_slice(&rect([0, 0, 1, 1]));
     data
+}
+
+fn text_payload(background: [i32; 4], foreground_color: u32, background_color: u32) -> Vec<u8> {
+    let mut data = vec![0; 68];
+    data[..8].copy_from_slice(&(SLOT | STRING as u64).to_le_bytes());
+    data[8..24].copy_from_slice(&rect(background));
+    data[24..44].copy_from_slice(&fill(foreground_color, 8)[..20]);
+    data[44..64].copy_from_slice(&fill(background_color, 8)[..20]);
+    data[64..66].copy_from_slice(&8u16.to_le_bytes());
+    data[66..68].copy_from_slice(&8u16.to_le_bytes());
+    data
+}
+
+#[test]
+fn text_background_and_positioned_glyphs_use_the_common_clip() {
+    for layout in [Layout::Modern, Layout::Compat] {
+        let fixture = Fixture::new(-20);
+        fixture.string(1, 1, &glyph([2, 2], [-1, -1], 2, 2, &[0x40, 0x80]));
+        let mut data = command(
+            layout,
+            11,
+            [0, 0, 4, 4],
+            &text_payload([0, 0, 4, 4], 0x123456, 0xabcdef),
+        );
+        fixture.clips(&mut data, layout, &[[1, 0, 4, 3]]);
+        fixture.store(DRAW, &data);
+        fixture.draw(layout);
+        assert_eq!(
+            fixture.surface().frame().unwrap().pixels,
+            [
+                0, 0xabcdef, 0xabcdef, 0xabcdef, 0, 0x123456, 0xabcdef, 0xabcdef, 0, 0xabcdef,
+                0x123456, 0xabcdef, 0, 0, 0, 0
+            ]
+        );
+    }
+}
+
+#[test]
+fn antialiased_text_uses_packed_coverage_without_reading_unused_background_paint() {
+    for (flags, bits) in [(2, vec![0x18]), (4, vec![16, 128])] {
+        let fixture = Fixture::new(20);
+        fixture.string(flags, 1, &glyph([0, 0], [0, 0], 2, 1, &bits));
+        let mut data = text_payload([0, 0, 0, 0], 0xffffff, 0);
+        data[44..64].fill(0xa5);
+        data[66..68].fill(0xa5);
+        fixture.store(DRAW, &command(Layout::Modern, 11, [0, 0, 2, 1], &data));
+        fixture.draw(Layout::Modern);
+        assert_eq!(
+            &fixture.surface().frame().unwrap().pixels[..2],
+            &[0x101010, 0x808080]
+        );
+    }
+}
+
+#[test]
+fn overlapping_text_glyphs_apply_the_foreground_raster_only_once() {
+    let fixture = Fixture::new(20);
+    fixture.background(7);
+    let mut bits = glyph([0, 0], [0, 0], 1, 1, &[0x80]);
+    bits.extend_from_within(..);
+    fixture.string(1, 2, &bits);
+    let mut data = text_payload([0, 0, 0, 0], 1, 0);
+    data[64..66].copy_from_slice(&64u16.to_le_bytes());
+    fixture.store(DRAW, &command(Layout::Modern, 11, [0, 0, 1, 1], &data));
+    fixture.draw(Layout::Modern);
+    assert_eq!(fixture.surface().frame().unwrap().pixels[0], 6);
+}
+
+#[test]
+fn empty_text_can_paint_a_background_without_reading_foreground_fields() {
+    let fixture = Fixture::new(20);
+    fixture.string(0, 0, &[]);
+    let mut data = text_payload([1, 1, 3, 3], 0, 0x123456);
+    data[24..44].fill(0xa5);
+    data[64..66].fill(0xa5);
+    fixture.store(DRAW, &command(Layout::Modern, 11, [0, 0, 4, 4], &data));
+    fixture.draw(Layout::Modern);
+    assert_eq!(
+        fixture.surface().frame().unwrap().pixels,
+        [
+            0, 0, 0, 0, 0, 0x123456, 0x123456, 0, 0, 0x123456, 0x123456, 0, 0, 0, 0, 0
+        ]
+    );
+}
+
+#[test]
+fn malformed_later_glyphs_do_not_partially_paint_the_text_background() {
+    let fixture = Fixture::new(20);
+    fixture.background(7);
+    let mut bits = glyph([0, 0], [0, 0], 1, 1, &[0x80]);
+    bits.extend([0; 19]);
+    fixture.string(1, 2, &bits);
+    fixture.store(
+        DRAW,
+        &command(
+            Layout::Modern,
+            11,
+            [0, 0, 4, 4],
+            &text_payload([0, 0, 4, 4], 1, 2),
+        ),
+    );
+    fixture.prepare(Layout::Modern).unwrap_err();
+    assert_eq!(fixture.surface().frame().unwrap().pixels, [7; 16]);
 }
 
 #[test]
@@ -271,23 +392,11 @@ fn bad_scaling_and_alpha_flags_fail_before_destination_writes() {
     data[24..26].copy_from_slice(&8u16.to_le_bytes());
     data[26] = 2;
     fixture.store(DRAW, &command(Layout::Modern, 3, [0, 0, 4, 4], &data));
-    Drawable::decode(
-        &fixture.memory,
-        &fixture.addresses,
-        SLOT | DRAW as u64,
-        Layout::Modern,
-    )
-    .unwrap_err();
+    fixture.prepare(Layout::Modern).unwrap_err();
     let mut data = vec![4, 0, 255];
     data.extend(image_payload(24));
     fixture.store(DRAW, &command(Layout::Modern, 13, [0, 0, 4, 4], &data));
-    Drawable::decode(
-        &fixture.memory,
-        &fixture.addresses,
-        SLOT | DRAW as u64,
-        Layout::Modern,
-    )
-    .unwrap_err();
+    fixture.prepare(Layout::Modern).unwrap_err();
     assert_eq!(fixture.surface().frame().unwrap().pixels, [0; 16]);
 }
 
@@ -299,13 +408,7 @@ fn both_layouts_fill_without_dereferencing_unused_clip_and_mask_fields() {
             DRAW,
             &command(layout, 1, [-1, -1, 2, 2], &fill(0x123456, 8)),
         );
-        let prepared = Drawable::decode(
-            &fixture.memory,
-            &fixture.addresses,
-            SLOT | DRAW as u64,
-            layout,
-        )
-        .unwrap();
+        let prepared = fixture.prepare(layout).unwrap();
         assert_eq!(
             prepared.surface_id(),
             if matches!(layout, Layout::Modern) {
@@ -393,13 +496,7 @@ fn bitmap_copies_prepare_pixels_before_rendering_clipped_scaling() {
     let mut data = command(Layout::Modern, 3, [0, 0, 4, 4], &payload);
     fixture.clips(&mut data, Layout::Modern, &[[1, 1, 4, 4]]);
     fixture.store(DRAW, &data);
-    let prepared = Drawable::decode(
-        &fixture.memory,
-        &fixture.addresses,
-        SLOT | DRAW as u64,
-        Layout::Modern,
-    )
-    .unwrap();
+    let prepared = fixture.prepare(Layout::Modern).unwrap();
     fixture.store(IMAGE, &[0; 64]);
     fixture.store(CLIPS, &[0; 40]);
     prepared.render(&fixture.surface()).unwrap();
@@ -479,42 +576,20 @@ fn malformed_clip_mask_and_copy_parameters_fail_before_writes() {
     fixture.clips(&mut data, Layout::Modern, &[[0, 0, 2, 2], [0, 0, 1, 1]]);
     fixture.store(CLIPS + 24 + 16, &rect([3, 0, 1, 1]));
     fixture.store(DRAW, &data);
-    Drawable::decode(
-        &fixture.memory,
-        &fixture.addresses,
-        SLOT | DRAW as u64,
-        Layout::Modern,
-    )
-    .unwrap_err();
+    fixture.prepare(Layout::Modern).unwrap_err();
     fixture.store(CLIPS, &4097u32.to_le_bytes());
-    Drawable::decode(
-        &fixture.memory,
-        &fixture.addresses,
-        SLOT | DRAW as u64,
-        Layout::Modern,
-    )
-    .unwrap_err();
+    fixture.prepare(Layout::Modern).unwrap_err();
     let mut payload = fill(7, 8);
     payload[31..39].copy_from_slice(&0x0102_0000_0000_2000u64.to_le_bytes());
     fixture.store(DRAW, &command(Layout::Modern, 1, [0, 0, 4, 4], &payload));
-    Drawable::decode(
-        &fixture.memory,
-        &fixture.addresses,
-        SLOT | DRAW as u64,
-        Layout::Modern,
-    )
-    .unwrap_err();
+    fixture.prepare(Layout::Modern).unwrap_err();
     let mut source = vec![0; 8];
     source[..4].copy_from_slice(&i32::MAX.to_le_bytes());
     fixture.store(DRAW, &command(Layout::Modern, 4, [0, 0, 4, 4], &source));
-    Drawable::decode(
-        &fixture.memory,
-        &fixture.addresses,
-        SLOT | DRAW as u64,
-        Layout::Modern,
-    )
-    .unwrap()
-    .render(&fixture.surface())
-    .unwrap_err();
+    fixture
+        .prepare(Layout::Modern)
+        .unwrap()
+        .render(&fixture.surface())
+        .unwrap_err();
     assert_eq!(fixture.surface().frame().unwrap().pixels, [0; 16]);
 }

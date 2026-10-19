@@ -133,9 +133,28 @@ pub fn alpha_over(source: u32, destination: u32, alpha: u8, destination_has_alph
     result
 }
 
+pub fn coverage_mix(result: u32, destination: u32, coverage: u8) -> u32 {
+    let coverage = u32::from(coverage);
+    let mut output = 0;
+    for shift in [0, 8, 16, 24] {
+        let result = (result >> shift) & 255;
+        let destination = (destination >> shift) & 255;
+        let channel = (result * coverage + destination * (255 - coverage) + 127) / 255;
+        output |= channel << shift;
+    }
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coverage_mix_preserves_zero_and_full_coverage_and_rounds_each_channel() {
+        assert_eq!(coverage_mix(0xffff_ffff, 0x1234_5678, 0), 0x1234_5678);
+        assert_eq!(coverage_mix(0x1234_5678, 0xffff_ffff, 255), 0x1234_5678);
+        assert_eq!(coverage_mix(0xffff_ffff, 0, 128), 0x8080_8080);
+    }
 
     #[test]
     fn ternary_operations_cover_every_bit_truth_table() {

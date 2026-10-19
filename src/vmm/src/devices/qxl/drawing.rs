@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::bitmap::{Bitmap, ScaleMode, ScaledBitmap, chunks};
+use super::glyph::GlyphString;
 use super::memory::Memory;
 use super::protocol::{DecodeError, Rect, bytes};
-use super::raster::{Operand, RasterOp, alpha_over, ternary};
+use super::raster::{Operand, RasterOp, alpha_over, coverage_mix, ternary};
 use super::surface::Surface;
 use super::transport::{AddressSpace, TransportError};
 
@@ -120,6 +121,39 @@ impl Mask {
 }
 
 #[derive(Debug)]
+struct Paint {
+    brush: Brush,
+    op: RasterOp,
+}
+
+impl Paint {
+    fn decode(
+        memory: &Memory,
+        addresses: &AddressSpace,
+        data: &[u8],
+        descriptor: u16,
+    ) -> Result<Self, TransportError> {
+        let op = RasterOp::decode(descriptor, Operand::Brush)?;
+        let brush = if op.uses_operand() {
+            Brush::decode(memory, addresses, data)?
+        } else {
+            Brush::Solid(0)
+        };
+        Ok(Self { brush, op })
+    }
+
+    fn apply(&self, x: u32, y: u32, destination: u32) -> u32 {
+        self.op.apply(0, self.brush.sample(x, y), destination)
+    }
+}
+
+#[derive(Debug)]
+struct Background {
+    bounds: Rect,
+    paint: Paint,
+}
+
+#[derive(Debug)]
 enum ImageAction {
     Raster(RasterOp),
     Opaque {
@@ -178,8 +212,7 @@ struct ImageSource {
 enum Operation {
     Nop,
     Fill {
-        brush: Brush,
-        op: RasterOp,
+        paint: Paint,
         mask: Option<Mask>,
     },
     Image {
@@ -189,6 +222,11 @@ enum Operation {
         mask: Option<Mask>,
     },
     CopyBits((i32, i32)),
+    Text {
+        string: GlyphString,
+        foreground: Option<Paint>,
+        background: Option<Background>,
+    },
 }
 
 impl Operation {
@@ -294,14 +332,13 @@ impl Drawable {
             0 => Operation::Nop,
             1 => {
                 let data = read::<39>(memory, addresses, address, payload)?;
-                let op = RasterOp::decode(u16::from_le_bytes(bytes(&data, 20)?), Operand::Brush)?;
                 Operation::Fill {
-                    brush: if op.uses_operand() {
-                        Brush::decode(memory, addresses, &data[..20])?
-                    } else {
-                        Brush::Solid(0)
-                    },
-                    op,
+                    paint: Paint::decode(
+                        memory,
+                        addresses,
+                        &data[..20],
+                        u16::from_le_bytes(bytes(&data, 20)?),
+                    )?,
                     mask: Mask::decode(memory, addresses, &data[22..], bounds)?,
                 }
             }
@@ -340,8 +377,10 @@ impl Drawable {
             6..=8 => {
                 let data = read::<17>(memory, addresses, address, payload)?;
                 Operation::Fill {
-                    brush: Brush::Solid(0),
-                    op: RasterOp::decode(1 << (opcode + 1), Operand::Brush)?,
+                    paint: Paint {
+                        brush: Brush::Solid(0),
+                        op: RasterOp::decode(1 << (opcode + 1), Operand::Brush)?,
+                    },
                     mask: Mask::decode(memory, addresses, &data, bounds)?,
                 }
             }
@@ -362,6 +401,41 @@ impl Drawable {
                     Some(&data[46..]),
                     bounds,
                 )?
+            }
+            11 => {
+                let data = read::<68>(memory, addresses, address, payload)?;
+                let string =
+                    GlyphString::decode(memory, addresses, u64::from_le_bytes(bytes(&data, 0)?))?;
+                let foreground = if string.is_empty() {
+                    None
+                } else {
+                    Some(Paint::decode(
+                        memory,
+                        addresses,
+                        &data[24..44],
+                        u16::from_le_bytes(bytes(&data, 64)?),
+                    )?)
+                };
+                let area = Rect::decode(&data[8..24])?;
+                let [left, top, right, bottom] = area.bounds();
+                let background = if left == right || top == bottom {
+                    None
+                } else {
+                    Some(Background {
+                        bounds: area,
+                        paint: Paint::decode(
+                            memory,
+                            addresses,
+                            &data[44..64],
+                            u16::from_le_bytes(bytes(&data, 66)?),
+                        )?,
+                    })
+                };
+                Operation::Text {
+                    string,
+                    foreground,
+                    background,
+                }
             }
             12 => {
                 let data = read::<32>(memory, addresses, address, payload)?;
@@ -461,6 +535,11 @@ impl Drawable {
             }
             _ => None,
         };
+        let coverage = if let Operation::Text { string, .. } = &self.operation {
+            Some(string.coverage([left, top, right, bottom])?)
+        } else {
+            None
+        };
         let clips = self
             .clips
             .as_ref()
@@ -501,12 +580,12 @@ impl Drawable {
                     i32::try_from(y + 1).unwrap(),
                 )?;
                 surface.paint(rect, |x, y, destination| match &self.operation {
-                    Operation::Fill { brush, op, mask } => {
+                    Operation::Fill { paint, mask } => {
                         if mask
                             .as_ref()
                             .is_none_or(|mask| mask.covers(x, y, self.bounds))
                         {
-                            op.apply(0, brush.sample(x, y), destination)
+                            paint.apply(x, y, destination)
                         } else {
                             destination
                         }
@@ -527,6 +606,35 @@ impl Drawable {
                         }
                     }
                     Operation::CopyBits(_) => sampler.as_ref().unwrap().sample(x, y),
+                    Operation::Text {
+                        foreground,
+                        background,
+                        ..
+                    } => {
+                        let destination = if let Some(background) = background {
+                            let [left, top, right, bottom] =
+                                background.bounds.bounds().map(i64::from);
+                            if i64::from(x) >= left
+                                && i64::from(x) < right
+                                && i64::from(y) >= top
+                                && i64::from(y) < bottom
+                            {
+                                background.paint.apply(x, y, destination)
+                            } else {
+                                destination
+                            }
+                        } else {
+                            destination
+                        };
+                        if let Some(foreground) = foreground {
+                            let index =
+                                (y - top) as usize * (right - left) as usize + (x - left) as usize;
+                            let alpha = coverage.as_ref().unwrap()[index];
+                            coverage_mix(foreground.apply(x, y, destination), destination, alpha)
+                        } else {
+                            destination
+                        }
+                    }
                     Operation::Nop => destination,
                 })?;
             }
