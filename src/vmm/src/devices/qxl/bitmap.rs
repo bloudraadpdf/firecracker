@@ -208,7 +208,7 @@ impl Bitmap {
             .collect())
     }
 
-    fn pixel(row: &[u8], x: usize, format: u8, palette: &[u32]) -> Result<u32, DecodeError> {
+    pub(super) fn pixel(row: &[u8], x: usize, format: u8, palette: &[u32]) -> Result<u32, DecodeError> {
         let index = match format {
             1 => Some((row[x / 8] >> (x % 8)) & 1),
             2 => Some((row[x / 8] >> (7 - x % 8)) & 1),
