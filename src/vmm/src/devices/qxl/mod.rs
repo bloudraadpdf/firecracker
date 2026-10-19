@@ -1,0 +1,9 @@
+// Copyright 2026 Bloudraad.
+// SPDX-License-Identifier: Apache-2.0
+
+//! QXL device protocol used by the existing Windows XP and Windows 7 drivers.
+
+pub mod protocol;
+
+#[cfg(test)]
+mod tests;
