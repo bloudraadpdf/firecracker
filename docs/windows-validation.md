@@ -58,8 +58,19 @@ After installing the complete Windows 11 vsock package, all 52 present devices
 report OK in both guests. Enterprise also reports Secure Boot enabled and TPM
 present and ready. Both guests shut down through ACPI S5 with VMM exit code 0.
 
-Windows 11 IoT LTSC native graphics remains pending. These checks do not cover
-the new GPU profile's viewer routes or snapshot restore on Windows 11. The
+Windows 11 IoT Enterprise LTSC build 26100 also passes these five modes, pixel
+checks, literal text submissions and pointer clicks on the same source. A fresh
+64 GiB disk completed graphical UEFI installation and two setup resets with the
+optimised GNU VMM. Its signed Windows 11 GPU package has the same version and SYS
+hash above. The complete vsock package installed with exit code 0. After omitting
+the unused VMClock device with `"vmclock": false`, all 48 present devices report
+OK. The guest completed ACPI S5 with VMM exit code 0.
+
+An earlier IoT installation failed applying `install.wim` with `0x80070570`
+after full snapshot restore from the debug VMM into the optimised VMM. The WIM
+passed complete host verification; the uninterrupted cold installation above
+used the same prepared media and succeeded. The cause remains unresolved. This
+result does not qualify Windows 11 GPU snapshot restore or viewer routes. The
 earlier installed-reference results below use the legacy display profile.
 
 ## Virtio GPU integration candidate
