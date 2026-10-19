@@ -387,8 +387,8 @@ would otherwise select installation media again.
 
 ## State and platform limits
 
-The `windows` feature contains a virtio-gpu 2D command decoder and software
-renderer. They follow
+The `windows` feature contains a virtio-gpu 2D command decoder, queue processor
+and software renderer. They follow
 [VIRTIO 1.3, section 5.7.6](https://docs.oasis-open.org/virtio/virtio/v1.3/virtio-v1.3.html).
 Backing lists are limited to 8192 entries. The decoder checks request sizes,
 queue selection and nonzero resource identifiers, and preserves requested fence
@@ -397,6 +397,11 @@ scattered guest backing, explicit rectangular transfers and flushes, eight
 32-bit pixel formats and a 64x64 cursor. A resource is limited to 32 MiB and
 4096 pixels per dimension; all resources together are limited to 64 MiB and
 64 resource identifiers. Cursor colours use premultiplied alpha.
+
+The queue processor accepts split descriptor buffers and validates their guest
+addresses, direction, request length and response capacity before executing a
+command. It completes rejected commands with an error response when the output
+buffer is valid, and preserves requested fence identifiers on error responses.
 
 GPU PCI attachment, firmware integration and snapshot state are not implemented
 yet. These components do not change the guest display. VGA remains the configured
