@@ -387,6 +387,15 @@ would otherwise select installation media again.
 
 ## State and platform limits
 
+The `windows` feature contains the first stage of a virtio-gpu 2D backend: a
+decoder for control and cursor requests. It follows
+[VIRTIO 1.3, section 5.7.6](https://docs.oasis-open.org/virtio/virtio/v1.3/virtio-v1.3.html).
+Backing lists are limited to 8192 entries. The decoder checks request sizes,
+queue selection and nonzero resource identifiers, and preserves requested fence
+identifiers in response headers. It does not attach a GPU, allocate graphics
+resources or change the guest display. VGA remains the configured display;
+Windows virtio display drivers cannot bind to it.
+
 AMD64 console snapshots contain display memory and registers, keyboard/mouse
 queues, held input, pending releases, keyboard LEDs and pending lock updates,
 USB controller/HID state, PCI state, optical transfer state and media identity.

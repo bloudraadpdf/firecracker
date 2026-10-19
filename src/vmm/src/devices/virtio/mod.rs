@@ -16,6 +16,8 @@ pub mod balloon;
 pub mod block;
 pub mod device;
 pub mod generated;
+#[cfg(feature = "windows")]
+pub mod gpu;
 pub mod input;
 mod iov_deque;
 pub mod iovec;
