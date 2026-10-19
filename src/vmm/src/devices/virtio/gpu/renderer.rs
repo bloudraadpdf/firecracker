@@ -137,6 +137,10 @@ impl Renderer {
         })
     }
 
+    pub fn preferred_dimensions(&self) -> (u32, u32) {
+        self.preferred
+    }
+
     pub fn is_native(&self) -> bool {
         self.native
     }

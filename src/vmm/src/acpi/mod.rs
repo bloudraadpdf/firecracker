@@ -600,10 +600,13 @@ mod tests {
                 &vm,
                 &ConsoleConfig {
                     socket_path: directory.as_path().join("console.sock"),
+                    #[cfg(target_arch = "x86_64")]
+                    display: Default::default(),
                     vga_rom_path: None,
                     optical_image_path: None,
                 },
                 None,
+                &mut events,
             )
             .unwrap();
         let mut fadt = acpi_tables::Fadt::new(super::OEM_ID, *b"FCVMFADT", super::OEM_REVISION);

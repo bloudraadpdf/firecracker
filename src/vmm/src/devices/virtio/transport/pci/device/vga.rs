@@ -10,6 +10,10 @@ use crate::vstate::vm::KvmVm;
 const PIO_REGIONS: [(u64, u64); 2] = [(0x3b0, 0x30), (0x1ce, 4)];
 
 impl VirtioPciDevice {
+    pub(crate) fn vga(&self) -> Option<Arc<Mutex<crate::devices::display::Vga>>> {
+        self.vga.as_ref().map(|vga| vga.vga.clone())
+    }
+
     pub(crate) fn register_vga(device: &Arc<Mutex<Self>>, vm: &KvmVm) -> io::Result<()> {
         let regions: Vec<_> = {
             let device = device.lock().unwrap();

@@ -181,6 +181,14 @@ firmware profile require the ROM. The console also selects conventional PC power
 and RTC hardware; removing the console does not remove them when a firmware
 profile remains selected.
 
+For Windows 10/11 with the pinned virtio display driver, select
+`"display": "virtio-gpu"` in this object and use explicit `cloud-hv` firmware
+without `vga_rom_path`. This attaches one virtio-VGA PCI function. Its boot display
+uses the same VGA framebuffer; the guest driver then supplies native frames and
+cursor updates to both VNC and the optional native viewer. The initial preferred
+mode is 1024x768. Omit `display`, or select `vga`, for the existing XP/7 profile.
+The virtio profile is not yet guest-qualified.
+
 Use `--enable-pci`. The AMD64 console requires at least 64 MiB RAM and ordinary
 pages; huge pages cannot represent its legacy VGA memory aperture. There is no
 separate console configuration API endpoint. `/vm/config` reports the configured
@@ -421,13 +429,15 @@ register decode, BAR relocation and KVM slot lifetime have one implementation
 for reuse by both PCI display profiles. Other virtio devices keep their existing
 BAR layout. The AMD64 GPU transport also maps and checkpoints the VGA framebuffer,
 registers and legacy ports, with PCI memory/IO decode and BAR relocation.
-Console selection and native frame routing are not implemented yet. VGA remains
-the configured display; Windows virtio display drivers cannot bind to it.
+Select `"display": "virtio-gpu"` to attach it. The console uses VGA until the
+driver selects a native scanout, shows black when native scanout is disabled,
+and returns to VGA after device reset. This path still requires Windows driver
+qualification; the installed-reference results cover the legacy VGA profile.
 
 AMD64 console snapshots contain display memory and registers, keyboard/mouse
 queues, held input, pending releases, keyboard LEDs and pending lock updates,
 USB controller/HID state, PCI state, optical transfer state and media identity.
-The current snapshot format is 36.0.0. Display state adds about 16 MiB; the
+The current snapshot format is 37.0.0. Display state adds about 16 MiB; the
 bounded snapshot reader accepts at most 128 MiB, including GPU state. The guest
 disk remains a separate artifact, as with ordinary Firecracker snapshots.
 
@@ -436,8 +446,8 @@ state in the PCI device manager. The console reuses that backend on restore; it
 does not save a second held-key or LED state. Pending frames, partial-frame
 cursor, position, held releases and guest/pending lock LEDs travel with Input.
 Missing, stray or mismatched console/input topology is rejected before backend
-attachment. Format29 through format34 snapshots require their matching older
-binaries; format36 has no decoder for them. Snapshots do not move between AMD64
+attachment. Format29 through format36 snapshots require their matching older
+binaries; format37 has no decoder for them. Snapshots do not move between AMD64
 and ARM64.
 
 The historical format31 Windows 11 test edition was IoT Enterprise LTSC 2024. It
