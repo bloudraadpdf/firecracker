@@ -49,6 +49,12 @@ rows, foreground raster operations and optional backgrounds. Overlapping glyphs
 form one coverage mask before clipping and painting. Counts, packed data and
 coverage allocations are bounded; malformed later glyphs cannot leave a partly
 painted background. The existing driver's A4 coverage uses 16-step A8 levels.
+The cosmetic-line rasteriser preserves Q28.4 endpoints, clips work to the
+surface dimensions and uses wide integer arithmetic for coordinate extremes.
+Its pixel output matches 778 captured native GDI cases, including fractional
+starts, short segments, reversed directions and endpoint ties. The reference
+and capture procedure are in [the QXL test data](../tests/data/qxl/README.md).
+This component is not connected to drawing commands yet.
 Stroke, composite, surface-image and self-bitmap operations remain incomplete.
 The layout follows
 the published [QXL device ABI](https://sources.debian.org/src/spice-protocol/0.12.14-1/spice/qxl_dev.h/).

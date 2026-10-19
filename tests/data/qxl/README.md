@@ -1,0 +1,22 @@
+# Native GDI line reference
+
+`gdi-lines.json` records 778 independent cosmetic-line draws from Windows 11
+IoT Enterprise LTSC, build 26100. Each case has Q28.4 start/end coordinates and
+16 row masks. Bit `x` in row `y` means that pixel `(x, y)` is white.
+
+The capture used the Windows GDI32 API, with a compatible memory DC and a
+16-by-16 top-down 32bpp DIB section cleared to black before each draw. It selected
+a solid white one-pixel `CreatePen`, set `GM_ADVANCED` and a world transform
+with `eM11 = eM22 = 1/16` and the other fields zero. Each case used `BeginPath`,
+`MoveToEx`, `LineTo`, `EndPath`, `StrokePath` and `GdiFlush`, then read the DIB.
+The coordinates passed to GDI were the stored integers; the transform preserves
+their fractional device coordinates. No expected pixels come from the Rust
+implementation.
+
+The first 74 cases cover integer lines, both directions, zero length, clipping
+and fractional starts in four directions. The remaining 704 cover reversed
+lines, subpixel segments, neighbouring pixels and horizontal/vertical endpoint
+ties. Fractional offsets are 0, 4, 8 and 12 in sixteenths of a pixel.
+
+These are component reference pixels. They do not establish that an XP or
+Windows 7 QXL driver loads or renders correctly in Firecracker.

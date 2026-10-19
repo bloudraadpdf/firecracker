@@ -6,6 +6,7 @@
 pub mod bitmap;
 pub mod drawing;
 mod glyph;
+pub mod line;
 pub mod memory;
 pub mod protocol;
 pub mod raster;
