@@ -178,7 +178,11 @@ def test_console_boot_and_restore(
     config = {
         "socket_path": "console.sock",
         "vga_rom_path": vm.create_jailed_resource(rom),
-        "optical_image_path": vm.create_jailed_resource(media),
+        "display": "vga",
+        "optical_drives": [
+            {"drive_id": "setup", "path_on_host": vm.create_jailed_resource(media)},
+            {"drive_id": "exec", "path_on_host": None},
+        ],
     }
     _configure(vm, platform_boot_image, {"console": config})
     assert vm.api.vm_config.get().json()["console"] == config

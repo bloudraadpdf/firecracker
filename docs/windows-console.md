@@ -165,7 +165,10 @@ this object to the startup JSON configuration:
   "console": {
     "socket_path": "console.sock",
     "vga_rom_path": "/srv/firmware/vgabios.bin",
-    "optical_image_path": "/srv/media/windows.iso"
+    "optical_drives": [
+      {"drive_id": "setup", "path_on_host": "/srv/media/windows.iso"},
+      {"drive_id": "exec"}
+    ]
   }
 }
 ```
@@ -239,7 +242,7 @@ Add only the private console socket to the ARM64 startup configuration:
 
 Use `--enable-pci`, modern PCI, at least 64 MiB RAM and ordinary pages. ARM64
 uses 64 MiB as a device-attachment minimum, not a Windows installation minimum.
-It rejects `vga_rom_path` and `optical_image_path`. The device profile contains
+It rejects `vga_rom_path` and `optical_drives`. The device profile contains
 no VGA option ROM, legacy VGA aperture, PS/2 controller, USB controller, ISA
 bridge, A20 port or IDE controller. The display has a framebuffer BAR and a
 register BAR; the keyboard and pointer share one virtio PCI function.
@@ -284,14 +287,22 @@ real LED status for the bridge's lock-key synchronisation.
 
 ## AMD64 installation and reboot
 
-The optical device is the primary IDE master. It supports read-only PIO ATAPI
-transfers, eject and reload of the same medium. It does not provide DMA, audio,
-recording or a second optical drive. Both channels start in PCI native mode:
-BAR0/BAR1 address the primary command/control registers and BAR2/BAR3 address
-the empty secondary channel. Native interrupts use PCI INTA through the shared
-GSI16 level interrupt. Each channel can switch to compatibility mode; the
-primary then uses ports `0x1f0` and `0x3f6` with IRQ14. The PCI I/O-enable bit
-gates all ports in either mode.
+`console.optical_drives` selects at most two read-only ATAPI masters on one PCI
+IDE controller. List order selects primary then secondary; each `drive_id` must
+be unique and nonempty. Omit `path_on_host` to keep a physical drive attached
+without a disc. An empty list attaches no controller. The earlier experimental
+`optical_image_path` field is rejected.
+
+Both channels start in PCI native mode. BAR0/BAR1 address the primary
+command/control registers and BAR2/BAR3 address the secondary. Native interrupts
+share PCI INTA on GSI16; acknowledging one drive does not clear the other's
+pending interrupt. In compatibility mode, the primary uses `0x1f0`/`0x3f6` and
+IRQ14, and the secondary uses `0x170`/`0x376` and IRQ15. Only attached drives
+reserve their legacy IRQs. The PCI I/O-enable bit gates all ports.
+
+Each drive supports read-only PIO ATAPI, eject and reload of its current medium.
+DMA, audio and recording are not provided. The existing bridge eject command
+addresses the primary drive. Runtime media replacement is the next increment.
 
 BAR size probing, relocation and mode switching follow the
 [PCI IDE 1.0 rules](https://www.isdaman.com/alsos/hardware/hdc/pciide.pdf).
@@ -407,11 +418,9 @@ the VM lifetime; closing it must not stop the VM. Reconnect to the replacement
 process after reboot. Eject before booting the installed disk when firmware
 would otherwise select installation media again.
 
-The ATAPI core and PCI wrapper can represent a drive with no inserted disc. It
-identifies normally, reports no medium, and preserves that state across restore.
-Closing an empty tray does not create a medium. The startup configuration still
-attaches the existing single image; multi-drive configuration and host media
-replacement remain the next optical increment.
+Each attached drive identifies normally with no inserted disc and preserves
+that state across restore. Closing an empty tray does not create a medium.
+Restore checks the channel layout and each medium's identity before attachment.
 
 ## State and platform limits
 
@@ -458,7 +467,7 @@ installed-reference matrix covers the legacy VGA profile.
 AMD64 console snapshots contain display memory and registers, keyboard/mouse
 queues, held input, pending releases, keyboard LEDs and pending lock updates,
 USB controller/HID state, PCI state, optical transfer state and media identity.
-The current snapshot format is 38.0.0. Display state adds about 16 MiB; the
+The current snapshot format is 39.0.0. Display state adds about 16 MiB; the
 bounded snapshot reader accepts at most 128 MiB, including GPU state. The guest
 disk remains a separate artifact, as with ordinary Firecracker snapshots.
 
@@ -467,8 +476,8 @@ state in the PCI device manager. The console reuses that backend on restore; it
 does not save a second held-key or LED state. Pending frames, partial-frame
 cursor, position, held releases and guest/pending lock LEDs travel with Input.
 Missing, stray or mismatched console/input topology is rejected before backend
-attachment. Format29 through format37 snapshots require their matching older
-binaries; format38 has no decoder for them. Snapshots do not move between AMD64
+attachment. Format29 through format38 snapshots require their matching older
+binaries; format39 has no decoder for them. Snapshots do not move between AMD64
 and ARM64.
 
 The historical format31 Windows 11 test edition was IoT Enterprise LTSC 2024. It
@@ -480,7 +489,7 @@ current source and format; those historical results do not qualify format34 or
 other editions.
 
 The console reserves the VGA aperture at `0xa0000..0xbffff` and platform table
-memory at 32..33 MiB. The IDE interrupt uses PCI GSI16 in native mode and IRQ14
+memory at 32..33 MiB. The IDE channels share PCI GSI16 in native mode and use IRQ14/IRQ15
 in compatibility mode. USB shares PCI GSI16. The PS/2 keyboard uses IRQ1; no
 auxiliary mouse or IRQ12 is exposed. The optional ISA discovery node and IDE
 function use experimental PCI device IDs `1d0f:fc02` and `1d0f:fc01`; the USB
@@ -526,7 +535,7 @@ driver.
 
 There is one keyboard and one pointer. The auxiliary PS/2 port is absent, IRQ12
 is not attached, and there is no USB keyboard. The second UHCI root port is
-disconnected. Removing `optical_image_path` removes the IDE controller; it does
+disconnected. An empty `optical_drives` array removes the IDE controller; it does
 not leave an empty CD-ROM attached. Disk, network and vsock devices remain
 separate explicit configuration choices. TPM and protected firmware variables
 are also opt-in.

@@ -603,7 +603,7 @@ mod tests {
                     #[cfg(target_arch = "x86_64")]
                     display: Default::default(),
                     vga_rom_path: None,
-                    optical_image_path: None,
+                    optical_drives: Vec::new(),
                 },
                 None,
                 &mut events,
