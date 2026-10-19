@@ -7,32 +7,6 @@ from subprocess import run
 import pytest
 
 
-@pytest.mark.parametrize("files,tree", [(0, 0), (7, 0), (0, 11), (7, 11)])
-def test_secure_discard_keeps_first_failure(windows_cleanup, files, tree, tmp_path):
-    """Both actual discard command positions run and the first failure survives."""
-    script = f"""set -euo pipefail
-rm() {{
- if [[ $1 == -f ]]; then echo files; return {files}; fi
- echo tree; return {tree}
-}}
-secure_current=state
-secure_pids=()
-{windows_cleanup['secure_discard']}
-result=0
-secure_discard || result=$?
-exit "$result"
-"""
-    result = run(
-        ["bash", "-c", script],
-        cwd=tmp_path,
-        capture_output=True,
-        timeout=5,
-        check=False,
-    )
-    assert result.returncode == (files or tree)
-    assert result.stdout.splitlines() == [b"files", b"tree"]
-
-
 @pytest.mark.parametrize(
     "mode",
     [
@@ -46,7 +20,7 @@ exit "$result"
     ],
 )
 def test_secure_stop_retains_live_ownership(windows_cleanup, mode, tmp_path):
-    """Attempt both helpers, retain live PIDs and refuse to discard their inputs."""
+    """Attempt both helpers and retain ownership of any live PID."""
     forced = mode in ["term-live", "kill-gone", "kill-failed-gone", "kill-live"]
     script = f"""set -euo pipefail
 secure_pids=(51 52)
@@ -69,16 +43,11 @@ kill() {{
 }}
 sleep() {{ :; }}
 wait() {{ echo wait-$1; return {17 if mode == 'wait' else 0}; }}
-rm() {{ echo discard; }}
 {windows_cleanup['secure_wait_stopped']}
 {windows_cleanup['secure_stop']}
-{windows_cleanup['secure_discard']}
 result=0
 secure_stop || result=$?
 echo remaining="${{secure_pids[*]}}"
-discard=0
-secure_discard || discard=$?
-echo discard-result="$discard"
 exit "$result"
 """
     result = run(
@@ -103,11 +72,7 @@ exit "$result"
         if mode != "kill-live":
             expected += [f"wait-{pid}".encode()]
     expected += [b"remaining=51 52"] if mode == "kill-live" else [b"remaining="]
-    if mode != "kill-live":
-        expected += [b"discard", b"discard"]
-    expected += [b"discard-result=1" if mode == "kill-live" else b"discard-result=0"]
     assert result.stdout.splitlines() == expected
-    assert (b"Refusing to discard live" in result.stderr) == (mode == "kill-live")
 
 
 @pytest.mark.parametrize("live", [False, True])
@@ -136,18 +101,38 @@ exit "$result"
     assert result.stdout.splitlines() == ([b"101 100"] if live else [b"1 0"])
 
 
-@pytest.mark.parametrize("live", [False, True])
-def test_secure_discard_checks_retained_helper(windows_cleanup, live, tmp_path):
-    """Only observed live helpers prevent discard; a later natural exit is safe."""
+@pytest.mark.parametrize("controller", ["tap", "connect"])
+@pytest.mark.parametrize("original", [0, 42, 130, 143])
+def test_controller_cleanup_retains_advanced_state(
+    windows_cleanup, controller, original, tmp_path
+):
+    """Stopping a controller must retain helper state paired with disk writes."""
+    disk = tmp_path / "windows.raw"
+    disk.write_bytes(b"disk changed during failed cold boot")
+    state = tmp_path / "state"
+    state.joinpath("tpm").mkdir(parents=True)
+    expected = {
+        "store.json": b"advanced variable store",
+        "store.json.pending": b"pending variable update",
+        "store.lock": b"",
+        "tpm/tpm2-00.permall": b"advanced TPM state",
+        "tpm/.lock": b"",
+    }
+    for name, raw in expected.items():
+        state.joinpath(name).write_bytes(raw)
     script = f"""set -euo pipefail
-secure_pids=(51)
+{windows_cleanup['secure_state']}
 secure_current=state
-kill() {{ return {0 if live else 1}; }}
-rm() {{ echo discard; }}
-{windows_cleanup['secure_discard']}
-result=0
-secure_discard || result=$?
-exit "$result"
+stop() {{ :; }}
+stop_vm() {{ :; }}
+wait_for_exit() {{ :; }}
+kill() {{ return 1; }}
+echo_child=
+proxy_child=47
+{windows_cleanup['tap_cleanup_failed'] if controller == 'tap' else windows_cleanup['cleanup_failed']}
+{windows_cleanup['tap_cleanup'] if controller == 'tap' else windows_cleanup['cleanup']}
+trap cleanup EXIT
+exit {original}
 """
     result = run(
         ["bash", "-c", script],
@@ -156,5 +141,10 @@ exit "$result"
         timeout=5,
         check=False,
     )
-    assert result.returncode == int(live)
-    assert result.stdout.splitlines() == ([] if live else [b"discard", b"discard"])
+    assert result.returncode == original, result.stderr
+    assert disk.read_bytes() == b"disk changed during failed cold boot"
+    assert sorted(
+        str(path.relative_to(state)) for path in state.rglob("*") if path.is_file()
+    ) == sorted(expected)
+    for name, raw in expected.items():
+        assert state.joinpath(name).read_bytes() == raw

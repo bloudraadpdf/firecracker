@@ -16,8 +16,6 @@ import pytest
         ("none", 0),
         ("stop", 7),
         ("secure", 11),
-        ("discard-files", 17),
-        ("discard-tree", 18),
         ("fifo", 19),
         ("wait", 23),
         ("group", 29),
@@ -32,8 +30,6 @@ def test_connect_cleanup_preserves_error_and_attempts_all(
     statuses = {
         "stop": 7,
         "secure": 11,
-        "discard-files": 17,
-        "discard-tree": 18,
         "fifo": 19,
         "wait": 23,
         "group": 29,
@@ -42,9 +38,6 @@ def test_connect_cleanup_preserves_error_and_attempts_all(
     values = {
         key: value if failure in [key, "all"] else 0 for key, value in statuses.items()
     }
-    if failure.startswith("discard") and original == 0:
-        values["stop"] = 7
-        code = 7
     script = f"""set -euo pipefail
 stop_vm() {{ echo stop; return {values['stop']}; }}
 secure_stop() {{ echo secure; return {values['secure']}; }}
@@ -62,17 +55,12 @@ printf() {{
  if [[ $1 == '\\n' ]]; then echo fifo >&4; return {values['fifo']}; fi
  builtin printf "$@"
 }}
-rm() {{
- if [[ ${{2:-}} == run/proxy-input ]]; then echo remove; return {values['remove']}; fi
- if [[ $1 == -f ]]; then echo discard-files; return {values['discard-files']}; fi
- echo discard-tree; return {values['discard-tree']}
-}}
+rm() {{ echo remove; return {values['remove']}; }}
 proxy_child=47
 secure_current=state
 secure_pids=()
 exec 4>&1
 exec 3>/dev/null
-{windows_cleanup['secure_discard']}
 {windows_cleanup.get('cleanup_failed', '')}
 {windows_cleanup['cleanup']}
 trap cleanup EXIT
@@ -87,10 +75,7 @@ exit {original}
     )
     assert result.returncode == (original or code), result.stderr
     calls = result.stdout.decode().splitlines()
-    discard = original != 0 or values["stop"] != 0 or values["secure"] != 0
     expected = ["stop", "secure"]
-    if discard:
-        expected += ["discard-files", "discard-tree"]
     expected += ["fifo", "wait", "group-TERM"]
     expected += ["group-KILL"] if values["group"] else ["remove"]
     assert calls == expected
@@ -230,7 +215,6 @@ def test_connect_cleanup_checks_group_signal_races(
     script = f"""set -euo pipefail
 stop_vm() {{ :; }}
 secure_stop() {{ :; }}
-secure_discard() {{ :; }}
 wait_for_exit() {{ :; }}
 rm() {{ echo remove; }}
 group_gone={1 if disappearance == 'before' else 0}
@@ -286,7 +270,6 @@ def test_connect_cleanup_requires_proxy_group_stop(
     script = f"""set -euo pipefail
 stop_vm() {{ :; }}
 secure_stop() {{ :; }}
-secure_discard() {{ :; }}
 wait_for_exit() {{ return {7 if mode == 'parent-live' else 0}; }}
 rm() {{ echo remove; }}
 group_gone={1 if mode in ['before', 'parent-live'] else 0}
@@ -334,8 +317,6 @@ exit {original}
         ("none", 0),
         ("stop", 7),
         ("secure", 11),
-        ("files", 17),
-        ("tree", 18),
         ("term", 19),
         ("kill", 23),
         ("wait", 29),
@@ -351,15 +332,11 @@ def test_tap_cleanup_preserves_error_and_attempts_all(
         for key, value in {
             "stop": 7,
             "secure": 11,
-            "files": 17,
-            "tree": 18,
             "term": 19,
             "kill": 23,
             "wait": 29,
         }.items()
     }
-    if failure in ["files", "tree"] and original == 0:
-        values["stop"] = code = 7
     forced = failure in ["kill", "all"]
     script = f"""set -euo pipefail
 stop() {{ echo stop; return {values['stop']}; }}
@@ -377,14 +354,9 @@ secure_wait_stopped() {{
  return 0
 }}
 wait() {{ echo echo-wait; return {values['wait']}; }}
-rm() {{
- if [[ $1 == -f ]]; then echo files; return {values['files']}; fi
- echo tree; return {values['tree']}
-}}
 echo_child=47
 secure_pids=()
 secure_current=state
-{windows_cleanup['secure_discard']}
 {windows_cleanup['tap_cleanup_failed']}
 {windows_cleanup['tap_cleanup']}
 trap cleanup EXIT
@@ -399,8 +371,6 @@ exit {original}
     )
     assert result.returncode == (original or code), result.stderr
     expected = [b"stop", b"secure"]
-    if original or values["stop"] or values["secure"]:
-        expected += [b"files", b"tree"]
     expected += [b"echo-TERM"]
     if forced:
         expected += [b"echo-KILL"]
@@ -549,7 +519,6 @@ def test_tap_echo_stop_does_not_wait_for_live_child(
     script = f"""set -euo pipefail
 stop() {{ :; }}
 secure_stop() {{ :; }}
-secure_discard() {{ :; }}
 echo_child=47
 forced=0
 kill() {{
@@ -616,7 +585,6 @@ exit "$result"
     else:
         script += f"""stop() {{ :; }}
 secure_stop() {{ :; }}
-secure_discard() {{ :; }}
 {windows_cleanup['tap_cleanup_failed']}
 {windows_cleanup['tap_cleanup']}
 trap cleanup EXIT
@@ -643,7 +611,6 @@ def test_tap_cleanup_survives_failed_diagnostics(windows_cleanup, original, tmp_
     script = f"""set -euo pipefail
 stop() {{ echo stop; return 7; }}
 secure_stop() {{ echo secure; return 11; }}
-secure_discard() {{ echo discard; return 17; }}
 secure_wait_stopped() {{ return 0; }}
 kill() {{ if [[ $1 == -0 ]]; then return 0; fi; echo echo-TERM; return 19; }}
 wait() {{ echo echo-wait; return 23; }}
@@ -665,13 +632,12 @@ exit {original}
     assert result.stdout.splitlines() == [
         b"stop",
         b"secure",
-        b"discard",
         b"echo-TERM",
         b"echo-wait",
     ]
 
 
-@pytest.mark.parametrize("operation", ["stop", "discard", "vmm"])
+@pytest.mark.parametrize("operation", ["stop", "vmm"])
 def test_windows_cleanup_survives_failed_diagnostics(
     windows_cleanup, operation, tmp_path
 ):
@@ -696,10 +662,8 @@ kill() {{
 sleep() {{ :; }}
 printf() {{ return 31; }}
 wait() {{ echo unexpected-wait; }}
-rm() {{ echo unexpected-discard; }}
 {windows_cleanup['secure_wait_stopped']}
 {windows_cleanup['secure_stop']}
-{windows_cleanup['secure_discard']}
 {windows_cleanup['tap_stop']}
 trap 'code=$?; echo "result=$code remaining=${{secure_pids[*]}}"' EXIT
 {'stop' if operation == 'vmm' else 'secure_' + operation}
@@ -720,16 +684,13 @@ trap 'code=$?; echo "result=$code remaining=${{secure_pids[*]}}"' EXIT
             b"-KILL-52",
             b"result=7 remaining=51 52",
         ]
-    elif operation == "vmm":
+    else:
         assert result.returncode == 7
         assert result.stdout.splitlines() == [
             b"-TERM-61",
             b"-KILL-61",
             b"result=7 remaining=51 52",
         ]
-    else:
-        assert result.returncode == 1
-        assert result.stdout.splitlines() == [b"result=1 remaining=51 52"]
 
 
 @pytest.mark.parametrize("kill_result", [0, 7])

@@ -94,7 +94,6 @@ cleanup() {
     trap '' INT TERM
     stop || cleanup_failed $? VMM
     secure_stop || cleanup_failed $? secure-helpers
-    if [[ "$result" != 0 ]]; then secure_discard || cleanup_failed $? secure-state; fi
     if [[ -n "$echo_child" ]]; then
         code=0
         kill -TERM "$echo_child" 2>/dev/null || code=$?
