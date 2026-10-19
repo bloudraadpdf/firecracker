@@ -1,8 +1,9 @@
 // Copyright 2026 Bloudraad.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::bitmap::Bitmap;
+use super::bitmap::{Bitmap, ScaleMode, ScaledBitmap};
 use super::memory::{Memory, RAM_HEADER, Region};
+use super::protocol::Rect;
 use super::test_utils::memory as setup;
 use super::transport::AddressSpace;
 
@@ -10,6 +11,50 @@ const SLOT: u64 = 0x0101_0000_0000_0000;
 const IMAGE: usize = 64;
 const DATA: usize = 512;
 const PALETTE: usize = 256;
+
+#[test]
+fn interpolation_samples_pixel_centres_and_clamps_source_edges() {
+    let bitmap = Bitmap::from_pixels(
+        2,
+        2,
+        vec![0xff00_0000, 0xffff_0000, 0xff00_ff00, 0xff00_00ff],
+    )
+    .unwrap();
+    let source = Rect::new(0, 0, 2, 2).unwrap();
+    let target = Rect::new(0, 0, 3, 3).unwrap();
+    let sampler = ScaledBitmap::with_mode(&bitmap, source, target, ScaleMode::Interpolate)
+        .unwrap()
+        .unwrap();
+    assert_eq!(sampler.sample(0, 0), 0xff00_0000);
+    assert_eq!(sampler.sample(1, 1), 0xff40_4040);
+    assert_eq!(sampler.sample(2, 2), 0xff00_00ff);
+    let nearest = ScaledBitmap::new(&bitmap, source, target).unwrap().unwrap();
+    assert_eq!(nearest.sample(1, 1), 0xff00_0000);
+    let crop = ScaledBitmap::with_mode(
+        &bitmap,
+        Rect::new(1, 0, 2, 2).unwrap(),
+        target,
+        ScaleMode::Interpolate,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(crop.sample(1, 1), 0xff80_0080);
+}
+
+#[test]
+fn interpolation_keeps_one_pixel_and_extreme_target_coordinates_bounded() {
+    let bitmap = Bitmap::from_pixels(1, 1, vec![0x8040_2010]).unwrap();
+    let source = Rect::new(0, 0, 1, 1).unwrap();
+    let target = Rect::new(i32::MIN, i32::MIN, i32::MAX, i32::MAX).unwrap();
+    let sampler = ScaledBitmap::with_mode(&bitmap, source, target, ScaleMode::Interpolate)
+        .unwrap()
+        .unwrap();
+    for (x, y) in [(0, 0), (1024, 768), (4095, 4095)] {
+        assert_eq!(sampler.sample(x, y), 0x8040_2010);
+    }
+    ScaleMode::decode(2).unwrap_err();
+    Bitmap::from_pixels(2, 2, vec![0]).unwrap_err();
+}
 
 fn image(memory: &Memory, format: u8, flags: u8, width: u32, height: u32, stride: u32) {
     let mut header = [0; 48];

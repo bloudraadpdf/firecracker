@@ -39,8 +39,13 @@ rectangles form a union; overlapping clips apply the operation once per pixel.
 One-bit masks support origins and inversion without a colour palette. Screen
 copies capture the source before writing, including alpha bits. Command-ring
 checks cover failure without writes or acknowledgement and successful retry.
-Opaque, blend, ROP3, text, stroke, surface-image and self-bitmap operations
-remain incomplete, as does interpolated scaling. The layout follows
+Image commands also cover opaque source/brush combinations, raster blending,
+all 256 ROP3 operations, true-colour transparency and premultiplied alpha with
+constant opacity. Alpha commands decode both layouts and honour destination
+alpha. Unused source and brush fields are not dereferenced. Scaling supports
+nearest pixels and bilinear interpolation with source-edge clamping.
+Text, stroke, composite, surface-image and self-bitmap operations remain
+incomplete. The layout follows
 the published [QXL device ABI](https://sources.debian.org/src/spice-protocol/0.12.14-1/spice/qxl_dev.h/).
 It does not expose a QXL PCI device yet. Component checks do not establish guest
 driver loading or rendering. Graphics qualification across all agreed guests

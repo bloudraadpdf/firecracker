@@ -258,10 +258,27 @@ impl Bitmap {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(super) enum ScaleMode {
+    Interpolate,
+    Nearest,
+}
+
+impl ScaleMode {
+    pub fn decode(value: u8) -> Result<Self, DecodeError> {
+        match value {
+            0 => Ok(Self::Interpolate),
+            1 => Ok(Self::Nearest),
+            _ => Err(DecodeError::Parameter),
+        }
+    }
+}
+
 pub(super) struct ScaledBitmap<'a> {
     bitmap: &'a Bitmap,
     source: [i64; 4],
     target: [i64; 4],
+    mode: ScaleMode,
 }
 
 impl<'a> ScaledBitmap<'a> {
@@ -269,6 +286,15 @@ impl<'a> ScaledBitmap<'a> {
         bitmap: &'a Bitmap,
         source: Rect,
         target: Rect,
+    ) -> Result<Option<Self>, DecodeError> {
+        Self::with_mode(bitmap, source, target, ScaleMode::Nearest)
+    }
+
+    pub fn with_mode(
+        bitmap: &'a Bitmap,
+        source: Rect,
+        target: Rect,
+        mode: ScaleMode,
     ) -> Result<Option<Self>, DecodeError> {
         bitmap.validate_rect(source)?;
         let target = target.bounds().map(i64::from);
@@ -279,15 +305,54 @@ impl<'a> ScaledBitmap<'a> {
             bitmap,
             source: source.bounds().map(i64::from),
             target,
+            mode,
         }))
     }
 
     pub fn sample(&self, x: u32, y: u32) -> u32 {
+        if matches!(self.mode, ScaleMode::Interpolate) {
+            return self.interpolate(x, y);
+        }
         let [left, top, right, bottom] = self.source;
         let [target_left, target_top, target_right, target_bottom] = self.target;
         let x = left + (i64::from(x) - target_left) * (right - left) / (target_right - target_left);
         let y = top + (i64::from(y) - target_top) * (bottom - top) / (target_bottom - target_top);
         self.bitmap.pixels
             [usize::try_from(y).unwrap() * self.bitmap.width as usize + usize::try_from(x).unwrap()]
+    }
+
+    fn interpolate(&self, x: u32, y: u32) -> u32 {
+        let axis = |value: u32, source: (i64, i64), target: (i64, i64)| {
+            let position = source.0 * 65536
+                + ((i64::from(value) - target.0) * 2 + 1) * (source.1 - source.0) * 32768
+                    / (target.1 - target.0)
+                - 32768;
+            let first = position.div_euclid(65536);
+            (
+                usize::try_from(first.clamp(source.0, source.1 - 1)).unwrap(),
+                usize::try_from((first + 1).clamp(source.0, source.1 - 1)).unwrap(),
+                u64::try_from(position.rem_euclid(65536)).unwrap(),
+            )
+        };
+        let (x0, x1, fx) = axis(
+            x,
+            (self.source[0], self.source[2]),
+            (self.target[0], self.target[2]),
+        );
+        let (y0, y1, fy) = axis(
+            y,
+            (self.source[1], self.source[3]),
+            (self.target[1], self.target[3]),
+        );
+        let pixel = |x, y| self.bitmap.pixels[y * self.bitmap.width as usize + x];
+        let mut output = 0;
+        for shift in [0, 8, 16, 24] {
+            let channel = |value| u64::from((value >> shift) & 255u32);
+            let top = channel(pixel(x0, y0)) * (65536 - fx) + channel(pixel(x1, y0)) * fx;
+            let bottom = channel(pixel(x0, y1)) * (65536 - fx) + channel(pixel(x1, y1)) * fx;
+            let value = (top * (65536 - fy) + bottom * fy + (1 << 31)) >> 32;
+            output |= u32::try_from(value).unwrap() << shift;
+        }
+        output
     }
 }

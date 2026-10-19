@@ -34,11 +34,14 @@ impl Fixture {
             addresses,
             primary: PrimarySurface::decode(&primary).unwrap(),
         };
+        fixture.background(0);
         fixture
-            .surface()
-            .fill(Rect::new(0, 0, 4, 4).unwrap(), 0)
+    }
+
+    fn background(&self, color: u32) {
+        self.surface()
+            .fill(Rect::new(0, 0, 4, 4).unwrap(), color)
             .unwrap();
-        fixture
     }
 
     fn surface(&self) -> Surface<'_> {
@@ -133,6 +136,159 @@ fn fill(color: u32, descriptor: u16) -> Vec<u8> {
     data[20..22].copy_from_slice(&descriptor.to_le_bytes());
     data[31..39].fill(0);
     data
+}
+
+fn image_payload(length: usize) -> Vec<u8> {
+    let mut data = vec![0; length];
+    data[..8].copy_from_slice(&(SLOT | IMAGE as u64).to_le_bytes());
+    data[8..24].copy_from_slice(&rect([0, 0, 1, 1]));
+    data
+}
+
+#[test]
+fn opaque_combines_source_with_brush_independently_of_destination() {
+    let fixture = Fixture::new(20);
+    fixture.background(0x555555);
+    fixture.image(IMAGE, 9, 1, 1, &[0x33, 0x22, 0x11, 0xff]);
+    let mut data = image_payload(64);
+    data[24..28].copy_from_slice(&1u32.to_le_bytes());
+    data[28..32].copy_from_slice(&0xff00u32.to_le_bytes());
+    data[44..46].copy_from_slice(&(64u16 | 2 | 4).to_le_bytes());
+    data[46] = 1;
+    fixture.store(DRAW, &command(Layout::Modern, 2, [0, 0, 4, 4], &data));
+    fixture.draw(Layout::Modern);
+    assert_eq!(fixture.surface().frame().unwrap().pixels, [0xee22cc; 16]);
+}
+
+#[test]
+fn copy_and_blend_commands_share_raster_semantics() {
+    for opcode in [3, 5] {
+        let fixture = Fixture::new(20);
+        fixture.background(0xabcdef);
+        fixture.image(IMAGE, 9, 1, 1, &[3, 2, 1, 0xff]);
+        let mut data = image_payload(44);
+        data[24..26].copy_from_slice(&64u16.to_le_bytes());
+        fixture.store(DRAW, &command(Layout::Modern, opcode, [0, 0, 4, 4], &data));
+        fixture.draw(Layout::Modern);
+        assert_eq!(fixture.surface().frame().unwrap().pixels, [0xaacfec; 16]);
+    }
+}
+
+#[test]
+fn ternary_commands_do_not_resolve_unused_sources_or_brushes() {
+    for (opcode, color) in [
+        (0xf0u8, 0x445566),
+        (0xcc, 0x112233),
+        (0xff, 0xffffff),
+        (0, 0),
+    ] {
+        let fixture = Fixture::new(20);
+        fixture.image(IMAGE, 9, 1, 1, &[0x33, 0x22, 0x11, 0xff]);
+        let mut data = image_payload(63);
+        if opcode != 0xcc {
+            data[..24].fill(0xa5);
+        }
+        data[24..44].fill(0xa5);
+        if opcode == 0xf0 {
+            data[24..28].copy_from_slice(&1u32.to_le_bytes());
+            data[28..32].copy_from_slice(&0x445566u32.to_le_bytes());
+        }
+        data[44] = opcode;
+        data[45] = if opcode == 0xcc { 1 } else { 0xff };
+        fixture.store(DRAW, &command(Layout::Modern, 9, [0, 0, 4, 4], &data));
+        fixture.draw(Layout::Modern);
+        assert_eq!(fixture.surface().frame().unwrap().pixels, [color; 16]);
+    }
+}
+
+#[test]
+fn transparent_copies_compare_true_colour_without_alpha() {
+    let fixture = Fixture::new(20);
+    fixture.background(0xabcdef);
+    fixture.image(
+        IMAGE,
+        9,
+        2,
+        1,
+        &[0x33, 0x22, 0x11, 0x10, 0x66, 0x55, 0x44, 0xff],
+    );
+    let mut data = image_payload(32);
+    data[8..24].copy_from_slice(&rect([0, 0, 2, 1]));
+    data[24..28].copy_from_slice(&0x10112233u32.to_le_bytes());
+    data[28..32].copy_from_slice(&0x112233u32.to_le_bytes());
+    fixture.store(DRAW, &command(Layout::Modern, 12, [0, 0, 4, 1], &data));
+    fixture.draw(Layout::Modern);
+    assert_eq!(
+        &fixture.surface().frame().unwrap().pixels[..4],
+        &[0xabcdef, 0xabcdef, 0x445566, 0x445566]
+    );
+}
+
+#[test]
+fn alpha_commands_decode_both_layouts_and_preserve_destination_alpha() {
+    for (layout, flags, expected) in [
+        (Layout::Modern, 1u16, 0xa0200060),
+        (Layout::Modern, 3, 0xa0200060),
+        (Layout::Compat, 0, 0xff200060),
+    ] {
+        let fixture = Fixture::new(20);
+        fixture.background(0x80000080);
+        fixture.image(IMAGE, 9, 1, 1, &[0, 0, 0x40, 0x80]);
+        let mut data = Vec::new();
+        if matches!(layout, Layout::Modern) {
+            data.extend(flags.to_le_bytes());
+        }
+        data.push(128);
+        data.extend(image_payload(24));
+        fixture.store(DRAW, &command(layout, 13, [0, 0, 1, 1], &data));
+        fixture.draw(layout);
+        let mut pixel = [0; 4];
+        fixture.memory.read(Region::Ram, 64, &mut pixel).unwrap();
+        assert_eq!(u32::from_le_bytes(pixel), expected);
+    }
+}
+
+#[test]
+fn operand_free_rasters_ignore_uninitialised_image_and_brush_fields() {
+    let fixture = Fixture::new(20);
+    let mut data = fill(0, 128);
+    data[..20].fill(0xa5);
+    fixture.store(DRAW, &command(Layout::Modern, 1, [0, 0, 4, 4], &data));
+    fixture.draw(Layout::Modern);
+    let mut data = vec![0xa5; 44];
+    data[24..26].copy_from_slice(&256u16.to_le_bytes());
+    data[27..].fill(0);
+    fixture.store(DRAW, &command(Layout::Modern, 3, [0, 0, 4, 4], &data));
+    fixture.draw(Layout::Modern);
+    assert_eq!(fixture.surface().frame().unwrap().pixels, [0xffffff; 16]);
+}
+
+#[test]
+fn bad_scaling_and_alpha_flags_fail_before_destination_writes() {
+    let fixture = Fixture::new(20);
+    fixture.image(IMAGE, 9, 1, 1, &[1, 2, 3, 0xff]);
+    let mut data = image_payload(44);
+    data[24..26].copy_from_slice(&8u16.to_le_bytes());
+    data[26] = 2;
+    fixture.store(DRAW, &command(Layout::Modern, 3, [0, 0, 4, 4], &data));
+    Drawable::decode(
+        &fixture.memory,
+        &fixture.addresses,
+        SLOT | DRAW as u64,
+        Layout::Modern,
+    )
+    .unwrap_err();
+    let mut data = vec![4, 0, 255];
+    data.extend(image_payload(24));
+    fixture.store(DRAW, &command(Layout::Modern, 13, [0, 0, 4, 4], &data));
+    Drawable::decode(
+        &fixture.memory,
+        &fixture.addresses,
+        SLOT | DRAW as u64,
+        Layout::Modern,
+    )
+    .unwrap_err();
+    assert_eq!(fixture.surface().frame().unwrap().pixels, [0; 16]);
 }
 
 #[test]
