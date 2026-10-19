@@ -6,8 +6,10 @@ cold/full/differential restore and both egress paths on the recorded build. The
 [validation record](windows-validation.md#current-integration-candidate)
 separates those results from current qualification. Support is experimental. The
 prior IoT Enterprise LTSC result does not qualify these editions. Do not bypass
-Setup's hardware checks. Windows 11 Pro has not been separately installed or
-qualified; Enterprise Evaluation results do not qualify every edition.
+Setup's hardware checks. Current Pro and Enterprise Evaluation observations use
+26300.9457/26H2 x64 installed references. Pro passes the current secure input and
+TAP/CONNECT runtime checks. Enterprise input and both secure routes also pass.
+Neither result is a new installation pass or a pass for every edition.
 
 The opt-in platform adds two separate services:
 
@@ -129,8 +131,14 @@ hardware-check bypasses or forced unsigned drivers. Public TPM baselines also
 matched across the cold boot between TAP and CONNECT runs. These results do not
 qualify the current format-34 platform.
 
-BitLocker automatically encrypted the guest volume. The recorded volume is
-unlocked, protection is off and no key protectors are configured. Read-only
+Current Pro and Enterprise observations also retain Secure Boot and a ready
+owned TPM. Pro reached 100% encryption; Enterprise was recorded at 80%. Both
+volumes were unlocked with protection off. The clear-key read-only verifier
+does not qualify enabled BitLocker protection, TPM-sealed recovery or attestation.
+
+In the historical run, BitLocker automatically encrypted the guest volume. The
+recorded volume is unlocked, protection is off and no key protectors are
+configured. Read-only
 validation uses its existing clear key and matching TPM state. This does not
 qualify TPM-sealed recovery or attestation. The desktop's evaluation status and
 legacy registry branding are recorded in the validation matrix; no licence or
