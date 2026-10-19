@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::drawing::{Drawable, Layout};
-use super::memory::{COMMAND_RING, Memory, Region};
-use super::protocol::{PrimarySurface, Rect};
+use super::memory::{COMMAND_RING, Memory, RAM_HEADER, Region};
+use super::protocol::{DecodeError, PrimarySurface, Rect};
 use super::surface::Surface;
 use super::test_utils::{glyph, path};
 use super::transport::{AddressSpace, Queue, Queues, TransportError};
@@ -93,6 +93,13 @@ impl Fixture {
         header[40..48].copy_from_slice(&(SLOT | (address + 48) as u64).to_le_bytes());
         self.store(address, &header);
         self.store(address + 48, data);
+    }
+
+    fn surface_image(&self, address: usize, id: u32) {
+        let mut header = [0; 22];
+        header[8] = 104;
+        header[18..22].copy_from_slice(&id.to_le_bytes());
+        self.store(address, &header);
     }
 
     fn clips(&self, command: &mut [u8], layout: Layout, rects: &[[i32; 4]]) {
@@ -441,27 +448,95 @@ fn transparent_copies_compare_true_colour_without_alpha() {
 }
 
 #[test]
-fn alpha_commands_decode_both_layouts_and_preserve_destination_alpha() {
-    for (layout, flags, expected) in [
-        (Layout::Modern, 1u16, 0xa0200060),
-        (Layout::Modern, 3, 0xa0200060),
-        (Layout::Compat, 0, 0xff200060),
+fn alpha_commands_decode_both_layouts_and_surface_alpha_flags() {
+    for (layout, flags, surface_source, expected) in [
+        (Layout::Modern, 1u16, false, 0xa0200060),
+        (Layout::Modern, 3, false, 0xa0200060),
+        (Layout::Compat, 0, false, 0xff200060),
+        (Layout::Modern, 1, true, 0xc0200040),
+        (Layout::Modern, 3, true, 0xa0200060),
+        (Layout::Compat, 0, true, 0xff200040),
     ] {
         let fixture = Fixture::new(20);
         fixture.background(0x80000080);
-        fixture.image(IMAGE, 9, 1, 1, &[0, 0, 0x40, 0x80]);
+        if surface_source {
+            fixture.store(64, &0x80400000u32.to_le_bytes());
+            fixture.surface_image(IMAGE, 0);
+        } else {
+            fixture.image(IMAGE, 9, 1, 1, &[0, 0, 0x40, 0x80]);
+        }
         let mut data = Vec::new();
         if matches!(layout, Layout::Modern) {
             data.extend(flags.to_le_bytes());
         }
         data.push(128);
         data.extend(image_payload(24));
-        fixture.store(DRAW, &command(layout, 13, [0, 0, 1, 1], &data));
+        fixture.store(DRAW, &command(layout, 13, [1, 0, 2, 1], &data));
         fixture.draw(layout);
         let mut pixel = [0; 4];
-        fixture.memory.read(Region::Ram, 64, &mut pixel).unwrap();
+        fixture.memory.read(Region::Ram, 68, &mut pixel).unwrap();
         assert_eq!(u32::from_le_bytes(pixel), expected);
     }
+}
+
+#[test]
+fn primary_surface_images_capture_overlapping_sources_and_only_read_their_header() {
+    for layout in [Layout::Modern, Layout::Compat] {
+        let fixture = Fixture::new(20);
+        let pixels = [0x11000001u32, 0x22000002, 0x33000003, 0x44000004];
+        fixture.store(
+            64,
+            &pixels
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect::<Vec<_>>(),
+        );
+        let address = RAM_HEADER - 22;
+        fixture.surface_image(address, 0);
+        let mut data = image_payload(44);
+        data[..8].copy_from_slice(&(SLOT | address as u64).to_le_bytes());
+        data[8..24].copy_from_slice(&rect([0, 0, 3, 1]));
+        data[24..26].copy_from_slice(&8u16.to_le_bytes());
+        data[26] = 1;
+        fixture.store(DRAW, &command(layout, 3, [1, 0, 4, 1], &data));
+        let draw = fixture.prepare(layout).unwrap();
+        fixture.store(address, &[0; 22]);
+        draw.render(&fixture.surface()).unwrap();
+        let mut row = [0; 16];
+        fixture.memory.read(Region::Ram, 64, &mut row).unwrap();
+        assert_eq!(
+            row.as_chunks::<4>()
+                .0
+                .iter()
+                .map(|pixel| u32::from_le_bytes(*pixel))
+                .collect::<Vec<_>>(),
+            vec![0x11000001, 0x11000001, 0x22000002, 0x33000003]
+        );
+    }
+}
+
+#[test]
+fn invalid_surface_ids_and_crops_leave_the_destination_unchanged() {
+    let fixture = Fixture::new(20);
+    fixture.background(7);
+    let mut data = image_payload(44);
+    data[24..26].copy_from_slice(&8u16.to_le_bytes());
+    data[26] = 1;
+    fixture.surface_image(IMAGE, 1);
+    fixture.store(DRAW, &command(Layout::Modern, 3, [0, 0, 4, 4], &data));
+    assert!(matches!(
+        fixture.prepare(Layout::Modern).unwrap_err(),
+        TransportError::Decode(DecodeError::Parameter)
+    ));
+    fixture.surface_image(IMAGE, 0);
+    data[8..24].copy_from_slice(&rect([0, 0, 5, 1]));
+    fixture.store(DRAW, &command(Layout::Modern, 3, [0, 0, 4, 4], &data));
+    let draw = fixture.prepare(Layout::Modern).unwrap();
+    assert!(matches!(
+        draw.render(&fixture.surface()).unwrap_err(),
+        TransportError::Decode(DecodeError::Parameter)
+    ));
+    assert_eq!(fixture.surface().frame().unwrap().pixels, [7; 16]);
 }
 
 #[test]
