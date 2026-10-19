@@ -52,12 +52,17 @@ enum Transfer {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct MediaState {
+    identity: String,
+    size: u64,
+}
+
 /// Controller state; media identity must be a verified digest of the opened ISO.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AtapiState {
-    media_identity: String,
-    media_size: u64,
-    present: bool,
+    media: Option<MediaState>,
+    tray_open: bool,
     locked: bool,
     registers: [u8; 8],
     control: u8,
@@ -67,11 +72,22 @@ pub struct AtapiState {
     transfer: Transfer,
 }
 
+#[cfg(feature = "windows")]
+impl AtapiState {
+    fn media_size(&self) -> u64 {
+        self.media.as_ref().map_or(0, |media| media.size)
+    }
+
+    fn media_present(&self) -> bool {
+        self.media.is_some() && !self.tray_open
+    }
+}
+
 /// One read-only optical master; the slave is absent. DMA is not advertised.
 #[derive(Debug)]
 #[cfg(feature = "windows")]
 pub struct Atapi {
-    media: File,
+    media: Option<File>,
     irq: EventFd,
     legacy_irq_enabled: bool,
     state: AtapiState,
@@ -79,29 +95,34 @@ pub struct Atapi {
 
 #[cfg(feature = "windows")]
 impl Atapi {
-    /// Opens a controller around an already opened ISO and its verified identity.
-    pub fn new(media: File, media_identity: String, irq: EventFd) -> io::Result<Self> {
-        let metadata = media.metadata()?;
-        let size = metadata.len();
-        if !metadata.is_file()
-            || size == 0
-            || !size.is_multiple_of(BLOCK_SIZE)
-            || size / BLOCK_SIZE > u64::from(u32::MAX)
-            || media_identity.is_empty()
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "invalid ISO media",
-            ));
-        }
+    /// Creates a drive with optional verified media and a closed tray.
+    pub fn new(media: Option<(File, String)>, irq: EventFd) -> io::Result<Self> {
+        let (media, media_state) = match media {
+            Some((media, identity)) => {
+                let metadata = media.metadata()?;
+                let size = metadata.len();
+                if !metadata.is_file()
+                    || size == 0
+                    || !size.is_multiple_of(BLOCK_SIZE)
+                    || size / BLOCK_SIZE > u64::from(u32::MAX)
+                    || identity.is_empty()
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "invalid ISO media",
+                    ));
+                }
+                (Some(media), Some(MediaState { identity, size }))
+            }
+            None => (None, None),
+        };
         let mut device = Self {
             media,
             irq,
             legacy_irq_enabled: true,
             state: AtapiState {
-                media_identity,
-                media_size: size,
-                present: true,
+                media: media_state,
+                tray_open: false,
                 locked: false,
                 registers: [0; 8],
                 control: 0,
@@ -146,7 +167,7 @@ impl Atapi {
                 "optical transfer is active",
             ));
         }
-        self.state.present = false;
+        self.state.tray_open = true;
         Ok(())
     }
 
@@ -155,14 +176,13 @@ impl Atapi {
         self.state.clone()
     }
 
-    /// Restores only against the same verified ISO and valid transfer bounds.
+    /// Restores against matching optional media and valid transfer bounds.
     pub fn restore(
-        media: File,
-        media_identity: String,
+        media: Option<(File, String)>,
         irq: EventFd,
         state: &AtapiState,
     ) -> io::Result<Self> {
-        let mut device = Self::new(media, media_identity, irq)?;
+        let mut device = Self::new(media, irq)?;
         let valid_transfer = match &state.transfer {
             Transfer::Idle => true,
             Transfer::Packet { position, .. } => *position < 12,
@@ -183,13 +203,10 @@ impl Atapi {
                     && (2..=MAX_TRANSFER).contains(limit)
                     && next_offset
                         .checked_add(*remaining)
-                        .is_some_and(|end| end <= state.media_size)
+                        .is_some_and(|end| end <= state.media_size())
             }
         };
-        if state.media_identity != device.state.media_identity
-            || state.media_size != device.state.media_size
-            || !valid_transfer
-        {
+        if state.media != device.state.media || !valid_transfer {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "ATAPI media or state mismatch",
@@ -480,7 +497,13 @@ impl Atapi {
     fn read_media(&mut self, offset: u64, remaining: u64, limit: usize) {
         let count = usize::try_from(remaining.min(limit as u64)).unwrap();
         let mut bytes = vec![0; count];
-        if self.media.read_exact_at(&mut bytes, offset).is_err() {
+        if self
+            .media
+            .as_ref()
+            .unwrap()
+            .read_exact_at(&mut bytes, offset)
+            .is_err()
+        {
             self.fail(3, 0x11);
             return;
         }
@@ -502,7 +525,9 @@ impl Atapi {
             self.fail(5, 0x25);
             return;
         }
-        if !self.state.present && matches!(packet[0], 0x00 | 0x25 | 0x28 | 0xa8 | 0x43 | 0x2b) {
+        if !self.state.media_present()
+            && matches!(packet[0], 0x00 | 0x25 | 0x28 | 0xa8 | 0x43 | 0x2b)
+        {
             self.fail(2, 0x3a);
             return;
         }
@@ -533,7 +558,7 @@ impl Atapi {
                         self.fail(5, 0x53);
                         return;
                     }
-                    self.state.present = packet[4] & 1 != 0;
+                    self.state.tray_open = packet[4] & 1 == 0;
                 }
                 self.complete();
             }
@@ -542,7 +567,7 @@ impl Atapi {
                 self.complete();
             }
             0x25 => {
-                let last = u32::try_from(self.state.media_size / BLOCK_SIZE - 1).unwrap();
+                let last = u32::try_from(self.state.media_size() / BLOCK_SIZE - 1).unwrap();
                 let mut bytes = last.to_be_bytes().to_vec();
                 bytes.extend_from_slice(&u32::try_from(BLOCK_SIZE).unwrap().to_be_bytes());
                 self.response(bytes, 8);
@@ -556,7 +581,7 @@ impl Atapi {
                 };
                 let offset = u64::from(lba) * BLOCK_SIZE;
                 let length = u64::from(blocks) * BLOCK_SIZE;
-                if offset + length > self.state.media_size {
+                if offset + length > self.state.media_size() {
                     self.fail(5, 0x21);
                 } else if length == 0 {
                     self.complete();
@@ -574,7 +599,8 @@ impl Atapi {
                         4,
                         0x10,
                         0,
-                        if self.state.present { 2 } else { 1 },
+                        u8::from(self.state.tray_open)
+                            | (u8::from(self.state.media_present()) << 1),
                         0,
                         0,
                     ]
@@ -647,7 +673,7 @@ impl Atapi {
             return;
         }
         let mut bytes = vec![0, 0, 1, 1];
-        for (track, lba) in [(1, 0), (0xaa, self.state.media_size / BLOCK_SIZE)] {
+        for (track, lba) in [(1, 0), (0xaa, self.state.media_size() / BLOCK_SIZE)] {
             if packet[6] == 0xaa && track == 1 {
                 continue;
             }
@@ -695,7 +721,11 @@ mod tests {
         file.write_all(&bytes).unwrap();
         let irq = EventFd::new(libc::EFD_NONBLOCK).unwrap();
         (
-            Atapi::new(file, "verified-test-media".into(), irq.try_clone().unwrap()).unwrap(),
+            Atapi::new(
+                Some((file, "verified-test-media".into())),
+                irq.try_clone().unwrap(),
+            )
+            .unwrap(),
             irq,
             bytes,
         )
@@ -734,6 +764,38 @@ mod tests {
             }
         }
         bytes
+    }
+
+    #[test]
+    fn empty_drive_identifies_and_restores_without_inventing_media() {
+        let irq = || EventFd::new(libc::EFD_NONBLOCK).unwrap();
+        let mut device = Atapi::new(None, irq()).unwrap();
+        packet(&mut device, &[0x12, 0, 0, 0, 36], 2048);
+        let inquiry = receive(&mut device);
+        assert_eq!(&inquiry[8..16], b"FC      ");
+        for load in [0, 3] {
+            packet(&mut device, &[0x1b, 0, 0, 0, load], 2048);
+            packet(&mut device, &[0], 2048);
+            assert_eq!(status(&mut device), READY | ERROR);
+            assert_eq!(device.state.sense, [2, 0x3a, 0]);
+        }
+        packet(&mut device, &[0x4a, 1, 0, 0, 0x10, 0, 0, 0, 8], 2048);
+        assert_eq!(receive(&mut device)[5], 0);
+        let saved: AtapiState =
+            bitcode::deserialize(&bitcode::serialize(&device.save()).unwrap()).unwrap();
+        let mut restored = Atapi::restore(None, irq(), &saved).unwrap();
+        packet(&mut restored, &[0x25], 2048);
+        assert_eq!(status(&mut restored), READY | ERROR);
+        let (loaded, _, _) = fixture();
+        Atapi::restore(
+            loaded
+                .media
+                .map(|file| (file, "verified-test-media".into())),
+            irq(),
+            &saved,
+        )
+        .unwrap_err();
+        Atapi::restore(None, irq(), &loaded.state).unwrap_err();
     }
 
     #[test]
@@ -830,15 +892,19 @@ mod tests {
             serde_json::from_slice(&serde_json::to_vec(&device.save()).unwrap()).unwrap();
         let make_irq = || EventFd::new(libc::EFD_NONBLOCK).unwrap();
         Atapi::restore(
-            device.media.try_clone().unwrap(),
-            "other-digest".into(),
+            Some((
+                device.media.as_ref().unwrap().try_clone().unwrap(),
+                "other-digest".into(),
+            )),
             make_irq(),
             &state,
         )
         .unwrap_err();
         let mut restored = Atapi::restore(
-            device.media.try_clone().unwrap(),
-            "verified-test-media".into(),
+            Some((
+                device.media.as_ref().unwrap().try_clone().unwrap(),
+                "verified-test-media".into(),
+            )),
             make_irq(),
             &state,
         )
@@ -857,8 +923,10 @@ mod tests {
             *position = usize::MAX;
         }
         Atapi::restore(
-            device.media.try_clone().unwrap(),
-            "verified-test-media".into(),
+            Some((
+                device.media.as_ref().unwrap().try_clone().unwrap(),
+                "verified-test-media".into(),
+            )),
             make_irq(),
             &invalid,
         )
@@ -879,7 +947,12 @@ mod tests {
             assert_eq!((sense[2], sense[12]), (key, asc));
         }
         let mut actual = vec![0; original.len()];
-        device.media.read_exact_at(&mut actual, 0).unwrap();
+        device
+            .media
+            .as_ref()
+            .unwrap()
+            .read_exact_at(&mut actual, 0)
+            .unwrap();
         assert_eq!(actual, original);
         device.write(1, &[1]);
         device.write(7, &[0xa0]);
@@ -889,7 +962,7 @@ mod tests {
     #[test]
     fn toc_rejects_media_too_large_for_msf_address() {
         let (mut device, _, _) = fixture();
-        device.state.media_size = 256 * 60 * 75 * BLOCK_SIZE;
+        device.state.media.as_mut().unwrap().size = 256 * 60 * 75 * BLOCK_SIZE;
         packet(&mut device, &[0x43, 2, 0, 0, 0, 0, 0xaa, 0, 20], 2048);
         assert_eq!(status(&mut device), READY | ERROR);
         assert_eq!(device.state.sense, [5, 0x24, 0]);
@@ -918,7 +991,7 @@ mod tests {
     fn session_toc_reports_last_complete_session_and_honours_allocation() {
         let (mut device, _, _) = fixture();
         // Session addresses remain representable even when lead-out exceeds MSF.
-        device.state.media_size = 5 * 1024 * 1024 * 1024;
+        device.state.media.as_mut().unwrap().size = 5 * 1024 * 1024 * 1024;
         packet(&mut device, &[0x43, 0, 1, 0, 0, 0, 0, 0, 12], 2048);
         assert_eq!(
             receive(&mut device),
@@ -952,7 +1025,7 @@ mod tests {
         );
         assert_eq!(receive(&mut device).len(), 2048);
         device.eject().unwrap();
-        assert!(!device.state.present);
+        assert!(!device.state.media_present());
     }
 
     #[test]
@@ -961,7 +1034,7 @@ mod tests {
         packet(&mut device, &[0x1e, 0, 0, 0, 1], 2048);
         packet(&mut device, &[0x1b, 0, 0, 0, 2], 2048);
         assert_eq!(status(&mut device), READY | ERROR);
-        assert!(device.state.present);
+        assert!(device.state.media_present());
         packet(&mut device, &[0x1e], 2048);
         packet(&mut device, &[0x1b, 0, 0, 0, 2], 2048);
         packet(&mut device, &[0x25], 2048);

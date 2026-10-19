@@ -83,14 +83,16 @@ The current implementation relies on the
 
 ## Snapshot compatibility
 
-This fork uses format37.0.0. The format adds optional virtio GPU state to both
-transport inventories, including queue progress, display-change events and the
-bounded renderer payload. AMD64 GPU transports also save their boot VGA
+This fork uses format38.0.0. ATAPI state stores optional medium identity/size
+and the tray position separately. An empty drive has no ISO identity or file;
+restore rejects substituting a medium for an empty saved drive, or the reverse.
+The format also contains optional virtio GPU state in both transport inventories,
+including queue progress, display-change events and the bounded renderer payload.
+AMD64 GPU transports also save their boot VGA
 registers, memory and BAR mappings; other transports have no VGA state. Console
 state records the selected display model and reuses the saved GPU instead of
-saving another VGA device. The
-snapshot reader permits at most 128 MiB, including GPU resources, scanout, backing
-entries and the VGA console.
+saving another VGA device. The snapshot reader permits at most 128 MiB, including
+GPU resources, scanout, backing entries and the VGA console.
 
 VMClock state is optional and records actual device
 presence; restore reconstructs the machine configuration from that presence
@@ -103,7 +105,7 @@ LEDs. Console restore reuses that saved PCI backend. The AMD64 display saves two
 MMIO mappings and a typed optional ROM containing its bytes, mapping and PCI ROM
 BAR state; an absent ROM has no mapping or ROM BAR. The console's saved
 configuration also records the optional ROM path. Format29.0.0 through
-format36.0.0 files require their matching older binaries; format37 does not
+format37.0.0 files require their matching older binaries; format38 does not
 decode them. Snapshot state remains specific to its CPU architecture.
 
 The conventional PC event state also saves GPE0 status and enable bits. Its VM
@@ -112,7 +114,7 @@ without a separate GED interrupt or allocation. Restore uses the saved complete
 PC hardware pair, validates its route before constructing devices, writes the
 new generation ID, then latches the event before vCPUs resume. Default Linux and
 ARM hardware retain the dedicated GED route. Both Cargo builds use the same
-format37 schema; no format34 decoder or migration is provided.
+format38 schema; no format34 decoder or migration is provided.
 
 ### Host kernel
 

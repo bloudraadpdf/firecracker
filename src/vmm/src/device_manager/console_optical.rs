@@ -200,14 +200,19 @@ impl OpticalDevice {
     pub fn attach(
         vm: &Arc<KvmVm>,
         pci: &mut PciDevices,
-        path: &Path,
+        path: Option<&Path>,
         state: Option<&OpticalState>,
     ) -> io::Result<Arc<Mutex<Self>>> {
-        let mut media = File::open(path)?;
-        if !media.metadata()?.is_file() {
-            return Err(io::Error::other("ISO must be a regular file"));
-        }
-        let identity = media_identity(&mut media)?;
+        let media = path
+            .map(|path| {
+                let mut media = File::open(path)?;
+                if !media.metadata()?.is_file() {
+                    return Err(io::Error::other("ISO must be a regular file"));
+                }
+                let identity = media_identity(&mut media)?;
+                Ok((media, identity))
+            })
+            .transpose()?;
         let irq = EventFd::new(libc::EFD_NONBLOCK)?;
         let (mut core, config, sbdf, modes) = if let Some(state) = state {
             if state.sbdf.segment() != 0
@@ -219,14 +224,14 @@ impl OpticalDevice {
             }
             validate_mappings(&vm.resource_allocator().pci_io, state)?;
             (
-                Atapi::restore(media, identity, irq.try_clone()?, &state.core)?,
+                Atapi::restore(media, irq.try_clone()?, &state.core)?,
                 restore_configuration(&state.config)?,
                 state.sbdf,
                 state.modes,
             )
         } else {
             (
-                Atapi::new(media, identity, irq.try_clone()?)?,
+                Atapi::new(media, irq.try_clone()?)?,
                 configuration(),
                 pci.pci_segment
                     .next_device_sbdf()
@@ -549,6 +554,35 @@ mod tests {
     }
 
     #[test]
+    fn empty_primary_drive_identifies_and_restores_without_an_iso() {
+        use crate::snapshot::Persist;
+        use crate::vstate::resources::ResourceAllocator;
+        let (source, mut pci) = platform();
+        let device = OpticalDevice::attach(&source, &mut pci, None, None).unwrap();
+        let base = device.lock().unwrap().mapped[0];
+        source.pio_bus.write(base + 7, &[0xa1]).unwrap();
+        let mut status = [0];
+        source.pio_bus.read(base + 7, &mut status).unwrap();
+        assert_eq!(status, [0x48]);
+        let state = device.lock().unwrap().save();
+        let allocation = source.resource_allocator().save();
+        let mut target = setup_vm_with_memory(0x1000);
+        target.setup_irqchip(true).unwrap();
+        let target = Arc::new(target);
+        *target.resource_allocator() = ResourceAllocator::restore((), &allocation).unwrap();
+        let mut pci = PciDevices::new(&target).unwrap();
+        let restored = OpticalDevice::attach(&target, &mut pci, None, Some(&state)).unwrap();
+        let mut first_word = [0; 2];
+        target.pio_bus.read(base, &mut first_word).unwrap();
+        assert_eq!(u16::from_le_bytes(first_word), 0x8580);
+        drop(restored);
+        let file = iso();
+        let (wrong, mut pci) = platform();
+        *wrong.resource_allocator() = source.resource_allocator().clone();
+        OpticalDevice::attach(&wrong, &mut pci, Some(file.as_path()), Some(&state)).unwrap_err();
+    }
+
+    #[test]
     fn identity_distinguishes_equal_size_media() {
         let file = iso();
         let mut handle = file.as_file().try_clone().unwrap();
@@ -564,7 +598,7 @@ mod tests {
     fn native_mapping_switches_to_compatibility_and_obeys_io_enable() {
         let (vm, mut pci) = platform();
         let file = iso();
-        let device = OpticalDevice::attach(&vm, &mut pci, file.as_path(), None).unwrap();
+        let device = OpticalDevice::attach(&vm, &mut pci, Some(file.as_path()), None).unwrap();
         let mapped = device.lock().unwrap().mapped;
         assert_eq!(device.lock().unwrap().read_config_register(2), 0x0101_0f00);
         vm.pio_bus.write(mapped[0] + 7, &[0xa1]).unwrap();
@@ -594,7 +628,7 @@ mod tests {
     fn bar_probe_relocation_and_collision_preserve_live_ports() {
         let (vm, mut pci) = platform();
         let file = iso();
-        let device = OpticalDevice::attach(&vm, &mut pci, file.as_path(), None).unwrap();
+        let device = OpticalDevice::attach(&vm, &mut pci, Some(file.as_path()), None).unwrap();
         let old = device.lock().unwrap().mapped[0];
         device
             .lock()
@@ -632,7 +666,7 @@ mod tests {
             vm.pio_bus.insert(occupied.clone(), port, size).unwrap();
             let before = vm.resource_allocator().pci_io.clone();
             let file = iso();
-            OpticalDevice::attach(&vm, &mut pci, file.as_path(), None).unwrap_err();
+            OpticalDevice::attach(&vm, &mut pci, Some(file.as_path()), None).unwrap_err();
             assert_eq!(vm.resource_allocator().pci_io, before);
             assert!(
                 pci.pci_segment
@@ -650,7 +684,7 @@ mod tests {
     fn snapshots_reject_forged_config_bar_shape_and_mapping() {
         let (vm, mut pci) = platform();
         let file = iso();
-        let device = OpticalDevice::attach(&vm, &mut pci, file.as_path(), None).unwrap();
+        let device = OpticalDevice::attach(&vm, &mut pci, Some(file.as_path()), None).unwrap();
         let state = device.lock().unwrap().save();
         validate_mappings(&vm.resource_allocator().pci_io, &state).unwrap();
         let mut bad = state.clone();
@@ -676,7 +710,7 @@ mod tests {
 
         let (vm, mut pci) = platform();
         let file = iso();
-        let device = OpticalDevice::attach(&vm, &mut pci, file.as_path(), None).unwrap();
+        let device = OpticalDevice::attach(&vm, &mut pci, Some(file.as_path()), None).unwrap();
         let mapped = device.lock().unwrap().mapped;
         vm.pio_bus.write(mapped[0] + 7, &[0xa1]).unwrap();
         let mut first_word = [0; 2];
@@ -694,7 +728,7 @@ mod tests {
         let restored = OpticalDevice::attach(
             &restored_vm,
             &mut restored_pci,
-            file.as_path(),
+            Some(file.as_path()),
             Some(&state),
         )
         .unwrap();
@@ -716,7 +750,7 @@ mod tests {
         let (vm, mut pci) = platform();
         let weak = Arc::downgrade(&vm);
         let file = iso();
-        let device = OpticalDevice::attach(&vm, &mut pci, file.as_path(), None).unwrap();
+        let device = OpticalDevice::attach(&vm, &mut pci, Some(file.as_path()), None).unwrap();
         drop(vm);
         assert!(weak.upgrade().is_none());
         assert_eq!(device.lock().unwrap().read_config_register(0), 0xfc01_1d0f);
