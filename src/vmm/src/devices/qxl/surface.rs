@@ -1,8 +1,10 @@
 // Copyright 2026 Bloudraad.
 // SPDX-License-Identifier: Apache-2.0
 
+use super::bitmap::Bitmap;
 use super::memory::{Memory, Region};
 use super::protocol::{DecodeError, PrimarySurface, Rect};
+use super::raster::{Operand, RasterOp};
 use super::transport::{AddressSpace, TransportError};
 use crate::devices::display::Frame;
 
@@ -120,6 +122,70 @@ impl<'a> Surface<'a> {
                 .read(self.region, self.row(source_y + index) + source_x, &mut row)?;
             self.memory
                 .write(self.region, self.row(top + index) + target_x, &row)?;
+        }
+        Ok(())
+    }
+
+    pub fn raster_fill(
+        &self,
+        rect: Rect,
+        brush: u32,
+        descriptor: u16,
+    ) -> Result<(), TransportError> {
+        let op = RasterOp::decode(descriptor, Operand::Brush)?;
+        self.paint(rect, |_, _, destination| op.apply(0, brush, destination))
+    }
+
+    pub fn blit(
+        &self,
+        bitmap: &Bitmap,
+        source: Rect,
+        target: Rect,
+        descriptor: u16,
+    ) -> Result<(), TransportError> {
+        let op = RasterOp::decode(descriptor, Operand::Source)?;
+        let [left, top, right, bottom] = source.bounds().map(i64::from);
+        let [target_left, target_top, target_right, target_bottom] = target.bounds().map(i64::from);
+        let (width, height) = bitmap.dimensions();
+        if left < 0
+            || top < 0
+            || right > i64::from(width)
+            || bottom > i64::from(height)
+            || left == right
+            || top == bottom
+        {
+            return Err(DecodeError::Parameter.into());
+        }
+        if target_left == target_right || target_top == target_bottom {
+            return Ok(());
+        }
+        self.paint(target, |x, y, destination| {
+            let x =
+                left + (i64::from(x) - target_left) * (right - left) / (target_right - target_left);
+            let y =
+                top + (i64::from(y) - target_top) * (bottom - top) / (target_bottom - target_top);
+            let index = usize::try_from(y).unwrap() * usize::try_from(width).unwrap()
+                + usize::try_from(x).unwrap();
+            op.apply(bitmap.pixels()[index], 0, destination)
+        })
+    }
+
+    fn paint(
+        &self,
+        rect: Rect,
+        mut pixel: impl FnMut(u32, u32, u32) -> u32,
+    ) -> Result<(), TransportError> {
+        let (width, height) = self.primary.dimensions();
+        let [left, top, right, bottom] = rect.clipped(width, height)?;
+        let mut row = vec![0; usize::try_from(right - left).unwrap() * 4];
+        for y in top..bottom {
+            let offset = self.row(y) + usize::try_from(left).unwrap() * 4;
+            self.memory.read(self.region, offset, &mut row)?;
+            for (index, bytes) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                let x = left + u32::try_from(index).unwrap();
+                *bytes = pixel(x, y, u32::from_le_bytes(*bytes)).to_le_bytes();
+            }
+            self.memory.write(self.region, offset, &row)?;
         }
         Ok(())
     }
