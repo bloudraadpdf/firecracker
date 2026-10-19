@@ -92,8 +92,24 @@ monochrome and 4/8/16/24/32-bit colour cursors, palettes and MSB-first masks.
 It reuses bitmap pixel decoding and premultiplied alpha blending. Cursor drawing
 clips the hotspot at display edges and preserves monochrome inversion and the
 colour-mask rules. Shapes are limited to 256 by 256 pixels. The zero-sized
-transparent cursor does not read unused chunk links. Cursor commands and trail
-parameters still need controller integration and native guest validation.
+transparent cursor does not read unused chunk links.
+
+The controller connects command execution, slot generation publication, primary
+surface creation/destruction, attachment and reset. It publishes update IDs,
+the millisecond clock and masked interrupt state. Polling reports pending work
+after a dispatch limit or release-ring backpressure. Synchronous operations
+return `Busy` while work remains. A full 32-command dispatch completes through
+one release chain before a successful synchronous update returns. PCI integration
+must preserve this completion contract and continue polling pending work.
+
+Cursor state applies set, move and hide commands, including implicit visibility
+on movement. Trails sample positions at millisecond intervals and expire while
+stationary. Repeated positions draw once, and cursor painting leaves guest
+display memory unchanged. Trails are bounded to 64 samples, with a minimum
+interval of one millisecond. Controller checks cover ordering, pressure and
+retry, slot invalidation, signed rows, padding, interrupt masks and cursor trails.
+The controller still needs PCI, console and snapshot integration and native
+guest validation.
 The layout follows
 the published [QXL device ABI](https://sources.debian.org/src/spice-protocol/0.12.14-1/spice/qxl_dev.h/).
 It does not expose a QXL PCI device yet. Component checks do not establish guest

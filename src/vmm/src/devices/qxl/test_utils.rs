@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use vm_memory::MmapRegion;
 
+use super::drawing::Layout;
 use super::memory::{Memory, RAM_HEADER, SURFACE_BYTES};
 use super::transport::AddressSpace;
 
@@ -54,4 +55,52 @@ pub(super) fn path(segments: &[(u32, &[[i32; 2]])]) -> Vec<u8> {
     result.extend([0; 16]);
     result.extend(data);
     result
+}
+
+pub(super) fn rect([left, top, right, bottom]: [i32; 4]) -> Vec<u8> {
+    [top, left, bottom, right]
+        .into_iter()
+        .flat_map(i32::to_le_bytes)
+        .collect()
+}
+
+pub(super) fn drawable(
+    layout: Layout,
+    opcode: u8,
+    bounds: [i32; 4],
+    payload: &[u8],
+    surface_id: u32,
+) -> Vec<u8> {
+    let (size, rectangle, clip) = match layout {
+        Layout::Modern => (123, 31, 47),
+        Layout::Compat => (60, 28, 44),
+    };
+    let mut data = vec![0xa5; size];
+    data[..8].copy_from_slice(&0x1234u64.to_le_bytes());
+    match layout {
+        Layout::Modern => {
+            data[8..12].copy_from_slice(&surface_id.to_le_bytes());
+            data[12] = 0;
+            data[13] = opcode;
+            data[14] = 0;
+        }
+        Layout::Compat => {
+            data[8] = 0;
+            data[9] = opcode;
+            data[10..12].fill(0);
+        }
+    }
+    data[rectangle..rectangle + 16].copy_from_slice(&rect(bounds));
+    data[clip..clip + 4].fill(0);
+    data.extend(payload);
+    data
+}
+
+pub(super) fn fill(color: u32, descriptor: u16) -> Vec<u8> {
+    let mut data = vec![0xa5; 39];
+    data[..4].copy_from_slice(&1u32.to_le_bytes());
+    data[4..8].copy_from_slice(&color.to_le_bytes());
+    data[20..22].copy_from_slice(&descriptor.to_le_bytes());
+    data[31..39].fill(0);
+    data
 }

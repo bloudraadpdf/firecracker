@@ -1,6 +1,8 @@
 // Copyright 2026 Bloudraad.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::VecDeque;
+
 use super::bitmap::{Bitmap, chunks};
 use super::memory::Memory;
 use super::protocol::{DecodeError, bytes};
@@ -213,5 +215,96 @@ impl Command {
             }
             other => return Err(DecodeError::Command(u32::from(other)).into()),
         })
+    }
+}
+
+#[derive(Debug, Default)]
+pub(super) struct Pointer {
+    shape: Option<Shape>,
+    position: [i16; 2],
+    visible: bool,
+    length: usize,
+    frequency: u64,
+    sampled: u64,
+    history: VecDeque<[i16; 2]>,
+}
+
+impl Pointer {
+    fn advance(&mut self, now: u64) {
+        if now < self.sampled {
+            self.history.clear();
+            self.sampled = now;
+        }
+        if self.length == 0 {
+            self.sampled = now;
+            return;
+        }
+        let elapsed = now - self.sampled;
+        for _ in 0..(elapsed / self.frequency).min(u64::try_from(self.length).unwrap()) {
+            self.history.push_front(self.position);
+            self.history.truncate(self.length);
+        }
+        self.sampled = now - elapsed % self.frequency;
+    }
+
+    pub fn apply(&mut self, command: Command, now: u64) -> Result<(), DecodeError> {
+        match command {
+            Command::Set {
+                position,
+                visible,
+                shape,
+            } => {
+                self.shape = Some(shape);
+                self.position = position;
+                self.visible = visible;
+                self.history.clear();
+                self.sampled = now;
+            }
+            Command::Move(position) => {
+                if self.visible {
+                    self.advance(now);
+                } else {
+                    self.sampled = now;
+                    self.history.clear();
+                }
+                self.position = position;
+                self.visible = true;
+            }
+            Command::Hide => {
+                self.visible = false;
+                self.history.clear();
+            }
+            Command::Trail { length, frequency } => {
+                if length > 64 {
+                    return Err(DecodeError::Parameter);
+                }
+                self.length = usize::from(length);
+                self.frequency = u64::from(frequency.max(1));
+                self.history.clear();
+                self.sampled = now;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn draw(&mut self, frame: &mut Frame, now: u64) {
+        self.advance(now);
+        if !self.visible {
+            return;
+        }
+        if let Some(shape) = &self.shape {
+            for (index, position) in self.history.iter().enumerate().rev() {
+                if *position != self.position
+                    && !self
+                        .history
+                        .iter()
+                        .take(index)
+                        .any(|newer| newer == position)
+                {
+                    shape.draw(frame, *position);
+                }
+            }
+            shape.draw(frame, self.position);
+        }
     }
 }
