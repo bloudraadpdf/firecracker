@@ -403,9 +403,14 @@ addresses, direction, request length and response capacity before executing a
 command. It completes rejected commands with an error response when the output
 buffer is valid, and preserves requested fence identifiers on error responses.
 
-GPU PCI attachment, firmware integration and snapshot state are not implemented
-yet. These components do not change the guest display. VGA remains the configured
-display; Windows virtio display drivers cannot bind to it.
+Renderer checkpoints retain resources, guest backing, preferred dimensions,
+unflushed pixels, the displayed scanout and the copied cursor. Restore validates
+their limits and guest addresses before cloning pixel buffers. Unflushed resource
+pixels remain separate from the displayed pixels across restore.
+
+GPU PCI attachment, firmware and device snapshot integration are not implemented
+yet. These components do not change the guest display or snapshot format. VGA
+remains the configured display; Windows virtio display drivers cannot bind to it.
 
 AMD64 console snapshots contain display memory and registers, keyboard/mouse
 queues, held input, pending releases, keyboard LEDs and pending lock updates,

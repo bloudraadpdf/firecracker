@@ -1,11 +1,12 @@
 // Copyright 2026 Bloudraad.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use vm_memory::{Bytes, GuestMemoryBackend};
 
-use super::protocol::{BackingEntry, Command, Rect, ResourceId};
+use super::protocol::{BackingEntry, Command, MAX_BACKING_ENTRIES, Rect, ResourceId};
+use super::state::{Cursor, RendererState, Resource, Scanout};
 use crate::devices::display::Frame;
 use crate::vstate::memory::{GuestAddress, GuestMemoryMmap};
 
@@ -44,15 +45,6 @@ pub enum Reply {
     DisplayInfo { width: u32, height: u32 },
 }
 
-#[derive(Debug)]
-struct Resource {
-    width: u32,
-    height: u32,
-    format: u32,
-    pixels: Vec<u8>,
-    backing: Vec<BackingEntry>,
-}
-
 impl Resource {
     fn pixel(&self, x: u32, y: u32) -> u32 {
         let offset = ((y as usize * self.width as usize) + x as usize) * 4;
@@ -72,13 +64,6 @@ impl Resource {
     }
 }
 
-#[derive(Debug)]
-struct Scanout {
-    resource: ResourceId,
-    rect: Rect,
-    pixels: Vec<u32>,
-}
-
 impl Scanout {
     fn flush(&mut self, resource: &Resource, rect: Rect) {
         let left = self.rect.x.max(rect.x);
@@ -93,15 +78,6 @@ impl Scanout {
             }
         }
     }
-}
-
-#[derive(Debug)]
-struct Cursor {
-    x: u32,
-    y: u32,
-    hot_x: u32,
-    hot_y: u32,
-    pixels: Vec<u32>,
 }
 
 impl Cursor {
@@ -165,6 +141,72 @@ impl Renderer {
         self.native
     }
 
+    pub fn save(&self) -> RendererState {
+        RendererState {
+            resources: self
+                .resources
+                .iter()
+                .map(|(&id, resource)| (id, resource.clone()))
+                .collect(),
+            preferred: self.preferred,
+            scanout: self.scanout.clone(),
+            cursor: self.cursor.clone(),
+            native: self.native,
+        }
+    }
+
+    pub fn restore(state: &RendererState, mem: &GuestMemoryMmap) -> Result<Self, RendererError> {
+        pixel_bytes(state.preferred.0, state.preferred.1)?;
+        if state.resources.len() > MAX_RESOURCES || (!state.native && state.scanout.is_some()) {
+            return Err(RendererError::Parameter);
+        }
+        let mut ids = BTreeSet::new();
+        let mut total_bytes = 0;
+        for (id, resource) in &state.resources {
+            let bytes = pixel_bytes(resource.width, resource.height)?;
+            if !ids.insert(*id) || !valid_format(resource.format) || bytes != resource.pixels.len()
+            {
+                return Err(RendererError::Parameter);
+            }
+            total_bytes += bytes;
+            if total_bytes > MAX_TOTAL_BYTES {
+                return Err(RendererError::OutOfMemory);
+            }
+            if !resource.backing.is_empty() {
+                validate_backing(&resource.backing, bytes, mem)?;
+            }
+        }
+        if let Some(scanout) = &state.scanout {
+            let resource = state
+                .resources
+                .iter()
+                .find(|(id, _)| *id == scanout.resource)
+                .map(|(_, resource)| resource)
+                .ok_or(RendererError::Resource)?;
+            validate_rect(scanout.rect, resource)?;
+            if pixel_bytes(scanout.rect.width, scanout.rect.height)? / 4 != scanout.pixels.len()
+                || scanout.pixels.iter().any(|pixel| pixel & 0xff00_0000 != 0)
+            {
+                return Err(RendererError::Parameter);
+            }
+        }
+        if let Some(cursor) = &state.cursor
+            && (cursor.pixels.len() != (CURSOR_SIZE * CURSOR_SIZE) as usize
+                || cursor.hot_x >= CURSOR_SIZE
+                || cursor.hot_y >= CURSOR_SIZE)
+        {
+            return Err(RendererError::Parameter);
+        }
+        Ok(Self {
+            resources: state.resources.iter().cloned().collect(),
+            total_bytes,
+            preferred: state.preferred,
+            scanout: state.scanout.clone(),
+            cursor: state.cursor.clone(),
+            native: state.native,
+        })
+    }
+
     pub fn reset(&mut self) {
         self.resources.clear();
         self.total_bytes = 0;
@@ -212,7 +254,7 @@ impl Renderer {
                 height,
             } => {
                 let bytes = pixel_bytes(width, height)?;
-                if !matches!(format, 1..=4 | 67 | 68 | 121 | 134) {
+                if !valid_format(format) {
                     return Err(RendererError::Parameter);
                 }
                 if self.resources.contains_key(&id) {
@@ -253,22 +295,9 @@ impl Renderer {
                 entries
                     .try_reserve_exact(backing.entries().len())
                     .map_err(|_| RendererError::OutOfMemory)?;
-                let mut total = 0u64;
-                for entry in backing.entries() {
-                    if entry.length == 0
-                        || entry.address.checked_add(u64::from(entry.length)).is_none()
-                    {
-                        return Err(RendererError::Parameter);
-                    }
-                    total += u64::from(entry.length);
-                    if total > MAX_RESOURCE_BYTES as u64 {
-                        return Err(RendererError::Parameter);
-                    }
-                    mem.get_slice(GuestAddress(entry.address), entry.length as usize)
-                        .map_err(|_| RendererError::Parameter)?;
-                    entries.push(entry);
-                }
-                if total < resource.pixels.len() as u64 || !resource.backing.is_empty() {
+                entries.extend(backing.entries());
+                validate_backing(&entries, resource.pixels.len(), mem)?;
+                if !resource.backing.is_empty() {
                     return Err(RendererError::Parameter);
                 }
                 resource.backing = entries;
@@ -403,6 +432,36 @@ fn pixel_bytes(width: u32, height: u32) -> Result<usize, RendererError> {
         return Err(RendererError::OutOfMemory);
     }
     Ok(usize::try_from(bytes).unwrap())
+}
+
+fn valid_format(format: u32) -> bool {
+    matches!(format, 1..=4 | 67 | 68 | 121 | 134)
+}
+
+fn validate_backing(
+    entries: &[BackingEntry],
+    bytes: usize,
+    mem: &GuestMemoryMmap,
+) -> Result<(), RendererError> {
+    if entries.is_empty() || entries.len() > MAX_BACKING_ENTRIES {
+        return Err(RendererError::Parameter);
+    }
+    let mut total = 0u64;
+    for entry in entries {
+        if entry.length == 0 || entry.address.checked_add(u64::from(entry.length)).is_none() {
+            return Err(RendererError::Parameter);
+        }
+        total += u64::from(entry.length);
+        if total > MAX_RESOURCE_BYTES as u64 {
+            return Err(RendererError::Parameter);
+        }
+        mem.get_slice(GuestAddress(entry.address), entry.length as usize)
+            .map_err(|_| RendererError::Parameter)?;
+    }
+    if total < bytes as u64 {
+        return Err(RendererError::Parameter);
+    }
+    Ok(())
 }
 
 fn validate_rect(rect: Rect, resource: &Resource) -> Result<(), RendererError> {

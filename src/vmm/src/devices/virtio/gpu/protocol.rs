@@ -5,6 +5,8 @@
 
 use std::num::NonZeroU32;
 
+use serde::{Deserialize, Serialize};
+
 pub const HEADER_SIZE: usize = 24;
 pub const MAX_BACKING_ENTRIES: usize = 8192;
 
@@ -54,7 +56,7 @@ impl Header {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ResourceId(NonZeroU32);
 
 impl ResourceId {
@@ -69,7 +71,7 @@ impl ResourceId {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rect {
     pub x: u32,
     pub y: u32,
@@ -77,7 +79,7 @@ pub struct Rect {
     pub height: u32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackingEntry {
     pub address: u64,
     pub length: u32,
