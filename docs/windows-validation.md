@@ -33,7 +33,14 @@ inversions, copy, OR, AND, XOR, blackness, whiteness and destination inversion.
 Bitmap copies support source crops, clipped destinations and nearest-neighbour
 scaling while preserving row padding. Tests cover descriptor validity and bit
 truth tables, signed destination strides and rejection before destination writes.
-Guest drawing-command decoding and rendering remain incomplete. Its layout follows
+Prepared modern and compatibility drawing commands render fills, patterned
+brushes, bitmap and screen copies, blackness, whiteness and inversion. Clip
+rectangles form a union; overlapping clips apply the operation once per pixel.
+One-bit masks support origins and inversion without a colour palette. Screen
+copies capture the source before writing, including alpha bits. Command-ring
+checks cover failure without writes or acknowledgement and successful retry.
+Opaque, blend, ROP3, text, stroke, surface-image and self-bitmap operations
+remain incomplete, as does interpolated scaling. The layout follows
 the published [QXL device ABI](https://sources.debian.org/src/spice-protocol/0.12.14-1/spice/qxl_dev.h/).
 It does not expose a QXL PCI device yet. Component checks do not establish guest
 driver loading or rendering. Graphics qualification across all agreed guests

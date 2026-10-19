@@ -1,27 +1,15 @@
 // Copyright 2026 Bloudraad.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
-
-use vm_memory::MmapRegion;
-
 use super::bitmap::Bitmap;
-use super::memory::{Memory, RAM_HEADER, Region, SURFACE_BYTES};
+use super::memory::{Memory, RAM_HEADER, Region};
+use super::test_utils::memory as setup;
 use super::transport::AddressSpace;
 
 const SLOT: u64 = 0x0101_0000_0000_0000;
 const IMAGE: usize = 64;
 const DATA: usize = 512;
 const PALETTE: usize = 256;
-
-fn setup() -> (Memory, AddressSpace) {
-    let memory = Memory::new(Arc::new(MmapRegion::new(SURFACE_BYTES).unwrap())).unwrap();
-    let mut addresses = AddressSpace::new(0x8000_0000, 0x8200_0000).unwrap();
-    addresses
-        .add(1, 0x8000_0000..0x8000_0000 + RAM_HEADER as u64)
-        .unwrap();
-    (memory, addresses)
-}
 
 fn image(memory: &Memory, format: u8, flags: u8, width: u32, height: u32, stride: u32) {
     let mut header = [0; 48];

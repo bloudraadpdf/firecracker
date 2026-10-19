@@ -26,7 +26,7 @@ pub enum DecodeError {
     Command(u32),
 }
 
-fn bytes<const N: usize>(data: &[u8], offset: usize) -> Result<[u8; N], DecodeError> {
+pub(super) fn bytes<const N: usize>(data: &[u8], offset: usize) -> Result<[u8; N], DecodeError> {
     data.get(offset..)
         .and_then(|data| data.get(..N))
         .ok_or(DecodeError::Truncated)?
@@ -193,21 +193,29 @@ pub struct Rect {
 }
 
 impl Rect {
+    pub fn new(left: i32, top: i32, right: i32, bottom: i32) -> Result<Self, DecodeError> {
+        if left > right || top > bottom {
+            return Err(DecodeError::Parameter);
+        }
+        Ok(Self {
+            left,
+            top,
+            right,
+            bottom,
+        })
+    }
+
     pub fn bounds(&self) -> [i32; 4] {
         [self.left, self.top, self.right, self.bottom]
     }
 
     pub fn decode(data: &[u8]) -> Result<Self, DecodeError> {
-        let rect = Self {
-            top: i32::from_le_bytes(bytes(data, 0)?),
-            left: i32::from_le_bytes(bytes(data, 4)?),
-            bottom: i32::from_le_bytes(bytes(data, 8)?),
-            right: i32::from_le_bytes(bytes(data, 12)?),
-        };
-        if rect.left > rect.right || rect.top > rect.bottom {
-            return Err(DecodeError::Parameter);
-        }
-        Ok(rect)
+        Self::new(
+            i32::from_le_bytes(bytes(data, 4)?),
+            i32::from_le_bytes(bytes(data, 0)?),
+            i32::from_le_bytes(bytes(data, 12)?),
+            i32::from_le_bytes(bytes(data, 8)?),
+        )
     }
 
     pub fn clipped(&self, width: u32, height: u32) -> Result<[u32; 4], DecodeError> {
