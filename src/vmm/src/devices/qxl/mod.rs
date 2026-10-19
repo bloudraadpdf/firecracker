@@ -8,6 +8,7 @@ pub mod drawing;
 mod glyph;
 pub mod line;
 pub mod memory;
+mod path;
 pub mod protocol;
 pub mod raster;
 pub mod surface;
@@ -19,6 +20,8 @@ mod bitmap_tests;
 mod drawing_tests;
 #[cfg(test)]
 mod memory_tests;
+#[cfg(test)]
+mod path_tests;
 #[cfg(test)]
 mod surface_tests;
 #[cfg(test)]

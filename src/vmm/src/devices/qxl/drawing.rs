@@ -4,6 +4,7 @@
 use super::bitmap::{Bitmap, ScaleMode, ScaledBitmap, chunks};
 use super::glyph::GlyphString;
 use super::memory::Memory;
+use super::path::Path;
 use super::protocol::{DecodeError, Rect, bytes};
 use super::raster::{Operand, RasterOp, alpha_over, coverage_mix, ternary};
 use super::surface::Surface;
@@ -154,6 +155,67 @@ struct Background {
 }
 
 #[derive(Debug)]
+struct Stroke {
+    path: Path,
+    brush: Brush,
+    foreground: Option<RasterOp>,
+    background: Option<RasterOp>,
+}
+
+impl Stroke {
+    fn decode(
+        memory: &Memory,
+        addresses: &AddressSpace,
+        data: &[u8],
+    ) -> Result<Self, TransportError> {
+        let path = Path::decode(
+            memory,
+            addresses,
+            u64::from_le_bytes(bytes(data, 0)?),
+            &data[8..28],
+        )?;
+        let operation = |offset| -> Result<Option<RasterOp>, DecodeError> {
+            match u16::from_le_bytes(bytes(data, offset)?) {
+                0 => Ok(None),
+                descriptor => RasterOp::decode(descriptor, Operand::Brush).map(Some),
+            }
+        };
+        let foreground = operation(48)?;
+        let background = if path.is_styled() {
+            operation(50)?
+        } else {
+            None
+        };
+        let brush = if [foreground, background]
+            .into_iter()
+            .flatten()
+            .any(RasterOp::uses_operand)
+        {
+            Brush::decode(memory, addresses, &data[28..48])?
+        } else {
+            Brush::Solid(0)
+        };
+        Ok(Self {
+            path,
+            brush,
+            foreground,
+            background,
+        })
+    }
+
+    fn apply(&self, foreground: bool, x: u32, y: u32, destination: u32) -> u32 {
+        let op = if foreground {
+            self.foreground
+        } else {
+            self.background
+        };
+        op.map_or(destination, |op| {
+            op.apply(0, self.brush.sample(x, y), destination)
+        })
+    }
+}
+
+#[derive(Debug)]
 enum ImageAction {
     Raster(RasterOp),
     Opaque {
@@ -222,6 +284,7 @@ enum Operation {
         mask: Option<Mask>,
     },
     CopyBits((i32, i32)),
+    Stroke(Stroke),
     Text {
         string: GlyphString,
         foreground: Option<Paint>,
@@ -402,6 +465,11 @@ impl Drawable {
                     bounds,
                 )?
             }
+            10 => Operation::Stroke(Stroke::decode(
+                memory,
+                addresses,
+                &read::<52>(memory, addresses, address, payload)?,
+            )?),
             11 => {
                 let data = read::<68>(memory, addresses, address, payload)?;
                 let string =
@@ -540,6 +608,13 @@ impl Drawable {
         } else {
             None
         };
+        let mut stroke_pixels = if let Operation::Stroke(stroke) = &self.operation {
+            stroke.path.pixels(width, height)?
+        } else {
+            Vec::new()
+        }
+        .into_iter()
+        .peekable();
         let clips = self
             .clips
             .as_ref()
@@ -606,6 +681,23 @@ impl Drawable {
                         }
                     }
                     Operation::CopyBits(_) => sampler.as_ref().unwrap().sample(x, y),
+                    Operation::Stroke(stroke) => {
+                        while stroke_pixels
+                            .peek()
+                            .is_some_and(|pixel| (pixel.point[1], pixel.point[0]) < (y, x))
+                        {
+                            stroke_pixels.next();
+                        }
+                        let mut result = destination;
+                        while stroke_pixels
+                            .peek()
+                            .is_some_and(|pixel| pixel.point == [x, y])
+                        {
+                            let pixel = stroke_pixels.next().unwrap();
+                            result = stroke.apply(pixel.foreground, x, y, result);
+                        }
+                        result
+                    }
                     Operation::Text {
                         foreground,
                         background,
