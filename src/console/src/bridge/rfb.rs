@@ -176,10 +176,17 @@ impl KeyboardMapping {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Access {
+    Control,
+    View,
+}
+
 pub fn serve(
     stream: &mut (impl Read + Write),
     backend: &Backend,
     mapping: KeyboardMapping,
+    access: Access,
 ) -> io::Result<()> {
     read::<1>(stream)?;
     let frame = backend.frame()?;
@@ -238,6 +245,9 @@ pub fn serve(
                 if request[0] > 1 {
                     return Err(invalid("invalid key state"));
                 }
+                if access == Access::View {
+                    continue;
+                }
                 let keysym = mapping.keysym(u32::from_be_bytes(request[3..].try_into().unwrap()));
                 let mut pending_leds = 0;
                 if request[0] != 0 {
@@ -264,6 +274,9 @@ pub fn serve(
             }
             5 => {
                 let request = read::<5>(stream)?;
+                if access == Access::View {
+                    continue;
+                }
                 let x = u16::from_be_bytes([request[1], request[2]]);
                 let y = u16::from_be_bytes([request[3], request[4]]);
                 let buttons = request[0] & 1 | (request[0] & 2) << 1 | (request[0] & 4) >> 1;

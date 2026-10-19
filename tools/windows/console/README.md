@@ -78,6 +78,21 @@ protocol, not transport encryption; retain the SSH tunnel. The bridge rejects
 non-loopback bind addresses. Authenticated sessions remain connected while idle;
 the 30-second read deadline applies to the handshake only.
 
+## Read-only VNC viewer
+
+Keep the automation bridge in `rfb` mode. Start a separate read-only endpoint
+against the same console socket:
+
+```sh
+build/cargo_target/debug/firecracker-console /run/vm/console.sock rfb-view 127.0.0.1:5902
+```
+
+This endpoint ignores keyboard and pointer events. Connecting or disconnecting
+does not reset guest input, so an observer cannot release keys held by the test
+runner. It accepts the same optional password file as `rfb`. Each bridge accepts
+one viewer at a time; use a separate port for each observer. Keep one controlling
+bridge per VM.
+
 ## Browser console
 
 Stop any existing RFB bridge for this VM before starting its WebSocket bridge.
