@@ -391,3 +391,21 @@ reference. Failed publication cancels only its unpublished output. Explicit
 shape release ends the cache reference. This component does not register native
 callbacks; PDev integration, cache lookup and native bitmap readback remain
 part of the full display-driver port.
+
+## Native hardware session
+
+`src/hardware.rs` connects a mapped adapter to its command, cursor and release
+rings and resource pool. The session borrows the mapping, owns the guest ring
+endpoints and creates one control channel. Activation registers the video slot,
+reads its acknowledged generation and creates the primary surface. One adapter
+owner must serialise this session across all PDevs and power/mode callbacks.
+
+Normal shutdown destroys host surfaces, flushes or resets the device as required
+by its revision, drains releases and removes the video slot. A failed operation
+retains the session and all mappings. Explicit reset can stop unknown in-flight
+work; it invalidates the old ring and slot generation. A stopped session cannot
+be restarted. Release all retained surface/cache tokens before unmapping.
+
+This session is the native hardware part of the unfinished PDev integration.
+It does not register GDI callbacks, migrate live GDI bitmaps to system RAM or
+replace the final Windows qualification. Those remain required before shipping.

@@ -291,3 +291,32 @@ cursor callers supply its first resource. Host release must follow all reads
 of the shape, including its chunk, before that reference is reclaimed. Keep
 pool mappings live through all releases. Nonzero cursor IDs must identify the
 same shape bytes for their entire host-cache lifetime.
+
+## Native hardware session
+
+`Hardware` borrows the mapped device and takes the sole control channel, guest
+ring endpoints and arenas for its generation. Keep one session per physical
+adapter under exclusive access across PDevs, modes and power callbacks. It is
+not a per-PDev lock. The enclosing native device owner must enforce this rule.
+The primary area stays outside both allocators. The layout must match the mode
+selected when the mapped device was created.
+
+Before activation, no old command, token or CPU pixel user may remain. A slot
+generation is read only after its add command completes. A failed activation,
+completion wait or release chain retains mappings and stops session operations.
+No destructor sends hardware commands or treats a timeout as quiescence.
+
+Stop new GDI/CPU submissions and preserve live bitmap contents before shutdown.
+Legacy shutdown resets through the miniport, invalidating old rings/slots;
+later revisions drain completed outputs before video-slot removal. Explicit
+reset can recover unknown outstanding work only when its completed miniport
+operation proves all old reads and delayed release writes have stopped. It
+discards pending output references while cache/surface tokens remain owned.
+Never reuse a stopped session; query a fresh interface for the next generation.
+
+The primary draw area borrows the session exclusively through GDI unlock and
+bitmap deletion. It synchronises prior host work before exposing CPU pixels.
+After CPU writes, drop that area and issue the corresponding update before
+depending on host display contents. Unmap additionally requires all cache,
+surface and builder tokens released and every GDI/CPU user stopped; the
+session's `can_unmap` check covers its state and pool only.

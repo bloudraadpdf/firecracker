@@ -476,6 +476,11 @@ impl<'memory> Pool<'memory> {
         self.outputs == 0 && self.resources == 0
     }
 
+    /// Includes unpublished builders and host-pending outputs.
+    pub fn outstanding_outputs(&self) -> usize {
+        self.outputs
+    }
+
     fn free_main(&mut self, allocation: Allocation<'memory>) {
         self.main
             .release(allocation)

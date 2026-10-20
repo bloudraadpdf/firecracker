@@ -505,9 +505,12 @@ mod native {
 pub use native::MappedDevice;
 
 #[cfg(test)]
+pub(crate) mod test_utils;
+
+#[cfg(test)]
 mod tests {
+    use super::test_utils::{info, pointer};
     use super::*;
-    use crate::driver_info::MemSlot;
     use crate::surface::Format;
 
     #[test]
@@ -531,78 +534,6 @@ mod tests {
             assert_eq!(response.framebuffer_base.cast::<u8>().read(), 0x6b);
         }
         assert_eq!(pixel, 0x6b);
-    }
-
-    fn pointer<T>(address: usize) -> *mut T {
-        core::ptr::without_provenance_mut(address)
-    }
-
-    fn info() -> DriverInfo {
-        let mut info = DriverInfo {
-            version: 3,
-            pci_revision: 5,
-            surface_count: 256,
-            create_non_primary_surfaces: 1,
-            main_slot_id: 1,
-            slot_count: 3,
-            slot_id_bits: 8,
-            slot_generation_bits: 8,
-            main_slot: MemSlot {
-                generation: 4,
-                physical_start: 0xe0000000,
-                physical_end: 0xe0003000,
-                virtual_start: 0x10000000,
-                virtual_end: 0x10003000,
-            },
-            primary_area: pointer(0x10000000),
-            primary_area_size: 4096,
-            io_pages_virtual: pointer(0x10001000),
-            io_pages_physical: 0xe0001000,
-            page_count: 2,
-            display_event: pointer(0x30000000),
-            cursor_event: pointer(0x30000010),
-            sleep_event: pointer(0x30000020),
-            io_command_event: pointer(0x30000030),
-            update_id: pointer(0x20000008),
-            compression_level: pointer(0x2000000c),
-            log_level: pointer(0x20000010),
-            clock: pointer(0x20000030),
-            slot_generation: pointer(0x20000044),
-            framebuffer_physical: 0xf0000000,
-            ..DriverInfo::default()
-        };
-        let header = 0x10004000;
-        info.command_ring = pointer(header + COMMAND_RING_OFFSET as usize);
-        info.cursor_ring = pointer(header + CURSOR_RING_OFFSET as usize);
-        info.release_ring = pointer(header + RELEASE_RING_OFFSET as usize);
-        info.update_area = pointer(header + UPDATE_AREA_OFFSET as usize);
-        info.update_surface = pointer(header + UPDATE_SURFACE_OFFSET as usize);
-        info.ram_slot_start = pointer(header + SLOT_START_OFFSET as usize);
-        info.ram_slot_end = pointer(header + SLOT_END_OFFSET as usize);
-        info.primary_surface_create = pointer(header + PRIMARY_CREATE_OFFSET as usize);
-        info.monitors_config = pointer(header + MONITORS_CONFIG_OFFSET as usize);
-        info.log_buffer = pointer(header + 12);
-        info.notify_command_port = pointer(0xc000);
-        info.notify_cursor_port = pointer(0xc001);
-        info.notify_oom_port = pointer(0xc004);
-        info.update_area_port = pointer(0xc002);
-        info.log_port = pointer(0xc007);
-        info.memslot_add_port = pointer(0xc008);
-        info.memslot_delete_port = pointer(0xc009);
-        info.create_primary_port = pointer(0xc00c);
-        info.destroy_primary_port = pointer(0xc00d);
-        info.destroy_surface_wait_port = pointer(0xc00e);
-        info.destroy_all_surfaces_port = pointer(0xc00f);
-        info.update_area_async_port = pointer(0xc010);
-        info.memslot_add_async_port = pointer(0xc011);
-        info.create_primary_async_port = pointer(0xc012);
-        info.destroy_primary_async_port = pointer(0xc013);
-        info.destroy_surface_async_port = pointer(0xc014);
-        info.destroy_all_surfaces_async_port = pointer(0xc015);
-        info.flush_surfaces_async_port = pointer(0xc016);
-        info.flush_release_port = pointer(0xc017);
-        info.monitors_config_port = pointer(0xc018);
-        info
     }
 
     fn layout() -> Layout {
