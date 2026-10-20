@@ -4,6 +4,7 @@
 #![no_std]
 
 pub mod cosmetic;
+pub mod driver_info;
 pub mod hash;
 pub mod memory;
 pub mod modes;

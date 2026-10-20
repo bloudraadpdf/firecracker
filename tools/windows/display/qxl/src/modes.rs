@@ -50,6 +50,36 @@ const _: () = {
 };
 
 impl VideoModeInformation {
+    pub fn encode(&self, output: &mut [u8]) -> Option<usize> {
+        let output = output.get_mut(..80)?;
+        let fields = [
+            self.length,
+            self.mode_index,
+            self.width,
+            self.height,
+            self.stride,
+            self.planes,
+            self.bits_per_plane,
+            self.frequency,
+            self.width_mm,
+            self.height_mm,
+            self.red_bits,
+            self.green_bits,
+            self.blue_bits,
+            self.red_mask,
+            self.green_mask,
+            self.blue_mask,
+            self.attributes,
+            self.bitmap_width,
+            self.bitmap_height,
+            self.driver_attributes,
+        ];
+        for (bytes, value) in output.as_chunks_mut::<4>().0.iter_mut().zip(fields) {
+            *bytes = value.to_le_bytes();
+        }
+        Some(80)
+    }
+
     /// Port of FillVidModeInfo for custom resolutions; 16-bit modes use RGB555.
     pub fn custom(index: u32, width: u32, height: u32, depth: u32) -> Result<Self, ModeError> {
         let bytes_per_pixel = match depth {
@@ -250,6 +280,19 @@ impl<'a> ModeTable<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encodes_windows_mode_record_and_rejects_short_output() {
+        let mode = VideoModeInformation::custom(0x11223344, 641, 480, 24).unwrap();
+        let mut output = [0xa5; 81];
+        assert_eq!(mode.encode(&mut output[..79]), None);
+        assert!(output.iter().all(|&byte| byte == 0xa5));
+        assert_eq!(mode.encode(&mut output), Some(80));
+        assert_eq!(&output[..8], &[80, 0, 0, 0, 0x44, 0x33, 0x22, 0x11]);
+        assert_eq!(&output[16..20], &1924u32.to_le_bytes());
+        assert_eq!(&output[52..56], &0x00ff0000u32.to_le_bytes());
+        assert_eq!(output[80], 0xa5);
+    }
 
     #[test]
     fn custom_modes_match_xddm_layout_and_colour_masks() {
