@@ -22,6 +22,17 @@ record! { VideoMemoryInformation {
     framebuffer_length: u32,
 }}
 
+#[cfg(any(test, windows))]
+pub(crate) fn encode_mapping(base: *mut c_void, length: u32, bytes: &mut [u8]) -> Option<usize> {
+    VideoMemoryInformation {
+        video_base: base,
+        video_length: length,
+        framebuffer_base: base,
+        framebuffer_length: length,
+    }
+    .encode(bytes)
+}
+
 const _: () = {
     assert!(offset_of!(VideoMemoryInformation, framebuffer_base) == 2 * size_of::<usize>());
     assert!(size_of::<VideoMemoryInformation>() == 4 * size_of::<usize>());
@@ -498,6 +509,29 @@ mod tests {
     use super::*;
     use crate::driver_info::MemSlot;
     use crate::surface::Format;
+
+    #[test]
+    fn miniport_mapping_response_keeps_both_native_pointers_live() {
+        let mut pixel = 0x5au8;
+        let mut response = VideoMemoryInformation::default();
+        // SAFETY: the writable native output admits arbitrary pointer/integer
+        // values. The encoder fills its complete extent, including padding,
+        // before typed reads; the temporary exclusive byte view then ends.
+        let bytes = unsafe {
+            core::slice::from_raw_parts_mut(
+                core::ptr::from_mut(&mut response).cast::<u8>(),
+                size_of_val(&response),
+            )
+        };
+        encode_mapping(core::ptr::from_mut(&mut pixel).cast(), 1, bytes).unwrap();
+        assert_eq!((response.video_length, response.framebuffer_length), (1, 1));
+        // SAFETY: both decoded pointers must retain the live pixel allocation.
+        unsafe {
+            response.video_base.cast::<u8>().write(0x6b);
+            assert_eq!(response.framebuffer_base.cast::<u8>().read(), 0x6b);
+        }
+        assert_eq!(pixel, 0x6b);
+    }
 
     fn pointer<T>(address: usize) -> *mut T {
         core::ptr::without_provenance_mut(address)
