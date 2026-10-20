@@ -23,10 +23,16 @@ PCI ISA bridge -> SioBusDxe -> PS/2 keyboard -> text input
 PCI UHCI -> UhciDxe -> UsbBusDxe -> HID tablet -> absolute pointer
 ```
 
-For explicit `cloud-hv` firmware, omit `console.vga_rom_path`. QemuVideoDxe
-configures the framebuffer through BAR0 and the Bochs register interface through
-BAR2; it does not execute SeaVGABIOS. The VGA/GOP device remains attached, with
-no expansion-ROM resource. SeaBIOS requires its separate VGA option ROM.
+For explicit `cloud-hv` firmware, omit `console.vga_rom_path`. QemuVideoDxe uses
+BAR0 for the framebuffer. Standard VGA and virtio VGA use BAR2 for the Bochs
+registers. QXL uses Bochs I/O ports and reads the drawable framebuffer size from
+its QXL ROM data in BAR2. This data BAR is part of the QXL device; it is
+separate from the executable VGA option ROM.
+
+The GOP driver does not execute SeaVGABIOS. The display remains attached without
+a PCI expansion-ROM resource. SeaBIOS requires its separate VGA option ROM. QXL
+guest validation currently uses SeaBIOS; the firmware's QXL driver match alone
+does not establish a tested CloudHv/QXL boot.
 
 CloudHv already contains GraphicsConsoleDxe, ConSplitter and the ATA/ATAPI
 storage stack. The patch adds QemuVideoDxe, SioBusDxe and Ps2KeyboardDxe. The
