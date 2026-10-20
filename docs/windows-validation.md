@@ -83,7 +83,7 @@ disabled. The [pinned Windows driver source](https://github.com/freedesktop-unof
 uses synchronous I/O for revision 2
 and raw bitmap fallback when the ROM's compression level is zero, including for
 alpha images. It initialises `self_bitmap` to zero and has no composite command
-producer. The remaining integration and native checks must verify those paths
+producer. Native guest checks must verify those paths
 with the signed packages.
 
 Cursor commands decode set, move, hide and trail parameters without reading
@@ -103,8 +103,7 @@ submissions. A full release ring does not prevent those commands from completing
 their acknowledgements wait in a bounded queue until the guest consumes releases.
 At most 4,096 acknowledgements can wait there; reaching that limit stops further
 execution with `Busy`. Slot removal also waits until release links are published.
-PCI integration must keep polling pending acknowledgements even when command
-rings are empty.
+The PCI timer polls pending acknowledgements even when command rings are empty.
 
 Cursor state applies set, move and hide commands, including implicit visibility
 on movement. Trails sample positions at millisecond intervals and expire while
@@ -112,8 +111,8 @@ stationary. Repeated positions draw once, and cursor painting leaves guest
 display memory unchanged. Trails are bounded to 64 samples, with a minimum
 interval of one millisecond. Controller checks cover ordering, pressure and
 retry, slot invalidation, signed rows, padding, interrupt masks and cursor trails.
-The controller still needs PCI, console and snapshot integration and native
-guest validation.
+PCI, console and snapshot integration is connected. Native guest validation
+remains incomplete.
 
 The PCI memory layer maps RAM, VRAM and the read-only protocol ROM through the
 existing KVM slot owner. Boot VGA and QXL share the first 16 MiB of RAM; they do
@@ -124,11 +123,13 @@ conflicting KVM mapping, cleanup after disable/drop, live relocation and failed
 relocation without partial metadata changes. A real vCPU can read the protected
 ROM, and a guest write exits as MMIO without changing its bytes. The VGA option
 ROM loader and BAR handling are shared with the existing display implementation.
-PCI identity, bus registration, I/O and interrupt/event integration remain to be
-connected before the guest driver can bind.
+PCI identity, bus registration, I/O, shared INTx and event polling are connected.
+The `qxl` console profile routes native frames and cursor updates to the same
+socket used by VNC and the native viewer. Format41 saves and validates the
+adapter, shared boot VGA, private banks, queues, deferred releases and cursor.
 The layout follows
 the published [QXL device ABI](https://sources.debian.org/src/spice-protocol/0.12.14-1/spice/qxl_dev.h/).
-It does not expose a QXL PCI device yet. Component checks do not establish guest
+It exposes one revision-two QXL PCI device. Component checks do not establish guest
 driver loading or rendering. Graphics qualification across all agreed guests
 must finish before work returns to unrelated platform features.
 

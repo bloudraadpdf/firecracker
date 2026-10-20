@@ -3,7 +3,8 @@
 Build SeaVGABIOS from SeaBIOS 1.17.0, revision
 `b52ca86e094d19b58e2304417787e96b940e39c6`. This is the same source revision as
 the [serial PVH firmware](../seabios/README.md). The display option ROM is a
-separate build. It uses the Bochs DISPI interface and PCI ID `1234:1111`.
+separate build. Both console profiles use the Bochs DISPI interface. The basic
+VGA profile uses PCI ID `1234:1111`; the QXL profile uses `1b36:0100`.
 Firmware diagnostics use COM1 (`0x3f8`) at debug level 3; debug I/O-port output
 is disabled.
 
@@ -17,23 +18,38 @@ firmware.
 
 Use a separate source/output directory to preserve the serial firmware. The
 source requires GCC with 32-bit support, binutils, GNU make and Python 3. From
-the Firecracker root:
+the Firecracker root, choose the paths for the configured display.
+
+For `console.display: "vga"`, including the default:
+
+```sh
+vgabios_build=build/windows/console/seavgabios
+vgabios_config=resources/firmware/seabios-console/vgabios.config
+```
+
+For `console.display: "qxl"`:
+
+```sh
+vgabios_build=build/windows/console/seavgabios-qxl
+vgabios_config=resources/firmware/seabios-console/qxl-vgabios.config
+```
+
+Build the selected profile:
 
 ```sh
 mkdir -p build/windows/console
 git clone --depth 1 --branch rel-1.17.0 https://git.seabios.org/seabios.git \
-  build/windows/console/seavgabios
-test "$(git -C build/windows/console/seavgabios rev-parse HEAD)" = \
+  "$vgabios_build"
+test "$(git -C "$vgabios_build" rev-parse HEAD)" = \
   b52ca86e094d19b58e2304417787e96b940e39c6
-git -C build/windows/console/seavgabios apply \
+git -C "$vgabios_build" apply \
   "$PWD/resources/firmware/seabios-console/dispi-modes.patch"
-cp resources/firmware/seabios-console/vgabios.config \
-  build/windows/console/seavgabios/.config
-make -C build/windows/console/seavgabios olddefconfig
-make -C build/windows/console/seavgabios -j2 PYTHON=python3
+cp "$vgabios_config" "$vgabios_build/.config"
+make -C "$vgabios_build" olddefconfig
+make -C "$vgabios_build" -j2 PYTHON=python3
 ```
 
-Use `build/windows/console/seavgabios/out/vgabios.bin` as the PCI expansion ROM.
+Use `$vgabios_build/out/vgabios.bin` as the PCI expansion ROM.
 Continue to use the coreboot SeaBIOS PVH handoff built by the existing
 instructions. No VGA source is linked into the Firecracker binary.
 
@@ -69,6 +85,12 @@ frame is row-major `0x00RRGGBB`, separate from guest pixel layout. Legacy
 aperture accesses cover physical `A0000-BFFFF`; that range must not be mapped as
 ordinary KVM RAM. Linear video-memory access through the BAR uses the same
 backing bytes as VGA planes.
+
+The QXL firmware profile sets the matching PCIR identity and uses BAR0 for the
+linear framebuffer. It accesses DISPI through I/O ports, leaving QXL's BAR2
+protocol ROM untouched. The native Windows driver later replaces the boot
+display through the QXL interface. The firmware build does not qualify guest
+driver binding or native rendering.
 
 The implementation does not yet qualify every historical VGA mode. In particular
 CGA interleaved modes, programmable character blink, underline, and
