@@ -24,6 +24,8 @@ pub mod pci;
 #[cfg(feature = "windows")]
 pub mod protocol;
 #[cfg(feature = "windows")]
+mod quic;
+#[cfg(feature = "windows")]
 pub mod raster;
 pub mod state;
 #[cfg(feature = "windows")]

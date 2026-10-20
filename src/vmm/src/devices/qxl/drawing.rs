@@ -309,8 +309,7 @@ impl Operation {
                     source_has_alpha, ..
                 } = &mut action
                 {
-                    *source_has_alpha =
-                        matches!(read::<1>(memory, addresses, address, 18)?[0], 9 | 10);
+                    *source_has_alpha = bitmap.has_alpha();
                 }
                 ImagePixels::Bitmap(bitmap)
             };

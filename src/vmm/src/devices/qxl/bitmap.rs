@@ -50,9 +50,14 @@ pub struct Bitmap {
     width: u32,
     height: u32,
     pixels: Vec<u32>,
+    has_alpha: bool,
 }
 
 impl Bitmap {
+    pub(super) fn has_alpha(&self) -> bool {
+        self.has_alpha
+    }
+
     pub(super) fn validate_rect(&self, rect: Rect) -> Result<(), DecodeError> {
         let [left, top, right, bottom] = rect.bounds();
         if left < 0
@@ -95,6 +100,29 @@ impl Bitmap {
         let pointer = |offset| u64::from_le_bytes(header[offset..offset + 8].try_into().unwrap());
         let width = word(10);
         let height = word(14);
+        if header[8] == 1 {
+            if mask || header[9] & !3 != 0 {
+                return Err(DecodeError::Parameter.into());
+            }
+            let length = usize::try_from(word(18)).map_err(|_| DecodeError::Parameter)?;
+            let data = chunks(
+                memory,
+                addresses,
+                address.checked_add(22).ok_or(DecodeError::Address)?,
+                length,
+            )?;
+            let pixels =
+                super::quic::decode(&data, width, height).map_err(|error| match error {
+                    super::quic::Error::Truncated => DecodeError::Truncated,
+                    super::quic::Error::Invalid => DecodeError::Parameter,
+                })?;
+            return Ok(Self {
+                width,
+                height,
+                pixels,
+                has_alpha: data[8] == 5,
+            });
+        }
         let format = header[18];
         let flags = header[19];
         let stride = word(28) as usize;
@@ -151,6 +179,7 @@ impl Bitmap {
             width,
             height,
             pixels,
+            has_alpha: matches!(format, 9 | 10),
         })
     }
 
@@ -170,6 +199,7 @@ impl Bitmap {
             width,
             height,
             pixels,
+            has_alpha: true,
         })
     }
 

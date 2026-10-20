@@ -13,6 +13,78 @@ const DATA: usize = 512;
 const PALETTE: usize = 256;
 
 #[test]
+fn quic_images_decode_inline_and_chained_storage_with_alpha() {
+    let cases: &[(u32, &[u8], u32)] = &[
+        (
+            1,
+            include_bytes!("../../../../../tests/data/qxl/quic/1-37-9-1.quic"),
+            0xff00_0000,
+        ),
+        (
+            2,
+            include_bytes!("../../../../../tests/data/qxl/quic/2-37-9-1.quic"),
+            0xff7b_4200,
+        ),
+        (
+            3,
+            include_bytes!("../../../../../tests/data/qxl/quic/3-37-9-1.quic"),
+            0xff7a_3d00,
+        ),
+        (
+            4,
+            include_bytes!("../../../../../tests/data/qxl/quic/4-37-9-1.quic"),
+            0xff7a_3d00,
+        ),
+        (
+            5,
+            include_bytes!("../../../../../tests/data/qxl/quic/5-37-9-1.quic"),
+            0xb77a_3d00,
+        ),
+    ];
+    for &(kind, data, first_pixel) in cases {
+        for chained in [false, true] {
+            let (memory, addresses) = setup();
+            let mut descriptor = [0u8; 22];
+            descriptor[8] = 1;
+            descriptor[10..14].copy_from_slice(&37u32.to_le_bytes());
+            descriptor[14..18].copy_from_slice(&9u32.to_le_bytes());
+            descriptor[18..].copy_from_slice(&u32::try_from(data.len()).unwrap().to_le_bytes());
+            memory.write(Region::Ram, IMAGE, &descriptor).unwrap();
+            let inline = IMAGE + descriptor.len();
+            let second = 1 << 20;
+            let split = if chained { data.len() / 2 } else { data.len() };
+            let mut first = Vec::new();
+            first.extend(u32::try_from(split).unwrap().to_le_bytes());
+            first.extend(0u64.to_le_bytes());
+            first.extend(if chained { SLOT | second as u64 } else { 0 }.to_le_bytes());
+            first.extend(&data[..split]);
+            memory.write(Region::Ram, inline, &first).unwrap();
+            if chained {
+                let mut tail = Vec::new();
+                tail.extend(u32::try_from(data.len() - split).unwrap().to_le_bytes());
+                tail.extend((SLOT | inline as u64).to_le_bytes());
+                tail.extend(0u64.to_le_bytes());
+                tail.extend(&data[split..]);
+                memory.write(Region::Ram, second, &tail).unwrap();
+            }
+            let bitmap = Bitmap::decode(&memory, &addresses, SLOT | IMAGE as u64).unwrap();
+            assert_eq!(bitmap.dimensions(), (37, 9));
+            assert_eq!(bitmap.pixels().len(), 333);
+            assert_eq!(bitmap.pixels()[0], first_pixel);
+            assert_eq!(bitmap.has_alpha(), kind == 5);
+            Bitmap::decode_mask(&memory, &addresses, SLOT | IMAGE as u64).unwrap_err();
+            memory.write(Region::Ram, IMAGE + 9, &[4]).unwrap();
+            Bitmap::decode(&memory, &addresses, SLOT | IMAGE as u64).unwrap_err();
+            memory.write(Region::Ram, IMAGE + 9, &[0]).unwrap();
+            memory
+                .write(Region::Ram, inline + 20 + 12, &38u32.to_le_bytes())
+                .unwrap();
+            Bitmap::decode(&memory, &addresses, SLOT | IMAGE as u64).unwrap_err();
+        }
+    }
+}
+
+#[test]
 fn nearest_uses_gdi_pixel_centres_for_enlargement_and_reduction() {
     let bitmap = Bitmap::from_pixels(24, 20, (0..480).collect()).unwrap();
     let source = Rect::new(0, 0, 24, 20).unwrap();
@@ -147,6 +219,7 @@ fn direct_rgb_observes_row_order_padding_and_alpha() {
             memory.write(Region::Ram, DATA, &bytes).unwrap();
             let bitmap = decode(&memory, &addresses).unwrap();
             assert_eq!(bitmap.dimensions(), (1, 2));
+            assert_eq!(bitmap.has_alpha(), matches!(format, 9 | 10));
             assert_eq!(
                 bitmap.pixels(),
                 if top_down {
