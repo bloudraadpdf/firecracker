@@ -71,6 +71,8 @@ impl<const ITEM_BYTES: usize, const CAPACITY: u32> Mapping<ITEM_BYTES, CAPACITY>
 pub struct CommandRing(Mapping<16, 32>);
 
 impl CommandRing {
+    pub const BYTES: usize = HEADER_BYTES + 16 * 32;
+
     /// # Safety
     /// `base..base+length` must remain live, readable and writable for this
     /// endpoint's lifetime. It must be a little-endian QXL command/cursor ring
@@ -113,6 +115,8 @@ impl CommandRing {
 pub struct ReleaseRing(Mapping<8, 8>);
 
 impl ReleaseRing {
+    pub const BYTES: usize = HEADER_BYTES + 8 * 8;
+
     /// # Safety
     /// The mapping and serialisation requirements are those of CommandRing::new,
     /// but this mapping must be the QXL release ring. The host is its producer;

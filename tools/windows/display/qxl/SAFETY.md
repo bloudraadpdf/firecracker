@@ -234,3 +234,22 @@ Thin pointer fields copy their native representation directly, preserving
 provenance through the ABI record. Converting them to integer byte arrays loses
 the provenance needed when a decoded pointer is used. The native record format
 is for supported little-endian Windows targets, not a pointer serialisation API.
+
+## Display mappings
+
+`MappedDevice` runs mode selection, interface query and video-map IOCTLs in the
+serialised hardware-enable path. It must remain live through every dependent
+pool, ring, bitmap and host command. Destroy those users before its video-map
+guard issues the unmap request, while the miniport handle remains live.
+
+The interface validator checks integer geometry without dereferencing reported
+addresses. Primary pixels and I/O pages fit the registered allocation slot;
+control records occupy a separate RAM header. Packed slot-control u64 fields
+can be four-byte aligned and must not become aligned Rust references. ROM and
+event addresses retain the trusted miniport mapping contract.
+
+Framebuffer validation rejects overlap with main RAM, its control header and
+the ROM view, plus reported physical aliasing with main RAM. It does not prove
+the existence or cache attributes of a kernel mapping. Native constructors
+require those properties and their lifetimes from the miniport. Region getters
+return raw pointers and do not extend mapping lifetimes.

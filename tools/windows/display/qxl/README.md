@@ -336,3 +336,20 @@ It drops the temporary mode buffer before creating the palette and owns that
 palette through device teardown. `device_info()` supplies the owner's live
 palette handle when the callback encodes its output. Preparation does not
 activate hardware or register an incomplete callback table.
+
+## Mapped miniport interface
+
+`src/display_device.rs` checks the version-3 miniport interface before creating
+display resources. Primary pixels and I/O pages must fit the main memory slot,
+remain disjoint, and agree with the reported physical addresses. Rings and
+control records use the separate shared RAM header layout; they are not part
+of the allocatable slot. ROM pointers and event handles retain the miniport's
+mapping and lifetime contract.
+
+Native mapping selects the configured mode, queries the interface and requests
+the complete video BAR. Once an address is returned, its guard pairs the map
+with an unmap request on failure or teardown. Native PDev code must retain it
+through all GDI, pool and host access, and stop those users before destruction.
+Validation checks reported geometry; it cannot prove that a kernel address is
+mapped. Five focused tests cover the geometry and rejection paths; native
+mapping and teardown still require Windows qualification.

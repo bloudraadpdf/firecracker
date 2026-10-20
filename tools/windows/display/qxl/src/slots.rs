@@ -86,6 +86,10 @@ impl MemorySlot {
         (self.physical_start, self.physical_end)
     }
 
+    pub fn virtual_range(self) -> (u64, u64) {
+        (self.virtual_start, self.virtual_start + self.length)
+    }
+
     /// Port of PA: encode a guest virtual address as a QXLPHYSICAL value.
     pub fn encode(self, address: u64, bytes: u64) -> Result<u64, SlotError> {
         let offset = address

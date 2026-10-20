@@ -11,7 +11,11 @@ use core::sync::atomic::{AtomicU8, Ordering, fence};
 
 use crate::driver_info::{DriverInfo, MemSlot};
 use crate::ioctl::*;
-use crate::memory::{COMMAND_RING_OFFSET, CURSOR_RING_OFFSET, RELEASE_RING_OFFSET};
+use crate::memory::{
+    COMMAND_RING_OFFSET, CURSOR_RING_OFFSET, MONITORS_CONFIG_OFFSET, PRIMARY_CREATE_OFFSET,
+    RELEASE_RING_OFFSET, SLOT_END_OFFSET, SLOT_START_OFFSET, UPDATE_AREA_OFFSET,
+    UPDATE_SURFACE_OFFSET,
+};
 use crate::mode_pool::ModePool;
 use crate::modes::ModeError;
 use crate::resources::DeviceResources;
@@ -209,7 +213,10 @@ impl Adapter {
         // SAFETY: the caller serialises this setup with display and power requests.
         unsafe {
             self.mask(INTERRUPT_MASK);
-            for (offset, value) in [(5276, slot.physical_start), (5284, slot.physical_end)] {
+            for (offset, value) in [
+                (SLOT_START_OFFSET, slot.physical_start),
+                (SLOT_END_OFFSET, slot.physical_end),
+            ] {
                 for (byte, value) in value.to_le_bytes().into_iter().enumerate() {
                     // The packed memory-slot fields need not be u64-aligned.
                     write_volatile(self.header(offset).add(byte), value);
@@ -328,8 +335,8 @@ impl Adapter {
             update_id: self.rom(8).cast(),
             compression_level: self.rom(12).cast(),
             update_area_port: port(2),
-            update_area: self.header(5256).cast(),
-            update_surface: self.header(5272).cast(),
+            update_area: self.header(UPDATE_AREA_OFFSET).cast(),
+            update_surface: self.header(UPDATE_SURFACE_OFFSET).cast(),
             clock: self.rom(48).cast(),
             log_port: port(7),
             log_buffer: self.header(12),
@@ -339,8 +346,8 @@ impl Adapter {
             slot_id_bits: info.slot_id_bits,
             slot_generation_bits: info.slot_generation_bits,
             slot_generation: self.rom(68),
-            ram_slot_start: self.header(5276).cast(),
-            ram_slot_end: self.header(5284).cast(),
+            ram_slot_start: self.header(SLOT_START_OFFSET).cast(),
+            ram_slot_end: self.header(SLOT_END_OFFSET).cast(),
             main_slot: self.slot()?,
             destroy_surface_wait_port: port(14),
             create_primary_port: port(12),
@@ -351,11 +358,11 @@ impl Adapter {
             monitors_config_port: port(24),
             pci_revision: resources.revision,
             device_id: info.device_id,
-            primary_surface_create: self.header(5292).cast(),
+            primary_surface_create: self.header(PRIMARY_CREATE_OFFSET).cast(),
             surface_count: info.surface_count,
             framebuffer_physical: resources.vram.physical() as u64,
             create_non_primary_surfaces: u8::from(surfaces_enabled),
-            monitors_config: self.header(5340).cast(),
+            monitors_config: self.header(MONITORS_CONFIG_OFFSET).cast(),
         })
     }
 }
