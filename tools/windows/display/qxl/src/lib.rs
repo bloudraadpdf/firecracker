@@ -15,3 +15,6 @@ pub mod videoport;
 
 #[cfg(all(windows, any(target_arch = "x86", target_arch = "x86_64")))]
 pub mod resources;
+
+#[cfg(all(windows, any(target_arch = "x86", target_arch = "x86_64")))]
+pub mod mode_pool;

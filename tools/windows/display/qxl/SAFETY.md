@@ -66,3 +66,11 @@ Memory access stays within the requested BAR length even if Windows returns
 a larger mapping. `Mapping::address` returns a raw pointer; it does not permit
 access after unmap. I/O port pointers use wrapping arithmetic because they are
 opaque port addresses, not Rust memory allocations.
+
+`ModePool` owns a stable VideoPort allocation containing an immutable mode-table
+snapshot. Its internal mode-state lifetime is erased to `'static`; that state
+and its borrowed slice must never be exposed or moved out. Public methods
+return values or iterators tied to the owner borrow. Destruction drops state
+before freeing the allocation. Construction errors retain the allocation guard
+until all temporary mode-table borrows have ended. All access and destruction
+require PASSIVE_LEVEL, and the device extension must remain live until then.

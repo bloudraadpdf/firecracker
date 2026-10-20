@@ -95,9 +95,6 @@ mod tests {
         let input = Aligned([0xff, 0, 1, 2, 3, 4, 5, 6]);
         let bytes = &input.0[1..];
         assert_eq!(bytes.as_ptr().addr() % 4, 1);
-        assert_eq!(
-            murmur2a(bytes, 17),
-            murmur2a(&[0, 1, 2, 3, 4, 5, 6], 17)
-        );
+        assert_eq!(murmur2a(bytes, 17), murmur2a(&[0, 1, 2, 3, 4, 5, 6], 17));
     }
 }
