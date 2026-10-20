@@ -176,7 +176,7 @@ impl Interface {
                 return Err(Error::InvalidPort);
             }
         }
-        if info.pci_revision >= 4 {
+        if info.pci_revision >= REVISION_ASYNC {
             for port in [
                 info.update_area_async_port,
                 info.memslot_add_async_port,
@@ -192,7 +192,7 @@ impl Interface {
                 }
             }
         }
-        if info.pci_revision >= 5 && info.monitors_config_port.is_null() {
+        if info.pci_revision >= REVISION_MONITORS && info.monitors_config_port.is_null() {
             return Err(Error::InvalidPort);
         }
         for port in [
@@ -744,6 +744,24 @@ mod tests {
                 layout()
             ),
             Err(Error::InvalidResponse)
+        ));
+    }
+
+    #[test]
+    fn revision_three_requires_async_ports_and_revision_four_requires_monitors() {
+        let mut asynchronous = info();
+        asynchronous.pci_revision = 3;
+        asynchronous.create_primary_async_port = core::ptr::null_mut();
+        assert!(matches!(
+            Interface::validate(&asynchronous, layout()),
+            Err(Error::InvalidPort)
+        ));
+        let mut monitors = info();
+        monitors.pci_revision = 4;
+        monitors.monitors_config_port = core::ptr::null_mut();
+        assert!(matches!(
+            Interface::validate(&monitors, layout()),
+            Err(Error::InvalidPort)
         ));
     }
 
