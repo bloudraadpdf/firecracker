@@ -5,10 +5,10 @@ and video miniport (`qxl.sys`) to Rust for Windows XP x86 and Windows 7 x64.
 It is outside the Firecracker Apache-2.0 workspace. It has no DDK, C compiler,
 CRT or third-party Rust dependencies.
 
-The port is in progress. The current crate contains cosmetic-line conversion
-and miniport mode handling; it does not yet produce an installable driver. The
-installed vendor binaries remain validation references, not the final
-implementation.
+The port is in progress. The current crate builds unsigned miniport images and
+contains shared display-driver components. It does not yet produce an
+installable driver package. The installed vendor binaries remain validation
+references, not the final implementation.
 
 ## Source and licence
 
@@ -76,7 +76,7 @@ The port covers the full XP/7 driver package. The remaining source mapping is:
 
 | Upstream source | Rust replacement |
 | --- | --- |
-| `miniport/qxl.c` | Release-path callbacks, request dispatch, discovery, reset, interrupts, power and mode handling ported; SYS build and native qualification remain. |
+| `miniport/qxl.c` | Release-path callbacks and SYS builds ported; native load, lifecycle and request qualification remain. |
 | `display/driver.c` | Cosmetic styles and slot encoding ported; GDI device lifecycle, escapes and path submission remain. |
 | `display/res.c` | Slot conversion and ring endpoints ported; resource ownership, caches and command payloads remain. |
 | `display/surface.c` | Surface allocation, upload, synchronisation and destruction remain. |
@@ -114,7 +114,7 @@ page arithmetic, slot IDs, the primary allocation and the complete shared RAM
 header. The resource layer reads device bytes with volatile access; it does not
 create ordinary Rust slices over mutable device memory. These paths compile
 for both Windows targets; native failure cleanup and driver lifecycle tests
-remain pending until the entry points are connected.
+remain pending.
 
 `src/mode_pool.rs` copies ROM mode records into a VideoPort paged-pool
 allocation, then uses the same `ModeSet` implementation as the domain tests.
@@ -131,9 +131,47 @@ Failed slot registration leaves interrupts masked.
 `miniport::driver_entry`. It publishes the adapter only after setup succeeds,
 keeps paged mode state out of interrupt handling, and completes each request
 through its status block. `SurfacesEnabled=0` disables non-primary surfaces.
-There is no loadable SYS artifact or native callback qualification yet.
+The SYS images link for both targets; native callback qualification is pending.
 
 Failed discovery releases its resource claim after dropping mappings and
 events, as required by
 [VideoPortGetAccessRanges](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/video/nf-video-videoportgetaccessranges).
 Successful FindAdapter setup commits that claim before publishing the adapter.
+
+## Build the miniport
+
+Use the repository's pinned Rust toolchain. From the repository root:
+
+```sh
+rustup target add i686-pc-windows-msvc x86_64-pc-windows-msvc
+export CARGO_TARGET_DIR="$PWD/build/windows/qxl-driver/rust-target"
+cd tools/windows/display/qxl
+cargo build --locked --release --features miniport --bin qxl-miniport --target i686-pc-windows-msvc
+cargo build --locked --release --features miniport --bin qxl-miniport --target x86_64-pc-windows-msvc
+cp "$CARGO_TARGET_DIR/i686-pc-windows-msvc/release/qxl-miniport.exe" "$CARGO_TARGET_DIR/qxl-xp.sys"
+cp "$CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/qxl-miniport.exe" "$CARGO_TARGET_DIR/qxl-win7.sys"
+```
+
+Run the builds from the component directory so Cargo reads its linker settings.
+They select Rust's bundled LLD; `build.rs` sets the native-driver entry point,
+checksum and OS floors (XP 5.1, Windows 7 6.1). No Visual Studio, SDK, DDK,
+C compiler, CRT or global allocator is used. Cargo's `.exe` output is a native
+driver PE image; the copy commands give it the installation filename suffix.
+
+The x86 settings also apply LLVM's `noimplicitfloat` attribute, preventing
+implicit SIMD use in kernel interrupt handlers without changing Rust's ABI.
+The driver uses integer operations only. Explicit floating-point or vector
+operations require a separate kernel-state design; see [SAFETY.md](SAFETY.md).
+
+`driver/memory.rs` supplies the compiler's memory-operation ABI in Rust.
+Copying and zeroing use VideoPort's existing kernel APIs; nonzero filling uses
+volatile stores so the compiler cannot introduce a recursive memset call.
+`driver/miniport.rs` follows Microsoft's
+[Rust kernel panic convention](https://github.com/microsoft/windows-drivers-rs/blob/main/crates/wdk-panic/src/lib.rs).
+
+The x86 and x64 images pass static checks for machine type, native subsystem,
+OS floor, relocations and PE checksum. They import only `videoprt.sys` and
+`ntoskrnl.exe`. Every imported VideoPort function is present in the XP and
+Windows 7 guest copies of that module. These are unsigned development images;
+they have not been installed or executed. The Rust display DLL, package,
+signing procedure and native qualification remain incomplete.

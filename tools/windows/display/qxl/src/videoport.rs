@@ -138,6 +138,8 @@ const _: () = {
     link(name = "videoprt.sys", kind = "raw-dylib", modifiers = "+verbatim")
 )]
 unsafe extern "system" {
+    pub fn VideoPortMoveMemory(destination: *mut c_void, source: *const c_void, length: u32);
+    pub fn VideoPortZeroMemory(destination: *mut c_void, length: u32);
     pub fn VideoPortInitialize(
         argument1: *mut c_void,
         argument2: *mut c_void,

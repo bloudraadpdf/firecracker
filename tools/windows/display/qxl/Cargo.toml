@@ -7,6 +7,16 @@ publish = false
 
 [workspace]
 
+[features]
+miniport = []
+
+[[bin]]
+name = "qxl-miniport"
+path = "driver/miniport.rs"
+required-features = ["miniport"]
+test = false
+bench = false
+
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 missing_debug_implementations = "warn"
@@ -17,3 +27,6 @@ undocumented_unsafe_blocks = "warn"
 [profile.release]
 panic = "abort"
 lto = true
+
+[profile.dev]
+panic = "abort"
