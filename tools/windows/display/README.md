@@ -190,8 +190,9 @@ sections are not substituted for that XP contract.
 
 ## Mode acceptance helper
 
-The [probe](probe/probe.rs) uses the same sixteen-mode table and emits a full
-RGB pattern from [model.rs](probe/model.rs). It restores the original display
+The [probe](probe/probe.rs) checks the native QXL adapter's eighteen 32bpp modes:
+the sixteen geometries listed above, followed by 1366x768 and 2560x1440. It emits
+a full RGB pattern from [model.rs](probe/model.rs) and restores the original display
 mode and cursor count on completion or failure. It uses the public XP DEVMODE
 prefix, accepts dmSize 188..220, and makes no private display-driver calls.
 
@@ -216,10 +217,11 @@ patterns, pointer ordering, keyboard state, cleanup and callback re-entry. They
 do not replace guest testing. The host frame utility uses the same pattern code
 so that full-frame comparison needs no separate oracle implementation.
 
-Use a disposable installed XP reference with the selected miniport. Create a new
+Use a disposable XP x86 or Windows 7 x64 reference with the existing QXL driver.
+Select the matching compatibility-library build profile for each OS. Create a new
 empty guest directory, copy `modes.exe` there, enable Caps Lock, and run
 `modes.exe > modes.log` from that directory. It creates `mode-00.txt` through
-`mode-15.txt` exclusively; existing files make the run fail.
+`mode-17.txt` exclusively; existing files make the run fail.
 
 For each case, within its ninety-second deadline:
 
@@ -248,7 +250,7 @@ For each case, within its ninety-second deadline:
 
 Require `MODE392 FINISHED status=0` with no cleanup error. Verify the original
 mode was restored, then shut down normally. From the stopped OS volume, verify
-all sixteen saved files contain exactly bytes 32..126, with no BOM or newline.
+all eighteen saved files contain exactly bytes 32..126, with no BOM or newline.
 Retain the log and actual RGB captures. An acknowledged key or pointer command
 alone does not prove guest input or stored data. Browser/VNC, normal Windows
 Keep/Revert/timeout, cold nonzero-mode persistence and snapshot tests remain

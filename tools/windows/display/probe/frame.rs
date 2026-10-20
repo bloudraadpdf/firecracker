@@ -10,7 +10,7 @@ use std::io::{self, Write};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     let [case] = args.as_slice() else {
-        return Err("usage: frame CASE_INDEX (0..15)".into());
+        return Err("usage: frame CASE_INDEX".into());
     };
     let case: u8 = case.parse()?;
     let view = model::View {
@@ -21,7 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         error: None,
         cleanup_error: false,
     };
-    let mode = view.mode().ok_or("case index must be 0..15")?;
+    let mode = view.mode().ok_or("case index exceeds the mode table")?;
     let mut output = io::BufWriter::new(io::stdout().lock());
     write!(output, "P6\n{} {}\n255\n", mode.width, mode.height)?;
     for y in 0..mode.height {
