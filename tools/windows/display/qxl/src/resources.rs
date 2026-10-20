@@ -200,6 +200,10 @@ pub struct DeviceResources {
 }
 
 impl DeviceResources {
+    pub fn device(&self) -> NonNull<c_void> {
+        self.ram.device
+    }
+
     /// # Safety
     /// `device` must be a live VideoPort device extension. Call at PASSIVE_LEVEL
     /// with no concurrent driver access. Retain the extension until these

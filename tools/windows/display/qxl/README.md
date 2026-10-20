@@ -109,3 +109,9 @@ header. The resource layer reads device bytes with volatile access; it does not
 create ordinary Rust slices over mutable device memory. These paths compile
 for both Windows targets; native failure cleanup and driver lifecycle tests
 remain pending until the entry points are connected.
+
+`src/mode_pool.rs` copies ROM mode records into a VideoPort paged-pool
+allocation, then uses the same `ModeSet` implementation as the domain tests.
+The allocation has one owner; its mode-state borrow ends before it is freed.
+The public methods return mode copies or iterators tied to the owner. No
+global allocator or C runtime is required.
