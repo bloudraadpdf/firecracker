@@ -180,8 +180,17 @@ queues. The Screen Resolution UI names the QXL adapter, accepts pointer dragging
 to 2560 by 1440 and retains that mode after Keep. The console frame independently
 reports 2560 by 1440. No QXL protocol error was logged during these checks.
 
-These initial checks do not establish all-mode pixels, complete keyboard/pointer
-behaviour, VNC or native viewer input, selected-mode cold boot or snapshot restore.
+The same eighteen-mode probe subsequently passes in one run through the real RFB
+bridge. The selected 2560 by 1440 mode survives cold boot. Every mode's full-frame
+RGB bytes match both the oracle and the corresponding XP result. All 90 ordered
+pointer targets and 1,710 printable ASCII characters pass with Caps Lock enabled.
+The original 2560 by 1440 mode is restored with no cleanup error. After normal
+shutdown, read-only NTFS inspection confirms all eighteen saved files contain
+exactly bytes 32 through 126. Its owned loop device is detached and the
+disk-closed check passes.
+
+Other keyboard layouts, native viewer input, complete device inventory and
+full/differential snapshot restore remain separate checks for this QXL profile.
 
 ## Windows 11 native GPU checks
 
