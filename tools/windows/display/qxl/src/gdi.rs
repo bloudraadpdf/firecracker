@@ -32,6 +32,35 @@ pub struct Rect {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
+pub struct ClipObject {
+    pub unique: u32,
+    pub bounds: Rect,
+    pub draw_complexity: u8,
+    pub fill_complexity: u8,
+    pub mode: u8,
+    pub options: u8,
+}
+
+#[cfg(windows)]
+#[repr(C)]
+#[derive(Debug)]
+pub(crate) struct Translation {
+    pub(crate) unique: u32,
+    pub(crate) flags: u32,
+    pub(crate) source_type: u16,
+    pub(crate) destination_type: u16,
+    pub(crate) count: u32,
+    pub(crate) table: *mut u32,
+}
+
+#[cfg(windows)]
+const _: () = {
+    assert!(offset_of!(Translation, table) == 16);
+    assert!(size_of::<Translation>() == 16 + size_of::<usize>());
+};
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
 pub struct SurfaceObject {
     pub driver_surface: *mut c_void,
     pub surface: *mut c_void,

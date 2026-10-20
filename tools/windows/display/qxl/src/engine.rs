@@ -30,6 +30,19 @@ const ALLOCATION_TAG: u32 = u32::from_le_bytes(*b"qxld");
     link(name = "win32k.sys", kind = "raw-dylib", modifiers = "+verbatim")
 )]
 unsafe extern "system" {
+    pub(crate) fn BRUSHOBJ_pvAllocRbrush(brush: *mut c_void, bytes: u32) -> *mut c_void;
+    pub(crate) fn BRUSHOBJ_pvGetRbrush(brush: *mut c_void) -> *mut c_void;
+    pub(crate) fn PATHOBJ_vGetBounds(path: *mut c_void, bounds: *mut Rect);
+    pub(crate) fn PATHOBJ_vEnumStart(path: *mut c_void);
+    pub(crate) fn PATHOBJ_bEnum(path: *mut c_void, data: *mut crate::native_path::PathData) -> i32;
+    pub(crate) fn STROBJ_vEnumStart(text: *mut c_void);
+    pub(crate) fn STROBJ_bEnum(
+        text: *mut c_void,
+        count: *mut u32,
+        positions: *mut *mut crate::native_text::GlyphPosition,
+    ) -> i32;
+    pub(crate) fn XLATEOBJ_piVector(translation: *mut c_void) -> *mut u32;
+    pub(crate) fn XLATEOBJ_iXlate(translation: *mut c_void, color: u32) -> u32;
     pub(crate) fn EngCreateSemaphore() -> *mut c_void;
     pub(crate) fn EngAcquireSemaphore(semaphore: *mut c_void);
     pub(crate) fn EngReleaseSemaphore(semaphore: *mut c_void);
@@ -75,6 +88,16 @@ unsafe extern "system" {
         background: *mut c_void,
         brush_origin: *mut Point,
         mix: u32,
+    ) -> i32;
+    pub(crate) fn EngTransparentBlt(
+        destination: *mut SurfaceObject,
+        source: *mut SurfaceObject,
+        clip: *mut c_void,
+        translation: *mut c_void,
+        destination_rect: *mut Rect,
+        source_rect: *mut Rect,
+        color: u32,
+        reserved: u32,
     ) -> i32;
     pub(crate) fn EngStrokePath(
         destination: *mut SurfaceObject,
@@ -306,9 +329,13 @@ pub unsafe extern "system" fn get_modes(
         return 0;
     };
     // SAFETY: this callback inherits GDI's live handle and passive-level context.
-    let Ok(modes) = (unsafe { Modes::query(driver) }) else {
-        return 0;
+    let modes = match unsafe { Modes::query(driver) } {
+        Ok(modes) => modes,
+        Err(_) => {
+            return 0;
+        }
     };
+
     let Some(bytes) = modes
         .entries()
         .count()

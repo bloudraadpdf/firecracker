@@ -24,26 +24,43 @@ pub mod gdi;
 pub mod hardware;
 pub mod hash;
 pub mod image;
+#[cfg(any(test, all(windows, any(target_arch = "x86", target_arch = "x86_64"))))]
+mod image_cache;
 pub mod ioctl;
 pub mod memory;
 pub mod modes;
 #[cfg(any(test, all(windows, any(target_arch = "x86", target_arch = "x86_64"))))]
 pub mod native_bitmap;
+#[cfg(all(windows, any(target_arch = "x86", target_arch = "x86_64")))]
+mod native_path;
 pub mod paint;
 pub mod palette;
 pub mod path;
 pub mod pdev_config;
 
+#[cfg(all(windows, any(target_arch = "x86", target_arch = "x86_64")))]
+pub mod brush;
+#[cfg(all(windows, any(target_arch = "x86", target_arch = "x86_64")))]
+mod native_pixels;
+#[cfg(all(windows, any(target_arch = "x86", target_arch = "x86_64")))]
+mod native_raster;
 #[cfg(any(test, all(windows, any(target_arch = "x86", target_arch = "x86_64"))))]
 pub mod pdev;
+#[cfg(all(windows, any(target_arch = "x86", target_arch = "x86_64")))]
+pub mod pointer;
 pub mod raster_draw;
 #[cfg(any(test, all(windows, any(target_arch = "x86", target_arch = "x86_64"))))]
 pub mod render;
 pub mod ring;
 pub mod rop;
+#[cfg(all(windows, any(target_arch = "x86", target_arch = "x86_64")))]
+mod secondary;
 pub mod slots;
 pub mod surface;
 pub mod text;
+
+#[cfg(all(windows, any(target_arch = "x86", target_arch = "x86_64")))]
+mod native_text;
 
 #[cfg(all(windows, any(target_arch = "x86", target_arch = "x86_64")))]
 pub mod videoport;
@@ -62,3 +79,10 @@ pub mod miniport;
 
 #[cfg(all(windows, any(target_arch = "x86", target_arch = "x86_64")))]
 pub mod engine;
+
+#[cfg(test)]
+#[path = "../driver/display_memory.rs"]
+mod display_memory;
+
+#[cfg(test)]
+mod pointer_tests;

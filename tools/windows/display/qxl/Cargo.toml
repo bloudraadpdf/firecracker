@@ -9,11 +9,19 @@ publish = false
 
 [features]
 miniport = []
+display = []
 
 [[bin]]
 name = "qxl-miniport"
 path = "driver/miniport.rs"
 required-features = ["miniport"]
+test = false
+bench = false
+
+[[bin]]
+name = "qxl-display"
+path = "driver/display.rs"
+required-features = ["display"]
 test = false
 bench = false
 

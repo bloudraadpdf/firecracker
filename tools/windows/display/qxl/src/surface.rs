@@ -147,6 +147,11 @@ impl<'memory, State> Surface<'memory, State> {
         self.physical
     }
 
+    #[cfg(all(windows, any(target_arch = "x86", target_arch = "x86_64")))]
+    pub(crate) fn resource(&self) -> &Resource<'memory> {
+        &self.memory
+    }
+
     pub fn as_ptr(&self) -> *mut u8 {
         self.memory.as_ptr()
     }

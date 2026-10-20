@@ -127,6 +127,8 @@ mod native {
         layout: Layout,
         video_slot: Option<MemorySlot>,
         state: State,
+        monitors: Option<crate::display_resources::Resource<'mapping>>,
+        images: crate::image_cache::Images<'mapping>,
     }
 
     impl<'mapping> Hardware<'mapping> {
@@ -142,6 +144,10 @@ mod native {
             device: &'mapping MappedDevice,
             layout: Layout,
         ) -> Result<Self, Error> {
+            let cache_limit = layout.bytes().saturating_add(layout.bytes() / 2);
+            // SAFETY: preparation runs in the retained passive GDI context.
+            let images =
+                unsafe { crate::image_cache::Images::new(cache_limit) }.map_err(Error::Ioctl)?;
             // SAFETY: the caller transfers the sole adapter generation's arenas
             // and guest endpoints, retaining the device through the result.
             let resources = unsafe { Resources::new(device.info(), layout, device.framebuffer()) }?;
@@ -155,7 +161,29 @@ mod native {
                 layout,
                 video_slot: None,
                 state: State::Prepared,
+                monitors: None,
+                images,
             })
+        }
+
+        pub(crate) fn secondary_count(&self) -> u32 {
+            let info = self.device.info();
+            if info.create_non_primary_surfaces != 0 {
+                info.surface_count
+            } else {
+                1
+            }
+        }
+
+        pub(crate) fn pixel_format(&self) -> crate::surface::Format {
+            self.layout.format()
+        }
+
+        pub(crate) fn retained_resources(&mut self) -> Result<&mut Resources<'mapping>, Error> {
+            if !matches!(self.state, State::Active | State::Stopped) {
+                return Err(Error::InvalidState);
+            }
+            Ok(&mut self.resources)
         }
 
         /// Current activation/shutdown state.
@@ -172,6 +200,265 @@ mod native {
                 return Err(Error::InvalidState);
             }
             Ok(&mut self.resources)
+        }
+
+        /// # Safety
+        /// Retain exclusive primary access and the live mapping through completion.
+        pub unsafe fn solid(
+            &mut self,
+            bounds: [i32; 4],
+            color: u32,
+            truth: u8,
+        ) -> Result<(), Error> {
+            let [left, top, right, bottom] = bounds;
+            if self.state != State::Active
+                || right > self.layout.width() as i32
+                || bottom > self.layout.height() as i32
+            {
+                return Err(Error::InvalidState);
+            }
+            let draw = crate::draw::Solid::new([left, top, right, bottom], color, truth)
+                .ok_or(Error::InvalidState)?;
+            // SAFETY: bounds and this session's primary were validated above.
+            unsafe {
+                self.draw(|resources, clock| {
+                    draw.submit(&mut resources.pool, &mut resources.commands, clock)
+                })
+            }
+        }
+
+        /// # Safety
+        /// Keep exclusive primary access and mappings through host completion.
+        pub unsafe fn copy_bits(
+            &mut self,
+            bounds: [i32; 4],
+            source: [i32; 2],
+        ) -> Result<(), Error> {
+            let draw = crate::draw::CopyBits::new(bounds, source).ok_or(Error::InvalidState)?;
+            if self.state != State::Active
+                || bounds[2] > self.layout.width() as i32
+                || bounds[3] > self.layout.height() as i32
+                || source[0] + (bounds[2] - bounds[0]) > self.layout.width() as i32
+                || source[1] + (bounds[3] - bounds[1]) > self.layout.height() as i32
+            {
+                return Err(Error::InvalidState);
+            }
+            // SAFETY: both rectangles fit the exclusively retained primary.
+            unsafe {
+                self.draw(|resources, clock| {
+                    draw.submit(&mut resources.pool, &mut resources.commands, clock)
+                })
+            }
+        }
+
+        /// # Safety
+        /// Retain exclusive destination access and mappings through publication.
+        /// Pixels must be the fully defined, top-down source bitmap.
+        pub unsafe fn image(
+            &mut self,
+            draw: crate::draw::ImageDraw,
+            width: u32,
+            height: u32,
+            pixels: &[u8],
+            alpha: bool,
+        ) -> Result<(), Error> {
+            let bounds = draw.bounds();
+            if self.state != State::Active
+                || bounds[2] > self.layout.width() as i32
+                || bounds[3] > self.layout.height() as i32
+            {
+                return Err(Error::InvalidState);
+            }
+            // SAFETY: the destination bounds and active session were checked.
+            unsafe {
+                self.draw_image(width, height, pixels, alpha, |image, resources, clock| {
+                    draw.submit(image, &mut resources.pool, &mut resources.commands, clock)
+                })
+            }
+        }
+
+        /// # Safety
+        /// Retain the primary and captured indexed source until publication completes.
+        pub unsafe fn indexed_image(
+            &mut self,
+            draw: crate::draw::ImageDraw,
+            bitmap: crate::bitmap::Bitmap<'_>,
+            colors: crate::palette::Colors<'_>,
+        ) -> Result<(), Error> {
+            let bounds = draw.bounds();
+            if self.state != State::Active
+                || bounds[2] > self.layout.width() as i32
+                || bounds[3] > self.layout.height() as i32
+            {
+                return Err(Error::InvalidState);
+            }
+            // SAFETY: the session owns the mapped release endpoint.
+            unsafe { self.reap_completed(64) }?;
+            let slot = self.resources.main_slot();
+            let image = self
+                .images
+                .acquire_indexed(&mut self.resources.pool, slot, bitmap, colors)
+                .map_err(Error::Pool)?;
+            // SAFETY: publication retains the image and its palette independently.
+            let result = unsafe {
+                self.draw(|resources, clock| {
+                    draw.submit(&image, &mut resources.pool, &mut resources.commands, clock)
+                })
+            };
+            image
+                .release(&mut self.resources.pool)
+                .map_err(|(error, _)| Error::Pool(error))?;
+            result
+        }
+
+        /// # Safety
+        /// Retain exclusive destination access and immutable top-down pattern pixels.
+        pub unsafe fn pattern(
+            &mut self,
+            draw: crate::draw::PatternFill,
+            width: u32,
+            height: u32,
+            pixels: &[u8],
+        ) -> Result<(), Error> {
+            let bounds = draw.bounds();
+            if self.state != State::Active
+                || bounds[2] > self.layout.width() as i32
+                || bounds[3] > self.layout.height() as i32
+            {
+                return Err(Error::InvalidState);
+            }
+            // SAFETY: the destination and retained pattern satisfy publication bounds.
+            unsafe {
+                self.draw_image(width, height, pixels, false, |image, resources, clock| {
+                    draw.submit(image, &mut resources.pool, &mut resources.commands, clock)
+                })
+            }
+        }
+
+        unsafe fn draw_image(
+            &mut self,
+            width: u32,
+            height: u32,
+            pixels: &[u8],
+            alpha: bool,
+            operation: impl FnOnce(
+                &crate::image::Image<'mapping>,
+                &mut Resources<'mapping>,
+                u32,
+            ) -> Result<bool, display_resources::Error>,
+        ) -> Result<(), Error> {
+            // SAFETY: the retained session exclusively owns the release endpoint.
+            unsafe { self.reap_completed(64) }?;
+            let slot = self.resources.main_slot();
+            let image = self
+                .images
+                .acquire(&mut self.resources.pool, slot, width, height, pixels, alpha)
+                .map_err(Error::Pool)?;
+            // SAFETY: both image and destination remain retained by this session.
+            let result =
+                unsafe { self.draw(|resources, clock| operation(&image, resources, clock)) };
+            image
+                .release(&mut self.resources.pool)
+                .map_err(|(error, _)| Error::Pool(error))?;
+            result
+        }
+
+        /// # Safety
+        /// Retain exclusive primary access and its mappings through publication.
+        pub unsafe fn text(
+            &mut self,
+            draw: crate::text::Text<'_>,
+            glyphs: crate::text::Glyphs<'_>,
+        ) -> Result<(), Error> {
+            let bounds = draw.bounds();
+            if self.state != State::Active
+                || bounds[2] > self.layout.width() as i32
+                || bounds[3] > self.layout.height() as i32
+            {
+                return Err(Error::InvalidState);
+            }
+            let slot = self.resources.main_slot();
+            // SAFETY: the session owns its primary, mappings and queue endpoints.
+            unsafe {
+                self.draw(|resources, clock| {
+                    draw.submit(
+                        glyphs,
+                        &mut resources.pool,
+                        slot,
+                        &mut resources.commands,
+                        clock,
+                    )
+                })
+            }
+        }
+
+        /// # Safety
+        /// Retain exclusive primary access and mappings through publication.
+        pub unsafe fn stroke(
+            &mut self,
+            draw: crate::path::Stroke<'_>,
+            path: crate::path::Segments<'_>,
+            style: &crate::cosmetic::LineStyle,
+        ) -> Result<(), Error> {
+            let bounds = draw.bounds();
+            if self.state != State::Active
+                || bounds[2] > self.layout.width() as i32
+                || bounds[3] > self.layout.height() as i32
+            {
+                return Err(Error::InvalidState);
+            }
+            let slot = self.resources.main_slot();
+            // SAFETY: the session retains its destination and exclusive endpoints.
+            unsafe {
+                self.draw(|resources, clock| {
+                    draw.submit(
+                        path,
+                        style,
+                        &mut resources.pool,
+                        slot,
+                        &mut resources.commands,
+                        clock,
+                    )
+                })
+            }
+        }
+
+        /// # Safety
+        /// Retain exclusive primary access and mappings through host completion.
+        pub unsafe fn raster(&mut self, draw: crate::raster_draw::Raster<'_>) -> Result<(), Error> {
+            let bounds = draw.bounds();
+            if self.state != State::Active
+                || bounds[2] > self.layout.width() as i32
+                || bounds[3] > self.layout.height() as i32
+            {
+                return Err(Error::InvalidState);
+            }
+            let slot = self.resources.main_slot();
+            // SAFETY: the session owns its primary and both queue endpoints.
+            unsafe {
+                self.draw(|resources, clock| {
+                    draw.submit(&mut resources.pool, slot, &mut resources.commands, clock)
+                })
+            }
+        }
+
+        unsafe fn draw(
+            &mut self,
+            operation: impl FnOnce(
+                &mut Resources<'mapping>,
+                u32,
+            ) -> Result<bool, display_resources::Error>,
+        ) -> Result<(), Error> {
+            // SAFETY: callers retain the exclusive active session and endpoints.
+            unsafe { self.reap_completed(64) }?;
+            // SAFETY: the validated ROM clock stays mapped through this session.
+            let clock = unsafe { self.device.info().clock.read_volatile() };
+            let notify = operation(&mut self.resources, clock).map_err(Error::Pool)?;
+            if notify {
+                // SAFETY: the operation finished publication before notification.
+                unsafe { self.notify(false) }?;
+            }
+            Ok(())
         }
 
         /// Pool access remains available for releasing tokens after shutdown.
@@ -387,8 +674,56 @@ mod native {
                 // may start, so removing the registered video slot is valid.
                 unsafe { self.command(Operation::DeleteSlot(slot)) }?;
             }
+            self.images
+                .clear(&mut self.resources.pool)
+                .map_err(Error::Pool)?;
+            self.release_monitors()?;
             self.video_slot = None;
             self.state = State::Stopped;
+            Ok(())
+        }
+
+        /// # Safety
+        /// Retain exclusive adapter access and all live mappings through completion.
+        pub unsafe fn set_monitor(&mut self, head: &[u8; 28]) -> Result<(), Error> {
+            if self.state != State::Active
+                || self.device.info().pci_revision < crate::memory::REVISION_MONITORS
+            {
+                return Err(Error::InvalidState);
+            }
+            if self.monitors.is_none() {
+                self.monitors = Some(
+                    self.resources
+                        .pool
+                        .resource(crate::display_resources::Region::Main, 32)
+                        .map_err(Error::Pool)?,
+                );
+            }
+            let resource = self.monitors.as_ref().ok_or(Error::InvalidState)?;
+            let mut config = [0u8; 32];
+            config[..4].copy_from_slice(&[1, 0, 1, 0]);
+            config[12..28].copy_from_slice(&head[8..24]);
+            // SAFETY: this retained 32-byte main-slot resource has no CPU borrower;
+            // the control channel serialises reads with the previous configuration.
+            unsafe {
+                core::ptr::copy_nonoverlapping(config.as_ptr(), resource.as_ptr(), config.len())
+            };
+            let physical = self
+                .resources
+                .main_slot()
+                .encode(resource.as_ptr().addr() as u64, 32)
+                .map_err(Error::Slot)?;
+            // SAFETY: the persistent resource remains owned through stop/reset.
+            unsafe { self.command(Operation::Monitors(physical)) }
+        }
+
+        fn release_monitors(&mut self) -> Result<(), Error> {
+            if let Some(resource) = self.monitors.take()
+                && let Err((error, resource)) = self.resources.pool.release(resource)
+            {
+                self.monitors = Some(resource);
+                return Err(Error::Pool(error));
+            }
             Ok(())
         }
 
@@ -424,6 +759,10 @@ mod native {
             // release access. Arena mappings remain live; external cache tokens
             // are still retained and must be released by their owners.
             unsafe { self.resources.pool.discard_pending() };
+            self.images
+                .clear(&mut self.resources.pool)
+                .map_err(Error::Pool)?;
+            self.release_monitors()?;
             self.video_slot = None;
             self.state = State::Stopped;
             Ok(())

@@ -119,6 +119,15 @@ mod native {
             .map_err(Error::Memory)
     }
 
+    #[derive(Clone, Copy, Debug)]
+    pub(crate) struct Description {
+        pub context: NonNull<c_void>,
+        pub info: Context,
+        pub engine: NonNull<c_void>,
+        pub pixels: *mut u8,
+        pub handle: NonNull<c_void>,
+    }
+
     #[derive(Debug)]
     struct Handle {
         owned: Option<Bitmap>,
@@ -168,6 +177,16 @@ mod native {
                 engine,
                 hooks,
             })
+        }
+
+        fn describe(&self, pixels: *mut u8) -> Description {
+            Description {
+                context: self.context.handle(),
+                info: *self.context.get(),
+                engine: self.engine,
+                pixels,
+                handle: self.handle.value,
+            }
         }
 
         unsafe fn modify(&self, pixels: Option<NonNull<u8>>) -> Result<(), Error> {
@@ -248,6 +267,29 @@ mod native {
     }
 
     impl<'mapping> DeviceBitmap<'mapping> {
+        pub(crate) fn description(&self) -> Description {
+            self.binding.describe(self.surface.get().as_ptr())
+        }
+
+        /// # Safety
+        /// Stop GDI users and prove the retained hardware generation is quiescent.
+        pub(crate) unsafe fn discard(self, pool: &mut Pool<'mapping>) -> Result<(), (Error, Self)> {
+            if !pool.owns(self.surface.get().resource()) {
+                return Err((Error::Pool(PoolError::WrongPool), self));
+            }
+            let Self {
+                draw_area,
+                binding,
+                surface,
+            } = self;
+            drop(draw_area);
+            drop(binding);
+            // SAFETY: hardware is quiescent and all GDI views are gone. Ownership
+            // was checked above; release cannot fail with this exclusive pool.
+            unsafe { surface.discard(pool) }.expect("validated surface pool ownership");
+            Ok(())
+        }
+
         /// # Safety
         /// Retain the parent/device/mappings and serialise all GDI/pool/ring access
         /// at PASSIVE_LEVEL. Use an unused ID below the advertised surface count,
@@ -418,6 +460,40 @@ mod native {
     }
 
     impl<'mapping> RamBitmap<'mapping> {
+        pub(crate) fn description(&self) -> Description {
+            self.binding.describe(self.pixels.as_ptr().as_ptr())
+        }
+
+        /// # Safety
+        /// Stop GDI users; preserve the original live pool/ring generation and FIFO.
+        pub(crate) unsafe fn destroy(
+            self,
+            pool: &mut Pool<'mapping>,
+            ring: &mut CommandRing,
+        ) -> Result<bool, (Error, Self)> {
+            let Self {
+                binding,
+                pixels,
+                retired,
+            } = self;
+            // SAFETY: users stopped and the same retained queue orders destruction.
+            match unsafe { retired.destroy(pool, ring) } {
+                Ok(notify) => {
+                    drop(binding);
+                    drop(pixels);
+                    Ok(notify)
+                }
+                Err((error, retired)) => Err((
+                    Error::Pool(error),
+                    Self {
+                        binding,
+                        pixels,
+                        retired,
+                    },
+                )),
+            }
+        }
+
         /// Release old video ownership only after hardware quiescence.
         /// # Safety
         /// Stop all host accesses and delayed release writes for the old generation,
@@ -467,6 +543,10 @@ mod native {
     }
 
     impl SystemBitmap {
+        pub(crate) fn description(&self) -> Description {
+            self.binding.describe(self.pixels.as_ptr().as_ptr())
+        }
+
         /// Borrow the live RAM-backed GDI handle.
         pub fn handle(&self) -> NonNull<c_void> {
             self.binding.handle.value
@@ -579,6 +659,8 @@ mod native {
     }
 }
 
+#[cfg(all(windows, any(target_arch = "x86", target_arch = "x86_64")))]
+pub(crate) use native::Description;
 #[cfg(all(windows, any(target_arch = "x86", target_arch = "x86_64")))]
 pub use native::{DeviceBitmap, PrimaryBitmap, RamBitmap, RestoreFailure, SystemBitmap};
 

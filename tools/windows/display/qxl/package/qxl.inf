@@ -1,0 +1,79 @@
+; Copyright 2009 Red Hat, Inc.
+; Copyright 2026 Bloudraad.
+; SPDX-License-Identifier: GPL-2.0-only
+
+[Version]
+Signature = "$Windows NT$"
+Class = Display
+ClassGUID = {4D36E968-E325-11CE-BFC1-08002BE10318}
+Provider = %Provider%
+DriverVer = 10/20/2026,0.1.0.0
+
+[Manufacturer]
+%Provider% = Models,NTx86.5.1,NTx86.6.0,NTamd64.6.1,NTamd64.6.2
+
+[Models.NTx86.5.1]
+%Device% = Qxl,PCI\VEN_1B36&DEV_0100&SUBSYS_11001AF4
+
+[Models.NTx86.6.0]
+
+[Models.NTamd64.6.1]
+%Device% = Qxl7,PCI\VEN_1B36&DEV_0100&SUBSYS_11001AF4
+
+[Models.NTamd64.6.2]
+
+[DestinationDirs]
+Miniport = 12
+Display = 11
+
+[SourceDisksNames]
+1 = %Media%
+
+[SourceDisksFiles]
+qxl.sys = 1
+qxldd.dll = 1
+
+[Qxl]
+CopyFiles = Miniport,Display
+
+[Qxl7]
+FeatureScore = FC
+CopyFiles = Miniport,Display
+
+[Miniport]
+qxl.sys
+
+[Display]
+qxldd.dll
+
+[Qxl.SoftwareSettings]
+AddReg = SoftwareSettings
+
+[Qxl7.SoftwareSettings]
+AddReg = SoftwareSettings
+
+[SoftwareSettings]
+HKR,,InstalledDisplayDrivers,0x00010000,qxldd
+HKR,,VgaCompatible,0x00010001,0
+HKR,,DefaultSettings.BitsPerPel,0x00010001,32
+HKR,,DefaultSettings.XResolution,0x00010001,800
+HKR,,DefaultSettings.YResolution,0x00010001,600
+HKR,,Acceleration.Level,0x00010001,0
+
+[Qxl.Services]
+AddService = qxl,0x00000002,Service
+
+[Qxl7.Services]
+AddService = qxl,0x00000002,Service
+
+[Service]
+ServiceType = 1
+StartType = 3
+ErrorControl = 0
+LoadOrderGroup = Video
+ServiceBinary = %12%\qxl.sys
+
+[Strings]
+Provider = "Bloudraad"
+Device = "QXL GPU (Rust)"
+Media = "Rust QXL display driver"
