@@ -3,6 +3,8 @@
 
 #![no_std]
 
+mod abi;
+
 pub mod arena;
 pub mod cosmetic;
 pub mod display_modes;
@@ -13,6 +15,7 @@ pub mod hash;
 pub mod ioctl;
 pub mod memory;
 pub mod modes;
+pub mod pdev_config;
 pub mod ring;
 pub mod rop;
 pub mod slots;

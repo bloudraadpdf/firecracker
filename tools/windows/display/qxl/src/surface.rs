@@ -20,6 +20,15 @@ pub enum Format {
     Xrgb8888 = 32,
 }
 
+impl Format {
+    pub fn bitmap_format(self) -> u32 {
+        match self {
+            Self::Rgb555 => 4,
+            Self::Xrgb8888 => 6,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Layout {
     width: u32,
@@ -31,9 +40,6 @@ pub struct Layout {
 
 impl Layout {
     pub fn new(width: u32, height: u32, format: Format) -> Result<Self, Error> {
-        if width == 0 || height == 0 || width > i32::MAX as u32 || height > i32::MAX as u32 {
-            return Err(Error::InvalidSize);
-        }
         let pixel_bytes = match format {
             Format::Rgb555 => 2,
             Format::Xrgb8888 => 4,
@@ -42,8 +48,32 @@ impl Layout {
             .checked_mul(pixel_bytes)
             .and_then(|bytes| bytes.checked_add(3))
             .map(|bytes| bytes & !3)
-            .filter(|stride| *stride <= i32::MAX as u32)
             .ok_or(Error::InvalidSize)?;
+        Self::with_stride(width, height, format, stride)
+    }
+
+    pub fn with_stride(
+        width: u32,
+        height: u32,
+        format: Format,
+        stride: u32,
+    ) -> Result<Self, Error> {
+        let pixel_bytes = match format {
+            Format::Rgb555 => 2,
+            Format::Xrgb8888 => 4,
+        };
+        if width == 0
+            || height == 0
+            || width > i32::MAX as u32
+            || height > i32::MAX as u32
+            || !stride.is_multiple_of(4)
+            || stride > i32::MAX as u32
+            || width
+                .checked_mul(pixel_bytes)
+                .is_none_or(|minimum| stride < minimum)
+        {
+            return Err(Error::InvalidSize);
+        }
         let bytes = stride
             .checked_mul(height)
             .filter(|bytes| (*bytes as usize) <= isize::MAX as usize)
@@ -333,6 +363,13 @@ mod tests {
                 layout.bytes()
             ),
             (3, 2, 8, 16)
+        );
+        let padded = Layout::with_stride(3, 2, Format::Rgb555, 12).unwrap();
+        assert_eq!((padded.stride(), padded.bytes()), (12, 24));
+        assert_eq!(&padded.primary(0)[8..12], &(-12i32).to_le_bytes());
+        assert_eq!(
+            Layout::with_stride(3, 2, Format::Rgb555, 10),
+            Err(Error::InvalidSize)
         );
         let record = layout.primary(0x0104000000002000);
         assert_eq!(&record[..8], &[3, 0, 0, 0, 2, 0, 0, 0]);
