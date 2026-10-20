@@ -76,7 +76,7 @@ The port covers the full XP/7 driver package. The remaining source mapping is:
 
 | Upstream source | Rust replacement |
 | --- | --- |
-| `miniport/qxl.c` | Mode state, slot encoding, discovery, mappings and event ownership ported; interrupts, power and IOCTL entry points remain. |
+| `miniport/qxl.c` | Release-path callbacks, request dispatch, discovery, reset, interrupts, power and mode handling ported; SYS build and native qualification remain. |
 | `display/driver.c` | Cosmetic styles and slot encoding ported; GDI device lifecycle, escapes and path submission remain. |
 | `display/res.c` | Slot conversion and ring endpoints ported; resource ownership, caches and command payloads remain. |
 | `display/surface.c` | Surface allocation, upload, synchronisation and destruction remain. |
@@ -121,3 +121,19 @@ allocation, then uses the same `ModeSet` implementation as the domain tests.
 The allocation has one owner; its mode-state borrow ends before it is freed.
 The public methods return mode copies or iterators tied to the owner. No
 global allocator or C runtime is required.
+
+`src/adapter.rs` implements reset and memory-slot registration, ISR/DPC event
+handling, the display interface and miniport IOCTL dispatch. Requests consume
+input before writing output so a shared input/output buffer is supported.
+Failed slot registration leaves interrupts masked.
+
+`src/miniport.rs` registers the actual VideoPort callbacks through
+`miniport::driver_entry`. It publishes the adapter only after setup succeeds,
+keeps paged mode state out of interrupt handling, and completes each request
+through its status block. `SurfacesEnabled=0` disables non-primary surfaces.
+There is no loadable SYS artifact or native callback qualification yet.
+
+Failed discovery releases its resource claim after dropping mappings and
+events, as required by
+[VideoPortGetAccessRanges](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/video/nf-video-videoportgetaccessranges).
+Successful FindAdapter setup commits that claim before publishing the adapter.
