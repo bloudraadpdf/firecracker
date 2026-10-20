@@ -8,13 +8,14 @@ use core::ffi::c_void;
 use core::mem::{offset_of, size_of};
 
 use crate::abi::record;
-use crate::display_modes::{DEVMODE_BYTES, supported};
+#[cfg(test)]
+use crate::display_modes::DEVMODE_BYTES;
+use crate::display_modes::supported;
 use crate::modes::VideoModeInformation;
 use crate::surface::{Format, Layout};
 
 const GCAPS_ARBRUSHOPAQUE: u32 = 1 << 15;
 const GCAPS_ARBRUSHTEXT: u32 = 1 << 28;
-const GCAPS_ASYNCMOVE: u32 = 1 << 12;
 const GCAPS_GRAY16: u32 = 1 << 24;
 const GCAPS_OPAQUERECT: u32 = 1 << 8;
 const GCAPS_WINDINGFILL: u32 = 1 << 3;
@@ -101,24 +102,26 @@ pub struct Request {
 
 impl Request {
     pub fn parse(bytes: &[u8]) -> Result<Self, Error> {
-        let size = u16::from_le_bytes(
-            bytes
-                .get(68..70)
-                .ok_or(Error::InvalidRequest)?
-                .try_into()
-                .unwrap(),
-        ) as usize;
-        if size < DEVMODE_BYTES || size > bytes.len() {
+        let header = bytes.get(68..70).ok_or(Error::InvalidRequest)?;
+        let size = u16::from_le_bytes([header[0], header[1]]) as usize;
+        if size < 188 || size > bytes.len() {
             return Err(Error::InvalidRequest);
         }
-        let field = |offset| u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        let field = |offset| {
+            u32::from_le_bytes([
+                bytes[offset],
+                bytes[offset + 1],
+                bytes[offset + 2],
+                bytes[offset + 3],
+            ])
+        };
         let result = Self {
             width: field(172),
             height: field(176),
             depth: field(168),
             frequency: field(184),
             rotation: field(84),
-            log_pixels: u16::from_le_bytes(bytes[166..168].try_into().unwrap()),
+            log_pixels: u16::from_le_bytes([bytes[166], bytes[167]]),
         };
         if result.width == 0
             || result.height == 0
@@ -220,7 +223,6 @@ impl Configuration {
         let device = DeviceInfo {
             graphics_caps: GCAPS_ARBRUSHOPAQUE
                 | GCAPS_ARBRUSHTEXT
-                | GCAPS_ASYNCMOVE
                 | GCAPS_GRAY16
                 | GCAPS_OPAQUERECT
                 | GCAPS_WINDINGFILL,
@@ -295,13 +297,16 @@ mod native {
         /// this owner while GDI uses its palette handle in device information.
         pub unsafe fn new(driver: NonNull<c_void>, devmode: &[u8]) -> Result<Self, PrepareError> {
             let request = Request::parse(devmode).map_err(PrepareError::Mode)?;
+
             let configuration = {
                 // SAFETY: the caller supplies the live handle and GDI context.
                 let modes = unsafe { Modes::query(driver) }.map_err(PrepareError::Modes)?;
+
                 request
                     .select(modes.entries())
                     .map_err(PrepareError::Mode)?
             };
+
             let mode = configuration.mode;
             // SAFETY: configuration selected a supported true-colour mode;
             // this callback and the retained owner's teardown are passive-level.
@@ -383,7 +388,7 @@ mod tests {
             Err(Error::InvalidRequest)
         ));
         let mut short = bytes;
-        short[68..70].copy_from_slice(&188u16.to_le_bytes());
+        short[68..70].copy_from_slice(&187u16.to_le_bytes());
         assert!(matches!(Request::parse(&short), Err(Error::InvalidRequest)));
         let mut invalid = bytes;
         invalid[84..88].copy_from_slice(&4u32.to_le_bytes());
@@ -404,6 +409,21 @@ mod tests {
     }
 
     #[test]
+    fn mode_prefix_does_not_require_trailing_icm_fields() {
+        let mode = VideoModeInformation::custom(1, 800, 600, 32).unwrap();
+        let mut bytes = request(&mode);
+        bytes[68..70].copy_from_slice(&188u16.to_le_bytes());
+        assert_eq!(
+            Request::parse(&bytes[..188])
+                .unwrap()
+                .select([mode])
+                .unwrap()
+                .mode,
+            mode
+        );
+    }
+
+    #[test]
     fn capability_encoding_preserves_fonts_masks_and_zeroes_native_padding() {
         let mode = VideoModeInformation::custom(1, 640, 480, 16).unwrap();
         let mut configuration = Request::parse(&request(&mode))
@@ -418,6 +438,7 @@ mod tests {
             ),
             (0x7c00, 0x3e0, 0x1f)
         );
+        assert_eq!(configuration.device.graphics_caps & (1 << 12), 0);
         assert_eq!(configuration.device.dither_format, 4);
         assert_eq!(configuration.gdi.ht_output_format, 5);
         assert_eq!(configuration.device.fonts[0].height, 16);

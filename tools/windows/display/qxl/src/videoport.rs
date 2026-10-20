@@ -204,7 +204,6 @@ unsafe extern "system" {
         timeout: *mut i64,
     ) -> u32;
     pub fn VideoPortQueueDpc(device: *mut c_void, callback: Dpc, context: *mut c_void) -> u8;
-    pub fn VideoPortInterlockedExchange(target: *mut i32, value: i32) -> i32;
     pub fn VideoPortWritePortUchar(port: *mut u8, value: u8);
     pub fn VideoPortGetRegistryParameters(
         device: *mut c_void,

@@ -8,4 +8,8 @@ rustflags = [
 
 [target.x86_64-pc-windows-msvc]
 linker = "rust-lld"
-rustflags = ["-C", "linker-flavor=lld-link", "-C", "default-linker-libraries=no"]
+rustflags = [
+    "-C", "linker-flavor=lld-link",
+    "-C", "default-linker-libraries=no",
+    "-C", "llvm-args=-force-attribute=noimplicitfloat",
+]

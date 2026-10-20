@@ -35,6 +35,9 @@ unsafe extern "system" {
     pub(crate) fn EngReleaseSemaphore(semaphore: *mut c_void);
     pub(crate) fn EngDeleteSemaphore(semaphore: *mut c_void);
     pub(crate) fn EngClearEvent(event: *mut c_void);
+    pub(crate) fn EngWaitForSingleObject(event: *mut c_void, timeout: *const i64) -> i32;
+    pub(crate) fn EngQueryPerformanceCounter(counter: *mut i64);
+    pub(crate) fn EngQueryPerformanceFrequency(frequency: *mut i64);
     pub(crate) fn EngCreatePalette(
         mode: u32,
         count: u32,

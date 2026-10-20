@@ -243,31 +243,11 @@ impl Channel<'_> {
 mod native {
     use super::*;
     use crate::display_device::MappedDevice;
-    use crate::engine::EngClearEvent;
+    use crate::engine::{
+        EngClearEvent, EngQueryPerformanceCounter, EngQueryPerformanceFrequency,
+        EngWaitForSingleObject,
+    };
     use core::ffi::c_void;
-
-    #[cfg_attr(
-        target_arch = "x86",
-        link(
-            name = "ntoskrnl.exe",
-            kind = "raw-dylib",
-            modifiers = "+verbatim",
-            import_name_type = "undecorated"
-        )
-    )]
-    #[cfg_attr(
-        target_arch = "x86_64",
-        link(name = "ntoskrnl.exe", kind = "raw-dylib", modifiers = "+verbatim")
-    )]
-    unsafe extern "system" {
-        fn KeWaitForSingleObject(
-            object: *mut c_void,
-            reason: i32,
-            mode: i8,
-            alertable: u8,
-            timeout: *const i64,
-        ) -> i32;
-    }
 
     struct Native;
 
@@ -293,10 +273,33 @@ mod native {
             };
         }
         fn wait(&mut self, event: *mut c_void, timeout: i64) -> i32 {
-            // SAFETY: the miniport's nonpaged synchronization event remains
-            // live. This passive-level, non-alertable KernelMode wait keeps its
-            // timeout on the kernel stack; Executive=0 and KernelMode=0.
-            unsafe { KeWaitForSingleObject(event, 0, 0, 0, &timeout) }
+            // SAFETY: the live miniport event and timeout remain retained for
+            // the native GDI wait, as in the original display driver.
+            let (mut before, mut after, mut frequency) = (0, 0, 0);
+            // SAFETY: GDI writes each complete live LARGE_INTEGER output.
+            unsafe {
+                EngQueryPerformanceFrequency(&mut frequency);
+                EngQueryPerformanceCounter(&mut before);
+            }
+            // SAFETY: the event and relative timeout remain live through the wait.
+            let signaled = unsafe { EngWaitForSingleObject(event, &timeout) };
+            // SAFETY: the counter output remains writable for the native query.
+            unsafe {
+                EngQueryPerformanceCounter(&mut after);
+            }
+            if frequency <= 0 || before < 0 || after < before {
+                return i32::MIN;
+            }
+            let elapsed = i128::from(after - before) * 10_000_000;
+            let limit = -i128::from(timeout) * i128::from(frequency);
+            if elapsed >= limit {
+                return STATUS_TIMEOUT;
+            }
+            if signaled != 0 {
+                STATUS_SUCCESS
+            } else {
+                STATUS_TIMEOUT
+            }
         }
     }
 

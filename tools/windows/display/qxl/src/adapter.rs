@@ -7,7 +7,7 @@
 use core::cell::UnsafeCell;
 use core::mem::size_of;
 use core::ptr::{copy_nonoverlapping, null_mut, read_volatile, write_volatile};
-use core::sync::atomic::{AtomicU8, Ordering, fence};
+use core::sync::atomic::{AtomicU8, AtomicU32, Ordering, fence};
 
 use crate::driver_info::{DriverInfo, MemSlot};
 use crate::ioctl::*;
@@ -241,7 +241,7 @@ impl Adapter {
         // SAFETY: the aligned header remains live throughout the registered ISR.
         let (pending, mask) = unsafe {
             (
-                read_volatile(self.header(4).cast::<u32>()),
+                AtomicU32::from_ptr(self.header(4).cast()).load(Ordering::SeqCst),
                 read_volatile(self.header(8).cast::<u32>()),
             )
         };
@@ -267,10 +267,10 @@ impl Adapter {
     /// # Safety
     /// Invoke as the registered VideoPort DPC with live nonpageable resources.
     pub unsafe fn complete_interrupt(&self) {
-        // SAFETY: the counter is four-byte aligned, live, and accessed by the
-        // same interlocked operation used by the original miniport.
+        // SAFETY: discovery validates the live, four-byte aligned interrupt word.
+        // Only this DPC exchanges it; the host atomically publishes pending bits.
         let pending =
-            unsafe { VideoPortInterlockedExchange(self.header(4).cast::<i32>(), 0) } as u32;
+            unsafe { AtomicU32::from_ptr(self.header(4).cast()) }.swap(0, Ordering::SeqCst);
         // SAFETY: these events belong to this device and remain live through the DPC.
         unsafe {
             for (bit, event) in [
