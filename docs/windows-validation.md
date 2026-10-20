@@ -171,7 +171,17 @@ memory with the matching snapshot editor. Each snapshot has its own stopped
 disk copy; the full snapshot's memory, state and disk hashes remain unchanged.
 These runs use the default restore notification and clock policies.
 
-Other keyboard layouts and native viewer input remain open for this QXL profile.
+The macOS native viewer also exercises this QXL guest through the standard RFB
+bridge and an SSH loopback forward. At 2560 by 1440, Command+R opens Run;
+Home and Shift+End replace its command. Notepad receives printable keys,
+Shift punctuation and Enter. A guest window drag reaches its target. After a
+host window resize changes the letterbox, a double-click on the guest title
+bar maximises Notepad. Following normal Windows shutdown and VMM exit zero,
+read-only NTFS inspection confirms the saved file contains exactly
+`viewer xp\r\n!A`. This checks the Mac frontend at two window sizes; it does not
+qualify native Windows or Wayland frontends, fullscreen or other keyboard
+layouts.
+
 With optional VMClock disabled, the XP inventory initially has one unresolved
 device: `ACPI\VMGENCTR`, Code 28. The original Microsoft KMDF 1.9 standalone
 installer completes with exit zero and registers the framework. Normal driver
@@ -246,8 +256,11 @@ document end: the marker was inserted at the clicked position. That text and
 the capture are retained. A later separate Ctrl+End sequence moved the caret;
 an instrumented restore also observes Ctrl+End moving the caret to the end.
 The original cause remains unresolved, so these results do not establish a
-clean post-restore navigation pass. Other keyboard layouts and native viewer
-input remain separate checks for this QXL profile.
+clean post-restore navigation pass. A separate macOS native viewer attempt
+renders the desktop and opens Run with Command+R, but ends with normal VMM
+exit before a text result is saved. That attempt is retained without an
+automatic rerun; it does not qualify Windows 7 viewer text input. Other
+keyboard layouts also remain separate checks for this QXL profile.
 
 ## Windows 11 native GPU checks
 
