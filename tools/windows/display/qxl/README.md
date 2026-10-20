@@ -289,3 +289,26 @@ synchronisation and migration between video and system memory are still needed
 for the complete Windows callbacks. Five focused tests cover the current
 layout, wire-format and ownership paths; all pass Miri using the shared ring
 fixtures from `display_resources/test_utils.rs`.
+
+## Kernel GDI bitmaps
+
+`src/gdi.rs` declares the native `SIZEL` and `SURFOBJ` layouts and owns GDI
+bitmap handles. A software draw area creates and associates a bottom-up bitmap
+over the surface's existing pixel allocation, then locks its surface object.
+Construction failures delete the bitmap. Destruction unlocks the object before
+deleting its handle. A draw area created from an active surface borrows that
+owner, preventing surface destruction while the draw area remains live.
+
+Device bitmaps use an initialised, stable driver surface context and registered
+hooks. Their construction guard deletes the handle on failure; `into_raw`
+transfers successful ownership to GDI. The driver must keep that context live
+until GDI calls its deletion callback. The primary pixel mapping uses the same
+software-bitmap owner through its internal raw constructor, whose caller must
+prove the complete pixel extent and lifetime.
+
+These functions import from `win32k.sys`, using Microsoft's
+[bitmap creation](https://learn.microsoft.com/en-us/windows/win32/api/winddi/nf-winddi-engcreatebitmap)
+and [surface locking](https://learn.microsoft.com/en-us/windows/win32/api/winddi/nf-winddi-englocksurface)
+contracts. `SURFOBJ` is checked against the actual `winddi.h` layout: its private
+and public device-handle names are alternatives, not additional fields.
+Native PDev callbacks and Windows execution must still qualify these owners.

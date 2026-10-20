@@ -205,3 +205,22 @@ The PDev surface table reserves nonzero IDs below the advertised surface count.
 Creation cannot reuse a live ID, and a destroy must be published before that ID
 can be reused. Creation, drawing and destruction must share the same command
 ordering and mapping generation. Mappings remain live through all completions.
+
+## GDI bitmap ownership
+
+A GDI draw area's handle owns its locked `SURFOBJ`. Drop unlocks that object
+before deleting the handle. Failed creation/association/locking retains the
+construction guard until it deletes any successfully allocated bitmap. GDI
+access and destruction occur at PASSIVE_LEVEL in serialised display callbacks.
+
+The secondary-surface constructor borrows the active surface through draw-area
+destruction. The internal raw constructor requires a complete, live, writable
+pixel mapping matching its checked layout. It must not outlive that allocation.
+Neither constructor proves CPU/hardware synchronisation: callers must end
+overlapping host/guest writes before GDI accesses pixel storage. Exposed surface
+objects remain raw pointers and must not be retained after the owner drops.
+
+Device-bitmap construction requires a stable, initialised driver context and
+only registered hooks. The context must support deletion even during failed
+construction. After handoff, GDI owns the bitmap; its deletion callback ends
+the driver's context lifetime. Private helper bitmaps remain driver-owned.
