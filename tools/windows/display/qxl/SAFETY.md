@@ -320,3 +320,32 @@ After CPU writes, drop that area and issue the corresponding update before
 depending on host display contents. Unmap additionally requires all cache,
 surface and builder tokens released and every GDI/CPU user stopped; the
 session's `can_unmap` check covers its state and pool only.
+
+## Opaque PDev handles
+
+`Object<T>` places a callback value at a checked aligned address inside a fresh
+allocation. Pointer adjustment uses `with_addr`, retaining the original heap
+provenance. Neither object moves nor opaque-handle transfer move that value.
+The callback framework owns a transferred handle until its single recovery;
+all borrowed handles and interior users must end before recovery/destruction.
+The destructor drops the full value before releasing its original heap pointer.
+Failed placement leaves both the value and allocation with the caller.
+
+`pdev` validates non-null, bounded, disjoint capability outputs before any
+allocation or output write. It borrows only the known native record extents;
+unknown output tails stay untouched. GDI supplies the complete declared
+DEVMODEW input. Mode selection copies its request before output writes, so
+input/output overlap does not leave an overlapping Rust borrow.
+
+PDev palette ownership lasts through every published DEVINFO handle. The
+instance-count token drops after palette destruction, including failed setup.
+Driver shutdown additionally requires GDI to stop all callbacks and users;
+the count alone does not prove that an in-progress callback has finished.
+
+The shared GDI semaphore serialises instance creation/destruction across PDevs
+and remains live through their final callbacks. Its guard stays on its acquiring
+thread. GDI semaphore acquisition can be recursive: it must not by itself
+justify aliased mutable Rust references during reentrant GDI calls. Mutable
+hardware attachment still needs its explicit borrow/lifecycle discipline.
+The current setup callbacks remain unregistered until surface, rendering and
+compression state and the complete DDI table are ready.

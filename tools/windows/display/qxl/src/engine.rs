@@ -30,6 +30,10 @@ const ALLOCATION_TAG: u32 = u32::from_le_bytes(*b"qxld");
     link(name = "win32k.sys", kind = "raw-dylib", modifiers = "+verbatim")
 )]
 unsafe extern "system" {
+    pub(crate) fn EngCreateSemaphore() -> *mut c_void;
+    pub(crate) fn EngAcquireSemaphore(semaphore: *mut c_void);
+    pub(crate) fn EngReleaseSemaphore(semaphore: *mut c_void);
+    pub(crate) fn EngDeleteSemaphore(semaphore: *mut c_void);
     pub(crate) fn EngClearEvent(event: *mut c_void);
     pub(crate) fn EngCreatePalette(
         mode: u32,
@@ -87,6 +91,26 @@ impl Drop for Memory {
         // mode-table reads end before its destruction at PASSIVE_LEVEL.
         unsafe { EngFreeMem(self.0.as_ptr().cast()) };
     }
+}
+
+/// # Safety
+/// Construct and destroy the object at PASSIVE_LEVEL in GDI callback context.
+pub(crate) unsafe fn allocate_object<T>(value: T) -> Result<crate::kernel_object::Object<T>, u32> {
+    let bytes = crate::kernel_object::Object::<T>::allocation_bytes()
+        .and_then(|bytes| u32::try_from(bytes).ok())
+        .ok_or(INVALID_DATA)?;
+    // SAFETY: the caller supplies the passive-level GDI heap context.
+    let memory = unsafe { Memory::zeroed(bytes) }?;
+    // SAFETY: this guard owns the full fresh extent; EngFreeMem reclaims its
+    // original pointer, after T's destructor, in the retained GDI context.
+    let object = unsafe {
+        crate::kernel_object::Object::new_in(memory.0, bytes as usize, EngFreeMem, value)
+    }
+    .map_err(|_| INVALID_DATA)?;
+    // Ownership transfers only after successful initialisation; nothing can
+    // fail between that transfer and disarming the original allocation guard.
+    core::mem::forget(memory);
+    Ok(object)
 }
 
 #[derive(Debug)]

@@ -77,7 +77,7 @@ The port covers the full XP/7 driver package. The remaining source mapping is:
 | Upstream source | Rust replacement |
 | --- | --- |
 | `miniport/qxl.c` | Release-path callbacks and SYS builds ported; native load, lifecycle and request qualification remain. |
-| `display/driver.c` | Cosmetic styles, slot encoding and mode enumeration ported; GDI device lifecycle, escapes and path submission remain. |
+| `display/driver.c` | Cosmetic styles, slots, mode enumeration, PDev setup and hardware sessions ported; surface callbacks, escapes and rendering remain. |
 | `display/res.c` | Slot conversion, rings and output/resource ownership ported; caches and drawing payloads remain. |
 | `display/surface.c` | Surface allocation and create/destroy ownership ported; GDI bitmap binding, synchronisation and RAM migration remain. |
 | `display/rop.c` | ROP2/ROP3 selection ported in `src/rop.rs`; drawing submission remains. |
@@ -409,3 +409,24 @@ be restarted. Release all retained surface/cache tokens before unmapping.
 This session is the native hardware part of the unfinished PDev integration.
 It does not register GDI callbacks, migrate live GDI bitmaps to system RAM or
 replace the final Windows qualification. Those remain required before shipping.
+
+## Native PDev ownership
+
+`src/pdev.rs` implements the
+[configuration](https://learn.microsoft.com/en-us/windows/win32/api/winddi/nf-winddi-drvenablepdev),
+[completion](https://learn.microsoft.com/en-us/windows/win32/api/winddi/nf-winddi-drvcompletepdev)
+and [destruction](https://learn.microsoft.com/en-us/windows/win32/api/winddi/nf-winddi-drvdisablepdev) callbacks
+for a stable, heap-owned PDev. Enable validates both output extents before
+allocating, selects the requested mode and palette, and writes only known native
+capability records. Completion stores the installed GDI handle. Destruction
+drops the Rust value before freeing its original allocation.
+
+Opaque callback handles refer to `src/kernel_object.rs` allocations. Alignment
+is computed inside the supplied extent without losing pointer provenance; the
+stored value stays at that address until destruction. Handle transfer and
+recovery have one owner. Driver initialisation creates one shared GDI semaphore
+for all PDevs; driver shutdown requires every PDev to have been destroyed.
+
+These callbacks are not registered yet. Hardware/surface attachment, rendering
+state, compression and the remaining callbacks must be complete before the full
+DDI table is published. The PDev setup callbacks do not activate hardware.

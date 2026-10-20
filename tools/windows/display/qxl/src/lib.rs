@@ -5,6 +5,9 @@
 
 mod abi;
 
+#[cfg(any(test, all(windows, any(target_arch = "x86", target_arch = "x86_64"))))]
+mod kernel_object;
+
 pub mod arena;
 #[cfg(any(test, all(windows, any(target_arch = "x86", target_arch = "x86_64"))))]
 pub mod control;
@@ -22,6 +25,9 @@ pub mod ioctl;
 pub mod memory;
 pub mod modes;
 pub mod pdev_config;
+
+#[cfg(any(test, all(windows, any(target_arch = "x86", target_arch = "x86_64"))))]
+pub mod pdev;
 pub mod ring;
 pub mod rop;
 pub mod slots;
