@@ -23,11 +23,13 @@ Custom styles include the GDI density when converted to QXL Q28.4 pixels;
 alternate styles retain single-pixel marks and gaps. Invalid lengths, counts
 and overflow return an error before a command can be submitted.
 
-`src/modes.rs` ports `FillVidModeInfo` and `SetVideoModeInfo` from
+`src/modes.rs` ports mode conversion and the mode-selection state from
 `xddm/miniport/qxl.c`. It reads packed ROM mode records with checked bounds,
-preserves mode IDs and orientation, and defines the documented
+preserves mode IDs and orientation, alternates the two custom-mode IDs, and
+defines the documented
 [VIDEO_MODE_INFORMATION ABI](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddvdeo/ns-ntddvdeo-_video_mode_information)
 directly in Rust. No SDK headers or libraries are used.
+Requests validate the aligned framebuffer size before they change mode state.
 
 `src/slots.rs` ports the shared miniport/display slot address calculation from
 `CreateMemSlots`, `CreateVRamSlot`, `PA` and `VA`. A slot validates its physical
@@ -63,3 +65,21 @@ cargo fmt --manifest-path tools/windows/display/qxl/Cargo.toml --check
       resolution changes, input and lifecycle against the existing probes.
 
 Existing successful vendor-driver checks do not qualify the Rust replacements.
+
+The port covers the full XP/7 driver package. The remaining source mapping is:
+
+| Upstream source | Rust replacement |
+| --- | --- |
+| `miniport/qxl.c` | Mode state and slot encoding ported; discovery, mappings, events, interrupts, power and IOCTL entry points remain. |
+| `display/driver.c` | Cosmetic styles and slot encoding ported; GDI device lifecycle, escapes and path submission remain. |
+| `display/res.c` | Slot conversion and ring endpoints ported; resource ownership, caches and command payloads remain. |
+| `display/surface.c` | Surface allocation, upload, synchronisation and destruction remain. |
+| `display/rop.c`, `brush.c`, `text.c`, `pointer.c` | Raster operations, brush realisation, text and cursor operations remain. |
+| `display/quic*.c` | Compression remains. |
+| `display/mspace.c` | Shared-memory allocator remains. |
+| `include/murmur_hash2a.h` | Cache hashing remains. |
+| `miniport/minimal_snprintf.c` | Replace diagnostic formatting with `core::fmt`. |
+| `miniport/wdmhelper.c` | Contains only Windows 2000 compatibility code; XP/7 use VideoPort event APIs. |
+
+The build must use Rust ABI declarations, raw DLL imports and Rust's linker.
+Do not add `wdk-build`, bindgen, SDK import libraries or a C compilation step.
