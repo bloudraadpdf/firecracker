@@ -32,6 +32,15 @@ pub struct SurfaceObject {
     pub flags: u16,
 }
 
+#[cfg(any(test, all(windows, any(target_arch = "x86", target_arch = "x86_64"))))]
+pub(crate) fn bottom_up(
+    base: core::ptr::NonNull<u8>,
+    layout: crate::surface::Layout,
+) -> (*mut c_void, i32) {
+    let offset = layout.bytes() - layout.stride() as usize;
+    (base.as_ptr().wrapping_add(offset).cast(), -layout.stride())
+}
+
 const _: () = {
     assert!(size_of::<Size>() == 8);
     assert!(offset_of!(SurfaceObject, driver_device) == 2 * size_of::<usize>());
@@ -147,6 +156,11 @@ mod native {
             core::mem::forget(self);
             handle
         }
+
+        /// Borrow the live handle without transferring deletion ownership.
+        pub fn handle(&self) -> NonNull<c_void> {
+            self.0
+        }
     }
 
     impl Drop for Bitmap {
@@ -242,3 +256,32 @@ mod native {
 
 #[cfg(all(windows, any(target_arch = "x86", target_arch = "x86_64")))]
 pub use native::{Bitmap, DrawArea, Error, Palette};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::surface::{Format, Layout};
+    use core::ptr::NonNull;
+
+    #[test]
+    fn bottom_up_view_visits_each_padded_row_inside_the_same_allocation() {
+        let mut pixels = [0u8; 48];
+        for (index, row) in pixels.as_chunks_mut::<16>().0.iter_mut().enumerate() {
+            row[..12].fill(index as u8 + 1);
+            row[12..].fill(0xaa);
+        }
+        let base = NonNull::from(pixels.as_mut_slice()).cast::<u8>();
+        let layout = Layout::with_stride(3, 3, Format::Xrgb8888, 16).unwrap();
+        let (first, stride) = bottom_up(base, layout);
+        assert!(stride < 0);
+        for row in 0..3 {
+            // SAFETY: the checked bottom-up view must retain the full original
+            // allocation's provenance and keep each logical row inside it.
+            let bytes = unsafe {
+                core::slice::from_raw_parts(first.cast::<u8>().offset(row * stride as isize), 16)
+            };
+            assert_eq!(&bytes[..12], &[3 - row as u8; 12]);
+            assert_eq!(&bytes[12..], &[0xaa; 4]);
+        }
+    }
+}

@@ -72,14 +72,18 @@ impl<T> Object<T> {
     }
 
     pub(crate) fn into_handle(self) -> NonNull<c_void> {
-        let handle = self.0.cast();
+        let handle = self.handle();
         core::mem::forget(self);
         handle
     }
 
+    pub(crate) fn handle(&self) -> NonNull<c_void> {
+        self.0.cast()
+    }
+
     /// # Safety
-    /// The handle must come from into_handle for exactly this T and remain
-    /// owned by the caller's callback framework for the returned borrow. Never
+    /// The handle must come from handle or into_handle for exactly this T. Its
+    /// Rust owner or callback framework must retain it for the returned borrow. Never
     /// destroy/recover it while the borrow or any interior user remains live.
     pub(crate) unsafe fn borrow_handle<'a>(handle: NonNull<c_void>) -> &'a T {
         // SAFETY: the framework retains this exact typed live node through 'a.
@@ -200,6 +204,23 @@ mod tests {
         assert_eq!(order.load(Ordering::SeqCst), 1);
         // SAFETY: failed construction left this original allocation with us.
         unsafe { release(memory.as_ptr().cast()) };
+        assert_eq!(order.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn borrowed_handle_does_not_transfer_deletion_ownership() {
+        let order = Arc::new(AtomicUsize::new(0));
+        let memory = allocate(&order);
+        // SAFETY: this fresh backing retains its full extent and matches release.
+        let object = unsafe { Object::new_in(memory, 511, release, Value(order.clone())) }.unwrap();
+        // SAFETY: the Rust owner retains this exact typed borrowed handle.
+        let borrowed = unsafe { Object::<Value>::borrow_handle(object.handle()) };
+        assert_eq!(
+            core::ptr::from_ref(borrowed),
+            core::ptr::from_ref(object.get())
+        );
+        assert_eq!(order.load(Ordering::SeqCst), 0);
+        drop(object);
         assert_eq!(order.load(Ordering::SeqCst), 2);
     }
 }
