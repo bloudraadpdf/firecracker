@@ -15,6 +15,8 @@ pub mod display_modes;
 pub mod display_resources;
 pub mod driver_info;
 pub mod gdi;
+#[cfg(any(test, all(windows, any(target_arch = "x86", target_arch = "x86_64"))))]
+pub mod hardware;
 pub mod hash;
 pub mod ioctl;
 pub mod memory;

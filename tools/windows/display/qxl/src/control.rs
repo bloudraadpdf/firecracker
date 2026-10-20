@@ -36,6 +36,9 @@ pub enum Operation {
     Monitors(u64),
     DeleteSlot(u8),
     FlushRelease,
+    NotifyCommand,
+    NotifyCursor,
+    NotifyOutOfMemory,
 }
 
 impl Operation {
@@ -89,11 +92,21 @@ impl Operation {
                 info.monitors_config_port
             }
             Self::DeleteSlot(_) => info.memslot_delete_port,
+            Self::NotifyCommand => info.notify_command_port,
+            Self::NotifyCursor => info.notify_cursor_port,
+            Self::NotifyOutOfMemory => info.notify_oom_port,
             Self::FlushRelease if asynchronous => info.flush_release_port,
             _ => return Err(Error::Unsupported),
         };
-        let asynchronous =
-            asynchronous && !matches!(self, Self::DeleteSlot(_) | Self::FlushRelease);
+        let asynchronous = asynchronous
+            && !matches!(
+                self,
+                Self::DeleteSlot(_)
+                    | Self::FlushRelease
+                    | Self::NotifyCommand
+                    | Self::NotifyCursor
+                    | Self::NotifyOutOfMemory
+            );
         if port.is_null() || port.addr() > u16::MAX as usize {
             return Err(Error::InvalidPort);
         }
@@ -651,5 +664,27 @@ mod tests {
         assert_eq!(Operation::DeleteSlot(2).port(&info(2)), Ok((0xc009, false)));
         assert_eq!(Operation::DeleteSlot(2).port(&info(3)), Ok((0xc009, false)));
         assert_eq!(Operation::FlushRelease.port(&info(3)), Ok((0xc017, false)));
+    }
+
+    #[test]
+    fn notifications_never_clear_or_wait_for_control_completion() {
+        let mut info = info(4);
+        info.notify_command_port = pointer(0xc000);
+        info.notify_cursor_port = pointer(0xc001);
+        info.notify_oom_port = pointer(0xc004);
+        let mut channel = Channel {
+            info: &info,
+            failed: false,
+        };
+        let mut fake = Fake::default();
+        for (operation, port) in [
+            (Operation::NotifyCommand, 0xc000),
+            (Operation::NotifyCursor, 0xc001),
+            (Operation::NotifyOutOfMemory, 0xc004),
+        ] {
+            channel.issue(operation, &mut fake).unwrap();
+            assert_eq!(fake.actions.pop(), Some(Action::Issue(port, 0)));
+            assert!(fake.actions.is_empty());
+        }
     }
 }
