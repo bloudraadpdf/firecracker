@@ -236,7 +236,7 @@ impl<'memory> Surface<'memory, Prepared> {
             Err(error) => return Err((error, self)),
         };
         // SAFETY: the caller supplies the active ring and mapping relationship.
-        match unsafe { submit(pool, ring, output, &self.memory) } {
+        match unsafe { pool.submit_retained(output, ring, &self.memory) } {
             Ok(notify) => Ok((self.change_state(), notify)),
             Err(error) => Err((error, self)),
         }
@@ -267,7 +267,7 @@ impl<'memory> Surface<'memory, Active> {
             Err(error) => return Err((error, self)),
         };
         // SAFETY: the caller retains the device and command ordering contract.
-        match unsafe { submit(pool, ring, output, &self.memory) } {
+        match unsafe { pool.submit_retained(output, ring, &self.memory) } {
             Ok(notify) => {
                 // The destroy command retains its own reference through release.
                 pool.release(self.memory)
@@ -304,32 +304,6 @@ fn request<'memory>(
         bytes[12] = 1;
     }
     Ok(output)
-}
-
-unsafe fn submit<'memory>(
-    pool: &mut Pool<'memory>,
-    ring: &mut CommandRing,
-    mut output: Output<'memory>,
-    memory: &Resource<'memory>,
-) -> Result<bool, Error> {
-    let retained = match pool.retain(memory) {
-        Ok(retained) => retained,
-        Err(error) => {
-            pool.cancel(output).expect("surface command ownership");
-            return Err(error);
-        }
-    };
-    pool.attach(&mut output, retained)
-        .expect("surface command resource slot");
-    // SAFETY: callers retain the active device and mapping relationship, and
-    // this output's resource reference keeps its surface payload live.
-    match unsafe { pool.submit(output, ring) } {
-        Ok(notify) => Ok(notify),
-        Err((error, output)) => {
-            pool.cancel(output).expect("surface command ownership");
-            Err(error)
-        }
-    }
 }
 
 #[cfg(test)]

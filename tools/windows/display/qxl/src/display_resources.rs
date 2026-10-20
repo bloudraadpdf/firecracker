@@ -344,6 +344,37 @@ impl<'memory> Pool<'memory> {
         Ok(())
     }
 
+    /// Submit a local builder with a retained reference; cancel on failure.
+    /// # Safety
+    /// The fresh output must belong to this pool and have no resources yet.
+    /// The same active-device, ring-generation and mapping-lifetime contract
+    /// as submit applies.
+    pub(crate) unsafe fn submit_retained(
+        &mut self,
+        mut output: Output<'memory>,
+        ring: &mut CommandRing,
+        memory: &Resource<'memory>,
+    ) -> Result<bool, Error> {
+        let retained = match self.retain(memory) {
+            Ok(retained) => retained,
+            Err(error) => {
+                self.cancel(output).expect("local command ownership");
+                return Err(error);
+            }
+        };
+        self.attach(&mut output, retained)
+            .expect("first local command resource slot");
+        // SAFETY: the caller retains the active device/ring/mapping; the output
+        // now retains its resource independently through host release.
+        match unsafe { self.submit(output, ring) } {
+            Ok(notify) => Ok(notify),
+            Err((error, output)) => {
+                self.cancel(output).expect("local command ownership");
+                Err(error)
+            }
+        }
+    }
+
     /// # Safety
     /// The ring must belong to this device and mapping generation. All payload
     /// and resource writes must have ended before publication, and mappings and
