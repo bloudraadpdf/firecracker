@@ -1,7 +1,7 @@
 # Guest driver safety boundary
 
-The current crate contains driver components, not loadable drivers. The Windows
-entry points, ownership of mapped regions and installation are still pending.
+The current crate builds unsigned miniport images. The display DLL, package
+and native driver qualification are incomplete.
 
 ## Windows ABI
 
@@ -100,6 +100,28 @@ Treat their raw u64 pointers as packed data; do not form aligned Rust u64
 references. Slot registration writes individual volatile bytes and publishes
 them before I/O. The shared interrupt fields are aligned u32 values.
 
-The SYS entry wrapper, framework teardown behaviour and native fault paths
-remain qualification work. Compile checks of callback source do not prove
-that Windows loads, unloads or correctly dispatches the Rust driver.
+The SYS entry wrapper delegates directly to the registered miniport code.
+Panic handling calls KeBugCheckEx with the RPNC convention and source location;
+it cannot unwind through the Windows boundary. Compiler memcpy/memset calls
+resolve to Rust ABI wrappers. Their full ranges must be valid and meet the
+VideoPort memory routines' IRQL/residency requirements. Copy ranges must not
+overlap. Long ranges use ULONG-sized chunks without truncating size_t.
+
+Framework teardown behaviour and native fault paths remain qualification work.
+Linking and checking the PE images do not prove that Windows loads, unloads
+or correctly dispatches the Rust driver.
+
+## Kernel code generation
+
+The x86 build applies LLVM's `noimplicitfloat` attribute to every function.
+This prevents integer operations, copies and initialisation from introducing
+SIMD or floating-point register use in interrupt handlers. It preserves the
+target ABI; disabling SSE2 on Rust's standard x86 MSVC target does not.
+Do not introduce explicit floating-point, vector operations or SIMD intrinsics:
+the attribute does not prohibit them. Inspect the linked image's executable
+sections after compiler or driver changes, including code from `core`.
+
+Windows x64 preserves SSE state for kernel callbacks; its standard target needs
+no such attribute. Neither target enables AVX. These constraints follow
+[Microsoft's kernel floating-point rules](https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/using-floating-point-or-mmx-in-a-wdm-driver)
+and the [LLVM attribute definition](https://llvm.org/docs/LangRef.html#function-attributes).
