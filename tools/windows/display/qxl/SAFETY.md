@@ -230,3 +230,7 @@ Their raw handles in `DEVINFO` do not extend that lifetime. Native record
 encoding writes only named fields, clears padding and preserves short output
 buffers. Field constructors supply valid initial values, including null raw
 pointers and nested arrays; native struct padding is never copied to Windows.
+Thin pointer fields copy their native representation directly, preserving
+provenance through the ABI record. Converting them to integer byte arrays loses
+the provenance needed when a decoded pointer is used. The native record format
+is for supported little-endian Windows targets, not a pointer serialisation API.
