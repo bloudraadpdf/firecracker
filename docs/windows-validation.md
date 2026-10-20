@@ -152,10 +152,18 @@ A pointer click reached the OK button at the expected position. Win+R and text
 input saved a Notepad marker whose bytes were read back through the serial port.
 These are direct console checks, not VNC or native viewer qualification.
 
-All-mode pixel comparisons, pointer bounds, other keyboard layouts, selected-mode
-cold boot and full/differential restore remain open for this QXL profile. The
-test reference also has unresolved ACPI device warnings. It does not establish
-complete XP or Windows 7 graphics support.
+The eighteen-mode probe from `d93046f00` subsequently passes on the same VMM
+through the real RFB bridge. The selected 2560 by 1440 mode survives cold boot.
+Every mode passes an exact full-frame RGB comparison, five ordered pointer
+targets and all 95 printable ASCII characters with Caps Lock enabled. The probe
+restores 2560 by 1440 with no cleanup error. After normal shutdown, read-only NTFS
+inspection confirms all eighteen saved files contain exactly bytes 32 through
+126. The inspection detaches its owned loop device and the disk-closed check
+passes. No failed case was rerun in this matrix.
+
+Other keyboard layouts, native viewer input and full/differential restore remain
+open for this QXL profile. The test reference also has unresolved ACPI device
+warnings. These checks do not establish complete XP or Windows 7 graphics support.
 
 ## Windows 7 native QXL checks
 
