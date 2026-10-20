@@ -87,30 +87,53 @@ impl Controller {
         Ok(())
     }
 
-    /// Process bounded work; true requests another poll, including after release backpressure.
-    pub fn poll(&mut self, now: u64) -> Result<bool, TransportError> {
+    fn clock(&self, now: u64) -> Result<(), TransportError> {
         self.memory
             .set_rom_word(48, u32::try_from(now & u64::from(u32::MAX)).unwrap())?;
-        for queue in [Queue::Commands, Queue::Cursor] {
+        Ok(())
+    }
+
+    fn dispatch(
+        &mut self,
+        queue: Queue,
+        now: u64,
+        synchronous: bool,
+    ) -> Result<(), TransportError> {
+        let execute = |command| {
+            Self::execute(
+                &self.memory,
+                &self.addresses,
+                self.primary,
+                &mut self.pointer,
+                command,
+                now,
+            )
+        };
+        if synchronous {
             self.queues
-                .drain(&self.memory, &self.addresses, queue, |command| {
-                    Self::execute(
-                        &self.memory,
-                        &self.addresses,
-                        self.primary,
-                        &mut self.pointer,
-                        command,
-                        now,
-                    )
-                })?;
+                .synchronize(&self.memory, &self.addresses, queue, execute)?;
+        } else {
+            self.queues
+                .drain(&self.memory, &self.addresses, queue, execute)?;
+        }
+        Ok(())
+    }
+
+    /// Process bounded work; true requests another poll, including after release backpressure.
+    pub fn poll(&mut self, now: u64) -> Result<bool, TransportError> {
+        self.clock(now)?;
+        for queue in [Queue::Commands, Queue::Cursor] {
+            self.dispatch(queue, now, false)?;
         }
         Ok(self.queues.pending(&self.memory, Queue::Commands)?
-            || self.queues.pending(&self.memory, Queue::Cursor)?)
+            || self.queues.pending(&self.memory, Queue::Cursor)?
+            || self.queues.pending_releases())
     }
 
     fn synchronize(&mut self, now: u64) -> Result<(), TransportError> {
-        if self.poll(now)? {
-            return Err(TransportError::Busy);
+        self.clock(now)?;
+        for queue in [Queue::Commands, Queue::Cursor] {
+            self.dispatch(queue, now, true)?;
         }
         Ok(())
     }
@@ -159,6 +182,9 @@ impl Controller {
             }
             9 => {
                 self.synchronize(now)?;
+                if self.queues.pending_releases() {
+                    return Err(TransportError::Busy);
+                }
                 self.addresses.remove(value)?;
                 if self
                     .primary

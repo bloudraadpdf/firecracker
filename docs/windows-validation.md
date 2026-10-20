@@ -97,10 +97,14 @@ transparent cursor does not read unused chunk links.
 The controller connects command execution, slot generation publication, primary
 surface creation/destruction, attachment and reset. It publishes update IDs,
 the millisecond clock and masked interrupt state. Polling reports pending work
-after a dispatch limit or release-ring backpressure. Synchronous operations
-return `Busy` while work remains. A full 32-command dispatch completes through
-one release chain before a successful synchronous update returns. PCI integration
-must preserve this completion contract and continue polling pending work.
+after a dispatch limit or release-ring backpressure. Each synchronous dispatch
+captures its submission count and completes that work without waiting for later
+submissions. A full release ring does not prevent those commands from completing:
+their acknowledgements wait in a bounded queue until the guest consumes releases.
+At most 4,096 acknowledgements can wait there; reaching that limit stops further
+execution with `Busy`. Slot removal also waits until release links are published.
+PCI integration must keep polling pending acknowledgements even when command
+rings are empty.
 
 Cursor state applies set, move and hide commands, including implicit visibility
 on movement. Trails sample positions at millisecond intervals and expire while
