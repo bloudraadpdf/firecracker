@@ -52,3 +52,17 @@ and fit wholly inside the slot.
 `modes.rs` parses an immutable byte snapshot. A caller must not form an ordinary
 Rust slice over device memory that changes during the borrow. Mode requests
 validate the aligned framebuffer size before they change state.
+
+## Miniport resources
+
+`DeviceResources::discover` requires a live VideoPort device extension and
+PASSIVE_LEVEL. The extension must outlive every mapping and event. Stop all
+interrupts, DPCs and display-driver access before resource destruction, which
+also requires PASSIVE_LEVEL. Resource ownership does not itself stop callbacks.
+
+Each successful mapping or event allocation has one owner. Early returns drop
+the owners already constructed, including a successful but short mapping.
+Memory access stays within the requested BAR length even if Windows returns
+a larger mapping. `Mapping::address` returns a raw pointer; it does not permit
+access after unmap. I/O port pointers use wrapping arithmetic because they are
+opaque port addresses, not Rust memory allocations.
