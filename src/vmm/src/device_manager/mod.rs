@@ -76,6 +76,8 @@ mod console_display;
 mod console_input;
 #[cfg(target_arch = "x86_64")]
 mod console_optical;
+#[cfg(target_arch = "x86_64")]
+mod console_qxl;
 #[cfg(feature = "windows")]
 mod console_server;
 #[cfg(target_arch = "x86_64")]
@@ -839,6 +841,9 @@ impl std::fmt::Debug for DeviceRestoreArgs<'_> {
 /// A checkpoint cannot omit state when an external device cannot be captured.
 #[derive(Debug, thiserror::Error)]
 pub enum DeviceManagerSaveError {
+    /// Cannot capture graphical console state: {0}
+    #[error("Cannot capture graphical console state: {0}")]
+    Console(std::io::Error),
     /// Cannot capture TPM state: {0}
     #[error("Cannot capture TPM state: {0}")]
     Tpm(std::io::Error),
@@ -857,7 +862,9 @@ impl DeviceManager {
 
         #[cfg(feature = "windows")]
         let state = DevicesState {
-            console: self.save_console(),
+            console: self
+                .save_console()
+                .map_err(DeviceManagerSaveError::Console)?,
             tpm: self.snapshot_tpm().map_err(DeviceManagerSaveError::Tpm)?,
             uefi_vars: self
                 .snapshot_uefi_vars()

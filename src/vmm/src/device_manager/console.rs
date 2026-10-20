@@ -33,6 +33,10 @@ use super::console_input::ConsoleInput;
 use super::console_optical::OpticalDevice;
 #[cfg(target_arch = "x86_64")]
 use super::console_optical::OpticalState;
+#[cfg(all(target_arch = "x86_64", feature = "windows"))]
+use super::console_qxl::QxlConsole;
+#[cfg(target_arch = "x86_64")]
+use super::console_qxl::QxlState;
 #[cfg(feature = "windows")]
 use super::console_server::ConsoleServer;
 #[cfg(target_arch = "x86_64")]
@@ -64,6 +68,8 @@ enum ConsoleDisplayState {
     Vga(Box<DisplayState>),
     #[cfg(target_arch = "x86_64")]
     VirtioGpu,
+    #[cfg(target_arch = "x86_64")]
+    Qxl(Box<QxlState>),
 }
 
 #[cfg(feature = "windows")]
@@ -72,13 +78,16 @@ impl ConsoleDisplayState {
         match self {
             Self::Vga(state) => Some(state),
             #[cfg(target_arch = "x86_64")]
-            Self::VirtioGpu => None,
+            Self::VirtioGpu | Self::Qxl(_) => None,
         }
     }
 
     #[cfg(all(feature = "windows", target_arch = "x86_64"))]
     fn has_rom(&self) -> bool {
-        self.vga().is_some_and(DisplayState::has_rom)
+        match self {
+            Self::Qxl(state) => state.has_rom(),
+            _ => self.vga().is_some_and(DisplayState::has_rom),
+        }
     }
 }
 
@@ -88,6 +97,8 @@ enum ConsoleDisplay {
     Vga(Arc<Mutex<DisplayDevice>>),
     #[cfg(target_arch = "x86_64")]
     VirtioGpu(Arc<Mutex<crate::devices::display::Vga>>),
+    #[cfg(target_arch = "x86_64")]
+    Qxl(Arc<Mutex<QxlConsole>>),
 }
 
 #[cfg(feature = "windows")]
@@ -97,15 +108,19 @@ impl ConsoleDisplay {
             Self::Vga(device) => device.lock().unwrap().vga(),
             #[cfg(target_arch = "x86_64")]
             Self::VirtioGpu(vga) => vga.clone(),
+            #[cfg(target_arch = "x86_64")]
+            Self::Qxl(device) => device.lock().unwrap().vga(),
         }
     }
 
-    fn save(&self) -> ConsoleDisplayState {
-        match self {
+    fn save(&self) -> io::Result<ConsoleDisplayState> {
+        Ok(match self {
             Self::Vga(device) => ConsoleDisplayState::Vga(Box::new(device.lock().unwrap().save())),
             #[cfg(target_arch = "x86_64")]
             Self::VirtioGpu(_) => ConsoleDisplayState::VirtioGpu,
-        }
+            #[cfg(target_arch = "x86_64")]
+            Self::Qxl(device) => ConsoleDisplayState::Qxl(Box::new(device.lock().unwrap().save()?)),
+        })
     }
 }
 
@@ -154,9 +169,12 @@ impl ConsoleState {
 #[cfg(feature = "windows")]
 impl ConsoleState {
     fn validate_display(&self, config: &ConsoleConfig) -> io::Result<()> {
-        if (config.display == DisplayModel::VirtioGpu)
-            != matches!(self.display, ConsoleDisplayState::VirtioGpu)
-        {
+        if !matches!(
+            (config.display, &self.display),
+            (DisplayModel::Vga, ConsoleDisplayState::Vga(_))
+                | (DisplayModel::VirtioGpu, ConsoleDisplayState::VirtioGpu)
+                | (DisplayModel::Qxl, ConsoleDisplayState::Qxl(_))
+        ) {
             return Err(io::Error::other(
                 "restored console display model and state disagree",
             ));
@@ -242,6 +260,16 @@ pub struct ConsoleHardware {
     optical: Option<Arc<Mutex<OpticalDevice>>>,
 }
 
+#[cfg(all(feature = "windows", target_arch = "x86_64"))]
+impl ConsoleHardware {
+    pub(super) fn qxl(&self) -> Option<&Arc<Mutex<QxlConsole>>> {
+        match &self.display {
+            ConsoleDisplay::Qxl(device) => Some(device),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(all(test, feature = "windows"))]
 impl ConsoleHardware {
     pub(crate) fn fill_test_framebuffer(&self) {
@@ -263,6 +291,9 @@ impl DeviceManager {
     pub(crate) fn set_console_running(&self, running: bool) {
         if let Some(console) = &self.console {
             console.usb.lock().unwrap().set_running(running);
+            if let Some(qxl) = console.qxl() {
+                qxl.lock().unwrap().set_running(running);
+            }
         }
     }
 
@@ -275,6 +306,16 @@ impl DeviceManager {
         &mut self,
         config: crate::vmm_config::console::DisplayUpdateConfig,
     ) -> Result<(), crate::devices::virtio::gpu::GpuError> {
+        if self
+            .console
+            .as_ref()
+            .is_some_and(|console| console.config.display == DisplayModel::Qxl)
+        {
+            return Err(io::Error::other(
+                "QXL modes are selected through the guest display driver",
+            )
+            .into());
+        }
         let gpu = match &self.virtio_devices {
             VirtioDevices::Pci(pci) => pci.get_device(VirtioDeviceType::Gpu, GPU_DEV_ID),
             _ => None,
@@ -388,6 +429,18 @@ impl DeviceManager {
                     .ok_or_else(|| io::Error::other("GPU has no boot VGA"))?;
                 (ConsoleDisplay::VirtioGpu(vga), Some(renderer))
             }
+            DisplayModel::Qxl => (
+                ConsoleDisplay::Qxl(QxlConsole::attach(
+                    vm,
+                    pci,
+                    config.vga_rom_path.as_deref(),
+                    state.and_then(|state| match &state.display {
+                        ConsoleDisplayState::Qxl(state) => Some(state.as_ref()),
+                        _ => None,
+                    }),
+                )?),
+                None,
+            ),
         };
         let optical = if config.optical_drives.is_empty() {
             None
@@ -424,6 +477,9 @@ impl DeviceManager {
         )?;
         if let Some(renderer) = renderer {
             server.use_gpu(renderer);
+        }
+        if let ConsoleDisplay::Qxl(device) = &display {
+            server.use_qxl(device.clone());
         }
         if let Some(state) = state {
             server.restore_held(&state.held)?;
@@ -485,42 +541,45 @@ impl DeviceManager {
         Ok(())
     }
 
-    pub(crate) fn save_console(&self) -> Option<ConsoleState> {
-        self.console.as_ref().map(|console| {
-            #[cfg(target_arch = "x86_64")]
-            let (held, release_pending) = {
-                let server = console.server.lock().unwrap();
-                (server.held_keys(), server.release_pending())
-            };
-            ConsoleState {
-                config: console.config.clone(),
+    pub(crate) fn save_console(&self) -> io::Result<Option<ConsoleState>> {
+        self.console
+            .as_ref()
+            .map(|console| {
                 #[cfg(target_arch = "x86_64")]
-                system_control: console.system_control.lock().unwrap().save(),
-                #[cfg(target_arch = "x86_64")]
-                bridge: console.bridge.lock().unwrap().save(),
-                display: console.display.save(),
-                #[cfg(target_arch = "x86_64")]
-                held,
-                #[cfg(target_arch = "x86_64")]
-                release_pending,
-                #[cfg(target_arch = "x86_64")]
-                usb: console.usb.lock().unwrap().save(),
-                #[cfg(target_arch = "x86_64")]
-                input: self
-                    .legacy_devices
-                    .as_ref()
-                    .unwrap()
-                    .i8042
-                    .lock()
-                    .unwrap()
-                    .save_state(),
-                #[cfg(target_arch = "x86_64")]
-                optical: console
-                    .optical
-                    .as_ref()
-                    .map(|device| device.lock().unwrap().save()),
-            }
-        })
+                let (held, release_pending) = {
+                    let server = console.server.lock().unwrap();
+                    (server.held_keys(), server.release_pending())
+                };
+                Ok(ConsoleState {
+                    config: console.config.clone(),
+                    #[cfg(target_arch = "x86_64")]
+                    system_control: console.system_control.lock().unwrap().save(),
+                    #[cfg(target_arch = "x86_64")]
+                    bridge: console.bridge.lock().unwrap().save(),
+                    display: console.display.save()?,
+                    #[cfg(target_arch = "x86_64")]
+                    held,
+                    #[cfg(target_arch = "x86_64")]
+                    release_pending,
+                    #[cfg(target_arch = "x86_64")]
+                    usb: console.usb.lock().unwrap().save(),
+                    #[cfg(target_arch = "x86_64")]
+                    input: self
+                        .legacy_devices
+                        .as_ref()
+                        .unwrap()
+                        .i8042
+                        .lock()
+                        .unwrap()
+                        .save_state(),
+                    #[cfg(target_arch = "x86_64")]
+                    optical: console
+                        .optical
+                        .as_ref()
+                        .map(|device| device.lock().unwrap().save()),
+                })
+            })
+            .transpose()
     }
 
     pub(crate) fn restore_console(
@@ -566,6 +625,113 @@ mod registration_tests {
     use crate::pci::intx::PciIntxGroup;
     use crate::vstate::vm::tests::setup_vm_with_memory;
 
+    fn platform(memory: usize) -> (Arc<KvmVm>, EventManager, DeviceManager) {
+        let mut vm = setup_vm_with_memory(memory);
+        vm.setup_irqchip(true).unwrap();
+        let vm = Arc::new(vm);
+        let mut events = EventManager::new().unwrap();
+        let manager = DeviceManager::new(
+            &mut events,
+            vm.vcpus_exit_evt(),
+            &vm,
+            None,
+            None,
+            true,
+            true,
+        )
+        .unwrap();
+        (vm, events, manager)
+    }
+
+    #[test]
+    fn qxl_console_restores_its_selected_adapter_and_transactional_timer_registration() {
+        use crate::device_manager::DeviceRestoreArgs;
+        use crate::resources::VmResources;
+        use crate::snapshot::Persist;
+        use crate::vstate::resources::ResourceAllocator;
+        use vmm_sys_util::tempdir::TempDir;
+        let directory = TempDir::new_with_prefix("./qxl-console-").unwrap();
+        let config = ConsoleConfig {
+            socket_path: directory.as_path().join("console.sock"),
+            display: DisplayModel::Qxl,
+            vga_rom_path: None,
+            optical_drives: Vec::new(),
+        };
+        let (vm, mut events, mut manager) = platform(64 << 20);
+        manager.attach_vmgenid_device(&vm).unwrap();
+        manager
+            .attach_console(&vm, &config, None, &mut events)
+            .unwrap();
+        let device = manager.console.as_ref().unwrap().qxl().unwrap().clone();
+        assert!(Arc::ptr_eq(
+            &manager.console.as_ref().unwrap().display.vga(),
+            &device.lock().unwrap().vga()
+        ));
+        device.lock().unwrap().check_registered().unwrap_err();
+        manager
+            .update_display(crate::vmm_config::console::DisplayUpdateConfig {
+                width: 1280,
+                height: 720,
+            })
+            .unwrap_err();
+        let registration = manager.register_platform_devices(&mut events).unwrap();
+        device.lock().unwrap().check_registered().unwrap();
+        drop(registration);
+        device.lock().unwrap().check_registered().unwrap_err();
+        manager
+            .register_platform_devices(&mut events)
+            .unwrap()
+            .commit();
+        manager.set_console_running(true);
+        manager.set_console_running(false);
+        let expected = device.lock().unwrap().frame();
+        let state: crate::device_manager::DevicesState =
+            bitcode::deserialize(&bitcode::serialize(&manager.save().unwrap()).unwrap()).unwrap();
+        assert!(matches!(
+            state.console.as_ref().unwrap().display,
+            ConsoleDisplayState::Qxl(_)
+        ));
+        let mut wrong = config.clone();
+        wrong.display = DisplayModel::Vga;
+        state
+            .console
+            .as_ref()
+            .unwrap()
+            .validate_display(&wrong)
+            .unwrap_err();
+        let allocations = vm.resource_allocator().save();
+        drop(device);
+        drop(manager);
+        drop(events);
+        drop(vm);
+        let mut vm = setup_vm_with_memory(64 << 20);
+        vm.setup_irqchip(true).unwrap();
+        let vm = Arc::new(vm);
+        *vm.resource_allocator() = ResourceAllocator::restore((), &allocations).unwrap();
+        let mut events = EventManager::new().unwrap();
+        let mut resources = VmResources::default();
+        let manager = DeviceManager::restore(
+            DeviceRestoreArgs {
+                mem: vm.guest_memory(),
+                vm: &vm,
+                event_manager: &mut events,
+                vcpus_exit_evt: vm.vcpus_exit_evt(),
+                vm_resources: &mut resources,
+                instance_id: "qxl-console-test",
+                vmgenid_notification: Default::default(),
+                vmclock_notification: Default::default(),
+            },
+            &state,
+        )
+        .unwrap();
+        let restored = manager.console.as_ref().unwrap().qxl().unwrap();
+        assert_eq!(restored.lock().unwrap().frame(), expected);
+        assert!(Arc::ptr_eq(
+            &manager.console.as_ref().unwrap().display.vga(),
+            &restored.lock().unwrap().vga()
+        ));
+    }
+
     #[test]
     fn virtio_console_restores_one_gpu_and_its_boot_display() {
         use crate::device_manager::DeviceRestoreArgs;
@@ -580,20 +746,7 @@ mod registration_tests {
             vga_rom_path: None,
             optical_drives: Vec::new(),
         };
-        let mut source = setup_vm_with_memory(128 << 20);
-        source.setup_irqchip(true).unwrap();
-        let source = Arc::new(source);
-        let mut events = EventManager::new().unwrap();
-        let mut manager = DeviceManager::new(
-            &mut events,
-            source.vcpus_exit_evt(),
-            &source,
-            None,
-            None,
-            true,
-            true,
-        )
-        .unwrap();
+        let (source, mut events, mut manager) = platform(128 << 20);
         manager.attach_vmgenid_device(&source).unwrap();
         manager
             .attach_console(&source, &config, None, &mut events)
@@ -738,7 +891,7 @@ mod registration_tests {
         source
             .attach_console(&vm, &config, None, &mut events)
             .unwrap();
-        let saved = source.save_console().unwrap();
+        let saved = source.save_console().unwrap().unwrap();
 
         saved.validate_for_firmware(None).unwrap();
         let mut missing_rom = saved.clone();

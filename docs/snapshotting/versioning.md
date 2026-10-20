@@ -83,7 +83,11 @@ The current implementation relies on the
 
 ## Snapshot compatibility
 
-This fork uses format40.0.0. ATAPI saves pending unit attention and media events.
+This fork uses format41.0.0. The AMD64 console can save one QXL adapter, including
+PCI and option-ROM state, a stopped virtual clock, shared boot VGA, private
+RAM/VRAM, protocol ROM, memory slots, queues, deferred releases and cursor trails.
+Restore validates host metadata before enabling its mappings. The boot VGA
+framebuffer is stored once. ATAPI saves pending unit attention and media events.
 The console saves its optical drive IDs/paths and the controller saves independent primary/secondary channel state. Restore
 validates the channel layout. ATAPI state stores optional medium identity/size
 and the tray position separately. An empty drive has no ISO identity or file;
@@ -107,7 +111,7 @@ LEDs. Console restore reuses that saved PCI backend. The AMD64 display saves two
 MMIO mappings and a typed optional ROM containing its bytes, mapping and PCI ROM
 BAR state; an absent ROM has no mapping or ROM BAR. The console's saved
 configuration also records the optional ROM path. Format29.0.0 through
-format39.0.0 files require their matching older binaries; format40 does not
+format40.0.0 files require their matching older binaries; format41 does not
 decode them. Snapshot state remains specific to its CPU architecture.
 
 The conventional PC event state also saves GPE0 status and enable bits. Its VM
@@ -116,7 +120,7 @@ without a separate GED interrupt or allocation. Restore uses the saved complete
 PC hardware pair, validates its route before constructing devices, writes the
 new generation ID, then latches the event before vCPUs resume. Default Linux and
 ARM hardware retain the dedicated GED route. Both Cargo builds use the same
-format40 schema; no format34 decoder or migration is provided.
+format41 schema; no format34 decoder or migration is provided.
 
 ### Host kernel
 

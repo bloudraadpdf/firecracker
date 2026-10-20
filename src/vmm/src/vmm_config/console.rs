@@ -17,6 +17,8 @@ pub enum DisplayModel {
     Vga,
     /// VGA boot display with a modern virtio 2D display driver.
     VirtioGpu,
+    /// Shared boot VGA with the native QXL Windows XP and Windows 7 driver.
+    Qxl,
 }
 
 /// One AMD64 optical drive; list order selects primary then secondary master.
