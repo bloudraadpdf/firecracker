@@ -296,6 +296,28 @@ The original failures and corrected XP result are retained. This is an open
 native drawing qualification, despite successful helper exits and normal
 shutdowns. No changed driver or signing-policy bypass has been tested.
 
+## Native QXL default seccomp checks
+
+Source `c3202adcf` passes focused XP SP3 x86 and Windows 7 SP1 x64 cold-boot
+checks with the documented AMD64 musl release profile and default seccomp
+filters. The binary has SHA-256
+`fb533a91f6279df68d8c357934f707e610b87d4458e9db5bbdba54fe35a23e9f`. Neither
+launch used `--no-seccomp` or a custom filter. During each guest run, `/proc`
+reported `Seccomp: 2`, one filter and `NoNewPrivs: 1` for the VMM, API and vCPU
+threads.
+
+Both existing private guest disks reached their native 2560x1440 QXL desktop.
+Win+R and typed `winver` opened the correct About Windows dialogue. An absolute
+pointer click closed it. A typed shutdown command then produced ACPI S5 and
+Firecracker exit code 0. These checks cover cold boot, native console input and
+shutdown with default filters. They do not establish jailer isolation, filtered
+snapshot restore or a resolution of the styled-path mismatch above.
+
+The first four-job build stopped with a Rust 1.98.1 SIGSEGV in `serde_core`. An
+isolated compile with the recorded arguments passed. A subsequent one-job Cargo
+continuation produced the release binary. The compiler crash remains
+unexplained; no compiler flags or product code were changed to suppress it.
+
 ## Windows 11 native GPU checks
 
 Runtime source `ae208ad25` passes native AMD64 scanout checks on Windows 11 Pro
