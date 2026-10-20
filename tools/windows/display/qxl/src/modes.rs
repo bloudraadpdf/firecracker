@@ -12,6 +12,8 @@ pub enum ModeError {
     InvalidDimensions,
     UnsupportedDepth,
     InvalidStride,
+    InvalidId,
+    InsufficientMemory,
 }
 
 #[repr(C)]
@@ -124,9 +126,93 @@ impl VideoModeInformation {
 }
 
 /// A bounded view of the packed, little-endian QXLModes ROM table.
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct ModeTable<'a> {
     records: &'a [u8],
+}
+
+/// Miniport mode state, including the two alternating custom resolution IDs.
+#[derive(Debug)]
+pub struct ModeSet<'a> {
+    table: ModeTable<'a>,
+    custom: [VideoModeInformation; 2],
+    selected_custom: usize,
+    current: u32,
+    surface_bytes: u32,
+}
+
+impl<'a> ModeSet<'a> {
+    pub fn new(table: ModeTable<'a>, surface_bytes: u32) -> Result<Self, ModeError> {
+        let mut modes = table.modes();
+        let first = modes.next().ok_or(ModeError::InvalidTable)??;
+        let mut last = first.mode_index;
+        for (index, entry) in core::iter::once(Ok(first)).chain(modes).enumerate() {
+            let mode = entry?;
+            if mode
+                .framebuffer_bytes()
+                .is_none_or(|bytes| bytes > surface_bytes)
+            {
+                return Err(ModeError::InsufficientMemory);
+            }
+            if index != 0 && mode.mode_index <= last {
+                return Err(ModeError::InvalidId);
+            }
+            last = mode.mode_index;
+        }
+        let mut custom = [first; 2];
+        custom[0].mode_index = last.checked_add(1).ok_or(ModeError::InvalidId)?;
+        custom[1].mode_index = last.checked_add(2).ok_or(ModeError::InvalidId)?;
+        Ok(Self {
+            table,
+            custom,
+            selected_custom: 0,
+            current: first.mode_index,
+            surface_bytes,
+        })
+    }
+
+    pub fn count(&self) -> usize {
+        self.table.records.len() / 32 + 2
+    }
+
+    pub fn entries(&self) -> impl Iterator<Item = Result<VideoModeInformation, ModeError>> + '_ {
+        self.table.modes().chain(self.custom.into_iter().map(Ok))
+    }
+
+    pub fn find(&self, id: u32) -> Result<VideoModeInformation, ModeError> {
+        for mode in self.entries() {
+            let mode = mode?;
+            if mode.mode_index == id {
+                return Ok(mode);
+            }
+        }
+        Err(ModeError::InvalidId)
+    }
+
+    pub fn current(&self) -> Result<VideoModeInformation, ModeError> {
+        self.find(self.current)
+    }
+
+    pub fn set_current(&mut self, id: u32) -> Result<(), ModeError> {
+        self.find(id)?;
+        self.current = id;
+        Ok(())
+    }
+
+    pub fn set_custom(&mut self, width: u32, height: u32, depth: u32) -> Result<u32, ModeError> {
+        let next = self.selected_custom ^ 1;
+        let id = self.custom[next].mode_index;
+        let mode = VideoModeInformation::custom(id, width, height, depth)?;
+        if mode
+            .framebuffer_bytes()
+            .is_none_or(|bytes| bytes > self.surface_bytes)
+        {
+            return Err(ModeError::InsufficientMemory);
+        }
+        self.custom[next] = mode;
+        self.selected_custom = next;
+        Ok(id)
+    }
 }
 
 impl<'a> ModeTable<'a> {
@@ -245,5 +331,59 @@ mod tests {
             VideoModeInformation::from_fields([0, 640, 480, 32, 1, 0, 0, 0]),
             Err(ModeError::InvalidStride)
         );
+    }
+
+    #[test]
+    fn custom_mode_ids_alternate_and_failed_requests_preserve_state() {
+        let fields = [1u32, 17, 1, 1, 32, 4, 320, 240, 0];
+        let mut rom = [0; 36];
+        for (bytes, value) in rom.as_chunks_mut::<4>().0.iter_mut().zip(fields) {
+            *bytes = value.to_le_bytes();
+        }
+        let mut modes = ModeSet::new(ModeTable::parse(&rom, 0).unwrap(), 1923).unwrap();
+        assert_eq!(modes.count(), 3);
+        assert_eq!(modes.current().unwrap().mode_index, 17);
+        assert_eq!(modes.set_current(0), Err(ModeError::InvalidId));
+        assert_eq!(modes.current().unwrap().mode_index, 17);
+        // A 641-pixel RGB24 scanline needs 1924 bytes after alignment.
+        assert_eq!(
+            modes.set_custom(641, 1, 24),
+            Err(ModeError::InsufficientMemory)
+        );
+        assert_eq!(modes.set_custom(640, 1, 24), Ok(19));
+        modes.set_current(19).unwrap();
+        assert_eq!(modes.current().unwrap().width, 640);
+        assert_eq!(
+            modes.set_custom(0, 1, 32),
+            Err(ModeError::InvalidDimensions)
+        );
+        assert_eq!(modes.set_custom(100, 1, 32), Ok(18));
+        assert_eq!(modes.set_custom(200, 1, 32), Ok(19));
+        assert_eq!(modes.current().unwrap().width, 200);
+    }
+
+    #[test]
+    fn mode_set_rejects_duplicate_ids_and_custom_id_overflow() {
+        let mut rom = [0; 68];
+        let fields = [
+            2u32, 17, 1, 1, 32, 4, 320, 240, 0, 17, 1, 1, 32, 4, 320, 240, 0,
+        ];
+        for (bytes, value) in rom.as_chunks_mut::<4>().0.iter_mut().zip(fields) {
+            *bytes = value.to_le_bytes();
+        }
+        assert!(matches!(
+            ModeSet::new(ModeTable::parse(&rom, 0).unwrap(), 4),
+            Err(ModeError::InvalidId)
+        ));
+        rom[36..40].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(matches!(
+            ModeSet::new(ModeTable::parse(&rom, 0).unwrap(), 4),
+            Err(ModeError::InvalidId)
+        ));
+        rom[36..40].copy_from_slice(&18u32.to_le_bytes());
+        assert!(matches!(
+            ModeSet::new(ModeTable::parse(&rom, 0).unwrap(), 3),
+            Err(ModeError::InsufficientMemory)
+        ));
     }
 }
