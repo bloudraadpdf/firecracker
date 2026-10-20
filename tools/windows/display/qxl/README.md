@@ -77,7 +77,7 @@ The port covers the full XP/7 driver package. The remaining source mapping is:
 | Upstream source | Rust replacement |
 | --- | --- |
 | `miniport/qxl.c` | Release-path callbacks and SYS builds ported; native load, lifecycle and request qualification remain. |
-| `display/driver.c` | Cosmetic styles and slot encoding ported; GDI device lifecycle, escapes and path submission remain. |
+| `display/driver.c` | Cosmetic styles, slot encoding and mode enumeration ported; GDI device lifecycle, escapes and path submission remain. |
 | `display/res.c` | Slot conversion and ring endpoints ported; resource ownership, caches and command payloads remain. |
 | `display/surface.c` | Surface allocation, upload, synchronisation and destruction remain. |
 | `display/rop.c` | ROP2/ROP3 selection ported in `src/rop.rs`; drawing submission remains. |
@@ -207,3 +207,23 @@ blend hint, matching the original ROP3 table, rather than its unsafe binary
 blackness hint. Tests check these hints against repeated application for every
 input. Masked commands use the blend effect. GDI callbacks and command
 submission are still required before these operations run in Windows.
+
+## GDI mode enumeration
+
+`src/engine.rs` implements the `DrvGetModes` callback and owns its temporary
+kernel GDI mode buffer. It queries the miniport's count and records, validates
+returned lengths and checked allocation sizes, and frees the buffer on every
+exit. Iteration returns mode copies, including records with extended strides.
+Both driver halves use request codes from `src/ioctl.rs`.
+
+`src/display_modes.rs` filters supported graphical modes and encodes complete
+220-byte `DEVMODEW` records with explicit field writes. Size queries count the
+same supported records that output queries return. Short output buffers are
+unchanged. The encoder preserves depth, frequency and rotation and clears all
+unused fields. Its layout also matches the existing native display probe.
+
+The engine imports kernel functions directly from `win32k.sys`, following
+[EngAllocMem](https://learn.microsoft.com/en-us/windows/win32/api/winddi/nf-winddi-engallocmem)
+and [EngDeviceIoControl](https://learn.microsoft.com/en-us/windows/win32/api/winddi/nf-winddi-engdeviceiocontrol).
+It does not use the user-mode `gdi32.dll` exports. Callback registration and
+native mode-enumeration qualification require the complete display DLL.

@@ -140,3 +140,16 @@ End all host and guest payload access before releasing its token. Stop all
 users and release all tokens before reset or unmap; do not construct another
 arena over memory with live tokens. Calls require external serialisation with
 the display allocation semaphore. There is no implicit token deallocation.
+
+## GDI mode buffer
+
+Mode queries require a live miniport handle in a serialised, passive-level GDI
+callback. The engine owns its zeroed allocation through destruction at
+PASSIVE_LEVEL. Synchronous IOCTLs run before any reads of their output buffers;
+reported byte counts and multiplication bounds are checked before iteration.
+Record reads are unaligned copies of the integer-only miniport ABI.
+
+`DrvGetModes` borrows the caller's output only after the miniport queries finish.
+That output must be writable for its reported capacity and must not alias
+callback-owned state. Its checked extent fits both `ULONG` and `isize` before
+the Rust slice is formed. Iterators cannot outlive their owned mode buffer.

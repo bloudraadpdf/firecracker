@@ -7,9 +7,6 @@
 use core::ffi::c_void;
 use core::mem::{offset_of, size_of};
 
-pub const GET_INFO: u32 = 0x232000;
-pub const SET_CUSTOM_DISPLAY: u32 = 0x232004;
-
 #[repr(C, align(8))]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MemSlot {
