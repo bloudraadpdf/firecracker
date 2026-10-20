@@ -256,11 +256,18 @@ document end: the marker was inserted at the clicked position. That text and
 the capture are retained. A later separate Ctrl+End sequence moved the caret;
 an instrumented restore also observes Ctrl+End moving the caret to the end.
 The original cause remains unresolved, so these results do not establish a
-clean post-restore navigation pass. A separate macOS native viewer attempt
-renders the desktop and opens Run with Command+R, but ends with normal VMM
-exit before a text result is saved. That attempt is retained without an
-automatic rerun; it does not qualify Windows 7 viewer text input. Other
-keyboard layouts also remain separate checks for this QXL profile.
+clean post-restore navigation pass.
+
+The macOS native viewer passes a separate cold-boot input check through the
+standard RFB bridge and SSH forwarding. The check observes Run's selected text
+and verifies the replacement command before Enter. Notepad receives printable
+keys, Shift punctuation and Enter. Guest window dragging and title-bar
+double-clicks after host resize reach their targets. After normal shutdown and
+VMM exit zero, read-only NTFS inspection confirms the saved file contains exactly
+`viewer win7\r\n!A`. The earlier automation attempt that ended before saving text
+is retained; this result does not establish its cause or resolve the snapshot
+navigation issue. Native Windows and Wayland frontends, fullscreen and other
+keyboard layouts remain outside these Mac checks.
 
 ## Windows 11 native GPU checks
 
