@@ -466,8 +466,8 @@ these native attachment functions can be published as a display driver.
 
 ## Native raster callbacks
 
-`src/render.rs` implements the primary-surface software paths for `DrvCopyBits`
-and `DrvBitBlt`, using kernel GDI's
+`src/render.rs` implements primary-surface copying, raster operations, text,
+stroked paths, stretching and alpha blending, using kernel GDI's
 [standard-bitmap operations](https://learn.microsoft.com/en-us/windows/win32/api/winddi/nf-winddi-engbitblt).
 The PDev hardware lease covers synchronisation, temporary CPU views, drawing
 and update publication. Repeated references to one primary use the same GDI
@@ -478,6 +478,13 @@ Standard GDI bitmaps pass through without conversion. Opaque surfaces must
 match a retained primary handle before any driver context is accessed. Secondary
 device-bitmap rendering and the remaining raster callbacks are still required;
 these callbacks are not yet registered in a complete display DLL.
+
+The native callbacks retain GDI's opaque font, path, transform, line-attribute,
+brush and colour-adjustment objects only for their synchronous call. Stretch
+ROP4 excludes unused source and mask operands before surface lookup. All current
+engine imports are present in the tested XP and Windows 7 kernel export tables.
+True-colour transparent drawing remains separate: `EngTransparentBlt` documents
+only limited source formats, so its presence alone does not prove that path.
 
 This CPU destination path uses Firecracker's shared primary framebuffer: frame
 capture reads its guest-memory pixels directly. It is not a generic replacement

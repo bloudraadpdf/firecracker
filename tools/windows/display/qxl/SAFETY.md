@@ -407,3 +407,10 @@ native raster path currently supports standard bitmaps and owned primaries;
 secondary/foreign opaque surfaces are rejected, not reinterpreted. CPU writes
 rely on Firecracker capturing the shared primary framebuffer directly. Final
 callback registration and native guest qualification are still required.
+
+Text, path, stretching and alpha callbacks forward GDI-owned font/path/brush,
+colour-adjustment, transform, line-attribute and blend records without reading
+or retaining their opaque contents. They use the same scoped views and final
+destination update as copying. GDI must supply every required record and native
+rectangle/format contract for the corresponding engine operation. Kernel export
+checks establish import availability only, not operation or callback correctness.
