@@ -37,6 +37,10 @@ impl Controller {
         &self.memory
     }
 
+    pub fn relocate(&mut self, ram: u64, vram: u64) -> Result<(), TransportError> {
+        Ok(self.addresses.relocate(ram, vram)?)
+    }
+
     pub fn irq_level(&self) -> Result<bool, TransportError> {
         Ok(self.memory.load(RAM_HEADER + 4)? & self.memory.load(RAM_HEADER + 8)? != 0)
     }

@@ -81,6 +81,10 @@ pub struct MemorySlot {
 }
 
 impl MemorySlot {
+    pub(super) fn range(&self) -> Range<u64> {
+        self.start..self.end
+    }
+
     pub fn new(
         id: u8,
         generation: u8,

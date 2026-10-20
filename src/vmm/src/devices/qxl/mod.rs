@@ -11,6 +11,7 @@ mod glyph;
 pub mod line;
 pub mod memory;
 mod path;
+pub mod pci;
 pub mod protocol;
 pub mod raster;
 pub mod surface;
