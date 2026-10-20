@@ -1512,8 +1512,9 @@ definitions:
         description: >-
           AMD64 host path to the SeaVGABIOS expansion ROM. Required for SeaBIOS
           and when no firmware profile is selected; optional with explicit
-          cloud-hv firmware, whose GOP driver uses the display BARs directly.
-          Omission creates no ROM mapping or ROM BAR. Not accepted on ARM64.
+          cloud-hv firmware, whose GOP driver needs no VGA option ROM.
+          Omission creates no PCI expansion-ROM BAR; QXL retains its separate
+          protocol ROM data BAR. Not accepted on ARM64.
       optical_drives:
         type: array
         maxItems: 2

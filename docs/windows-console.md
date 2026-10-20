@@ -179,8 +179,11 @@ machine configuration and drives. Select the matching explicit firmware profile
 in the boot source: `{"type": "seabios"}` for SeaBIOS, or `cloud-hv` with its
 stable system UUID for CloudHv. SeaBIOS does not use that UUID or SMBIOS
 handoff. With explicit `cloud-hv` firmware, omit `vga_rom_path`: its GOP driver
-uses the display's framebuffer and register BARs directly. This creates no ROM
-mapping or expansion-ROM BAR. SeaBIOS and configurations without an explicit
+configures the display without an executable VGA option ROM. This creates no
+expansion-ROM BAR. QXL still exposes its protocol ROM data in BAR2; that data
+does not contain VGA firmware. See the
+[firmware interfaces](../resources/firmware/cloudhv-console/README.md) for each
+display's register access. SeaBIOS and configurations without an explicit
 firmware profile require the ROM. The console also selects conventional PC power
 and RTC hardware; removing the console does not remove them when a firmware
 profile remains selected.
