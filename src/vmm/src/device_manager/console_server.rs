@@ -59,6 +59,8 @@ pub struct ConsoleServer {
     vga: Arc<Mutex<Vga>>,
     #[cfg(target_arch = "x86_64")]
     gpu: Option<Arc<Mutex<crate::devices::virtio::gpu::renderer::Renderer>>>,
+    #[cfg(target_arch = "x86_64")]
+    qxl: Option<Arc<Mutex<super::console_qxl::QxlConsole>>>,
     input: ConsoleInput,
     #[cfg(target_arch = "x86_64")]
     optical: Option<Arc<Mutex<OpticalDevice>>>,
@@ -90,6 +92,8 @@ impl ConsoleServer {
             vga,
             #[cfg(target_arch = "x86_64")]
             gpu: None,
+            #[cfg(target_arch = "x86_64")]
+            qxl: None,
             input,
             #[cfg(target_arch = "x86_64")]
             optical,
@@ -110,6 +114,10 @@ impl ConsoleServer {
 
     fn frame(&self) -> crate::devices::display::Frame {
         #[cfg(target_arch = "x86_64")]
+        if let Some(qxl) = &self.qxl {
+            return qxl.lock().unwrap().frame();
+        }
+        #[cfg(target_arch = "x86_64")]
         if let Some(gpu) = &self.gpu {
             let gpu = gpu.lock().unwrap();
             if gpu.is_native() {
@@ -124,6 +132,11 @@ impl ConsoleServer {
             }
         }
         self.vga.lock().unwrap().render()
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    pub(super) fn use_qxl(&mut self, device: Arc<Mutex<super::console_qxl::QxlConsole>>) {
+        self.qxl = Some(device);
     }
 
     /// Check event registration after adding this subscriber to the event manager.

@@ -195,7 +195,7 @@ pub enum CreateSnapshotError {
 }
 
 /// Snapshot version
-pub const SNAPSHOT_VERSION: Version = Version::new(40, 0, 0);
+pub const SNAPSHOT_VERSION: Version = Version::new(41, 0, 0);
 
 /// Creates a Microvm snapshot.
 pub fn create_snapshot(
@@ -889,7 +889,7 @@ mod tests {
 
         let mut state = MicrovmState {
             device_states: crate::device_manager::DevicesState {
-                console: manager.save_console(),
+                console: manager.save_console().unwrap(),
                 #[cfg(target_arch = "x86_64")]
                 cmos_state: manager
                     .pc_devices()

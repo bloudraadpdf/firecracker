@@ -189,10 +189,24 @@ For Windows 10/11 with the pinned virtio display driver, select
 without `vga_rom_path`. This attaches one virtio-VGA PCI function. Its boot display
 uses the same VGA framebuffer; the guest driver then supplies native frames and
 cursor updates to both VNC and the optional native viewer. The initial preferred
-mode is 1024x768. Omit `display`, or select `vga`, for the existing XP/7 profile.
+mode is 1024x768. Omit `display`, or select `vga`, for the basic VGA profile.
 The Windows 10 candidate has passed native scanout, mode changes and full
 restore. The USB clock correction also passes cold boot and pointer input. See the
 [GPU candidate record](windows-validation.md#virtio-gpu-integration-candidate).
+
+The AMD64 `"display": "qxl"` candidate exposes one revision-two QXL PCI
+adapter for the existing Windows XP and Windows 7 XDDM drivers. Its boot VGA
+and native driver share the framebuffer; there is no second display device.
+Use a VGA option ROM with the BIOS firmware profile. Native QXL frames and
+cursor updates use the same console socket as VNC and the native viewer.
+The adapter advertises modes from 640x480 through 2560x1440 at 32 bits per pixel.
+Change modes through the guest driver. The host `/display` update API remains
+specific to virtio GPU.
+
+QXL attachment, interrupt delivery, deferred work, error/reset handling and
+snapshot restore have native KVM component coverage. Installation, signed-driver
+binding and interactive XP/7 qualification remain pending. This candidate does
+not establish those Windows versions as complete or validated.
 
 For an installed Windows 10 guest, attach the pinned virtio driver ISO and run
 this in an elevated command prompt, using its actual drive letter:
@@ -552,7 +566,8 @@ full installed-reference matrix covers the legacy VGA profile.
 AMD64 console snapshots contain display memory and registers, keyboard/mouse
 queues, held input, pending releases, keyboard LEDs and pending lock updates,
 USB controller/HID state, PCI state, optical transfer state and media identity.
-The current snapshot format is 40.0.0. Display state adds about 16 MiB; the
+The current snapshot format is 41.0.0. Basic VGA state adds about 16 MiB; QXL
+also saves 48 MiB of private RAM/VRAM and its protocol ROM and control state. The
 bounded snapshot reader accepts at most 128 MiB, including GPU state. The guest
 disk remains a separate artifact, as with ordinary Firecracker snapshots.
 
@@ -562,8 +577,8 @@ does not save a second held-key or LED state. Pending frames, partial-frame
 cursor, position, held releases and guest/pending lock LEDs travel with Input.
 Missing, stray or mismatched console/input topology is rejected before backend
 attachment. Format29 through format39 snapshots require their matching older
-binaries; format40 has no decoder for them. Snapshots do not move between AMD64
-and ARM64.
+binaries; format41 has no decoder for them. Format40 also requires its matching
+binary. Snapshots do not move between AMD64 and ARM64.
 
 The historical format31 Windows 11 test edition was IoT Enterprise LTSC 2024. It
 passed Setup's hardware check without registry bypasses. The optional
