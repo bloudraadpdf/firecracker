@@ -5,9 +5,6 @@
 
 #[cfg(feature = "windows")]
 use std::io;
-#[cfg(target_arch = "x86_64")]
-#[cfg(feature = "windows")]
-use std::io::Read;
 #[cfg(all(feature = "windows", target_arch = "x86_64"))]
 use std::sync::Weak;
 #[cfg(feature = "windows")]
@@ -15,7 +12,7 @@ use std::sync::{Arc, Barrier, Mutex};
 
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "windows")]
-use vm_allocator::{AddressAllocator, AllocPolicy, RangeInclusive};
+use vm_allocator::{AddressAllocator, RangeInclusive};
 
 #[cfg(feature = "windows")]
 use super::pci_mngr::PciDevices;
@@ -24,6 +21,10 @@ use crate::devices::display::VgaState;
 use crate::devices::display::pci::memory::FramebufferMemory;
 #[cfg(feature = "windows")]
 use crate::devices::display::pci::{VgaPci, allocate_mappings, validate_mappings};
+#[cfg(target_arch = "x86_64")]
+use crate::devices::display::rom::ExpansionRom;
+#[cfg(all(feature = "windows", target_arch = "x86_64"))]
+use crate::devices::display::rom::validate_rom;
 #[cfg(feature = "windows")]
 use crate::devices::display::{FRAMEBUFFER_SIZE, REGISTER_SIZE, Vga};
 use crate::pci::PciSBDF;
@@ -101,40 +102,6 @@ fn configuration() -> PciConfiguration {
     );
     config.write_reg(1, if cfg!(target_arch = "x86_64") { 3 } else { 2 });
     config
-}
-
-#[cfg(target_arch = "x86_64")]
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct ExpansionRom {
-    bytes: Vec<u8>,
-    mapped: u64,
-    bar: u32,
-    probe: bool,
-}
-
-#[cfg(target_arch = "x86_64")]
-#[cfg(feature = "windows")]
-fn validate_rom(bytes: &[u8]) -> io::Result<()> {
-    if bytes.len() < 512
-        || bytes.len() > 0x10000
-        || bytes[..2] != [0x55, 0xaa]
-        || usize::from(bytes[2]) * 512 != bytes.len()
-        || bytes.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte)) != 0
-    {
-        return Err(io_error("invalid VGA option ROM"));
-    }
-    Ok(())
-}
-
-#[cfg(target_arch = "x86_64")]
-#[cfg(feature = "windows")]
-impl ExpansionRom {
-    fn region(&self) -> (u64, u64) {
-        (
-            self.mapped,
-            self.bytes.len().next_power_of_two().max(2048) as u64,
-        )
-    }
 }
 
 #[cfg(feature = "windows")]
@@ -227,16 +194,7 @@ impl DisplayDevice {
         state: Option<&DisplayState>,
     ) -> io::Result<Arc<Mutex<Self>>> {
         #[cfg(target_arch = "x86_64")]
-        let rom = rom_path
-            .map(|path| {
-                let mut bytes = Vec::new();
-                std::fs::File::open(path)?
-                    .take(0x1_0001)
-                    .read_to_end(&mut bytes)?;
-                validate_rom(&bytes)?;
-                Ok::<_, io::Error>(bytes)
-            })
-            .transpose()?;
+        let rom = rom_path.map(ExpansionRom::load).transpose()?;
         let sizes = sizes();
         let config = match state {
             Some(state) => {
@@ -271,19 +229,7 @@ impl DisplayDevice {
             let mapped = allocate_mappings(&mut next, sizes)?;
             #[cfg(target_arch = "x86_64")]
             let rom = rom
-                .map(|bytes| {
-                    let size = bytes.len().next_power_of_two().max(2048) as u64;
-                    let mapped = next
-                        .allocate(size, size, AllocPolicy::FirstMatch)
-                        .map_err(io_error)?
-                        .start();
-                    Ok::<_, io::Error>(ExpansionRom {
-                        bytes,
-                        mapped,
-                        bar: u32::try_from(mapped).map_err(io_error)?,
-                        probe: false,
-                    })
-                })
+                .map(|bytes| ExpansionRom::allocate(bytes, &mut next))
                 .transpose()?;
             allocator.mmio32_memory = next;
             graphics.mapped = mapped;
@@ -405,35 +351,9 @@ impl DisplayDevice {
             .relocate(&mut self.bars, self.config.read_reg(1));
         #[cfg(target_arch = "x86_64")]
         if let Some(rom) = &mut self.rom
-            && !rom.probe
-            && rom.bar & 1 != 0
             && let Some(vm) = self.vm.upgrade()
         {
-            let new = u64::from(rom.bar & !0x7ff);
-            let (old, size) = rom.region();
-            if old == new {
-                return;
-            }
-            let mut allocator = vm.resource_allocator();
-            let moved = allocator
-                .mmio32_memory
-                .allocate(size, size, AllocPolicy::ExactMatch(new))
-                .is_ok_and(|range| {
-                    if vm.common.mmio_bus.move_range(old, new, size).is_err() {
-                        let _ = allocator.mmio32_memory.free(&range);
-                        false
-                    } else {
-                        let _ = allocator
-                            .mmio32_memory
-                            .free(&RangeInclusive::new(old, old + size - 1).unwrap());
-                        true
-                    }
-                });
-            if moved {
-                rom.mapped = new;
-            } else {
-                rom.bar = u32::try_from(old).unwrap() | (rom.bar & 1);
-            }
+            rom.relocate(&vm);
         }
     }
 }
@@ -443,13 +363,7 @@ impl PciDevice for DisplayDevice {
     fn read_config_register(&mut self, index: u16) -> u32 {
         #[cfg(target_arch = "x86_64")]
         if index == 12 {
-            return self.rom.as_ref().map_or(0, |rom| {
-                if rom.probe {
-                    !(u32::try_from(rom.region().1).unwrap() - 1) & !0x7ff
-                } else {
-                    rom.bar
-                }
-            });
+            return self.rom.as_ref().map_or(0, ExpansionRom::read_bar);
         }
         if (4..10).contains(&index) {
             let mut bytes = [0; 4];
@@ -474,16 +388,9 @@ impl PciDevice for DisplayDevice {
         #[cfg(target_arch = "x86_64")]
         if index == 12 {
             if let Some(rom) = &mut self.rom {
-                let mut value = rom.bar.to_le_bytes();
-                value[usize::from(offset)..usize::from(offset) + bytes.len()]
-                    .copy_from_slice(bytes);
-                let value = u32::from_le_bytes(value);
-                rom.probe = value & !0x7ff == 0xffff_f800;
-                if !rom.probe {
-                    rom.bar = value & (!(u32::try_from(rom.region().1).unwrap() - 1) | 1);
-                    if rom.bar & 1 != 0 {
-                        self.relocate();
-                    }
+                rom.write_bar(offset, bytes);
+                if !rom.probe && rom.bar & 1 != 0 {
+                    self.relocate();
                 }
             }
             return None;
@@ -518,17 +425,8 @@ impl BusDevice for DisplayDevice {
         #[cfg(target_arch = "x86_64")]
         if command & 2 != 0
             && let Some(rom) = &self.rom
-            && base == rom.mapped
-            && rom.bar & 1 != 0
-            && let Ok(start) = usize::try_from(offset)
         {
-            for (index, byte) in bytes.iter_mut().enumerate() {
-                *byte = start
-                    .checked_add(index)
-                    .and_then(|at| rom.bytes.get(at))
-                    .copied()
-                    .unwrap_or(0xff);
-            }
+            rom.read(base, offset, bytes);
         }
     }
 
@@ -826,6 +724,9 @@ mod tests {
 #[cfg(test)]
 #[cfg(feature = "windows")]
 mod snapshot_tests {
+    #[cfg(target_arch = "x86_64")]
+    use vm_allocator::AllocPolicy;
+
     use super::*;
     use crate::vstate::resources::ResourceAllocator;
 
