@@ -49,6 +49,41 @@ fn submit(memory: &Memory, sequence: u32, kind: u32) {
 }
 
 #[test]
+fn queue_checkpoint_checks_wrapping_counters_and_deferred_release_bounds() {
+    let (memory, addresses, queues) = setup();
+    let mut state = queues.save();
+    state.consumers[0] = u32::MAX - 1;
+    state.release_producer = 2;
+    state.release_consumer = u32::MAX - 2;
+    memory.store(COMMAND_RING + 12, state.consumers[0]).unwrap();
+    memory.store(COMMAND_RING + 4, 1).unwrap();
+    memory.store(RELEASE_RING + 4, 2).unwrap();
+    memory.store(RELEASE_RING + 12, u32::MAX).unwrap();
+    let mut restored = Queues::restore(&state, &memory, &addresses).unwrap();
+    assert_eq!(
+        restored
+            .drain(&memory, &addresses, Queue::Commands, |_| Ok(()))
+            .unwrap(),
+        3
+    );
+    state.consumers[0] = 1;
+    memory.store(RELEASE_RING + 12, 3).unwrap();
+    Queues::restore(&state, &memory, &addresses).unwrap_err();
+    memory.store(RELEASE_RING + 12, 2).unwrap();
+    let release = super::state::ReleaseState {
+        address: pointer(1, 0),
+        id: [0xff; 8],
+    };
+    state.releases.push(release.clone());
+    // IDs are opaque; the bytes currently at the release address need not equal them.
+    Queues::restore(&state, &memory, &addresses).unwrap();
+    state.releases[0].address = pointer(2, 0);
+    Queues::restore(&state, &memory, &addresses).unwrap_err();
+    state.releases = vec![release; 4097];
+    Queues::restore(&state, &memory, &addresses).unwrap_err();
+}
+
+#[test]
 fn slot_bounds_exclude_control_memory_and_reject_stale_generations() {
     let (_, mut addresses, _) = setup();
     assert_eq!(

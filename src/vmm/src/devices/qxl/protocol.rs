@@ -257,6 +257,27 @@ pub struct PrimarySurface {
 impl PrimarySurface {
     pub const SIZE: usize = 40;
 
+    pub(super) fn encode(&self) -> [u8; Self::SIZE] {
+        let mut bytes = [0; Self::SIZE];
+        for (offset, value) in [
+            (0, self.width),
+            (4, self.height),
+            (
+                12,
+                match self.format {
+                    SurfaceFormat::Xrgb8888 => 32,
+                    SurfaceFormat::Argb8888 => 96,
+                },
+            ),
+            (24, u32::from(self.keep_data)),
+        ] {
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        bytes[8..12].copy_from_slice(&self.stride.to_le_bytes());
+        bytes[32..40].copy_from_slice(&self.address.to_le_bytes());
+        bytes
+    }
+
     pub fn decode(data: &[u8]) -> Result<Self, DecodeError> {
         bytes::<40>(data, 0)?;
         let width = u32::from_le_bytes(bytes(data, 0)?);

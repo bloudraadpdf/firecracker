@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, Weak};
 
 use super::controller::Controller;
 use super::memory::{Memory, RAM_BYTES, ROM_BYTES, Region, VRAM_BYTES};
+use super::state::ControllerState;
 use crate::devices::display::Vga;
 use crate::devices::display::pci::memory::FramebufferMemory;
 use crate::devices::display::pci::{pio_port, validate_mappings};
@@ -45,12 +46,40 @@ pub struct QxlPci {
 
 impl QxlPci {
     pub fn new(vm: &Arc<KvmVm>, vga: Vga, mapped: [u64; 3]) -> io::Result<Self> {
+        Self::build(vm, vga, mapped, None)
+    }
+
+    /// Restore the core against independently restored VGA backing and reserved BARs.
+    pub fn restore(
+        vm: &Arc<KvmVm>,
+        vga: Vga,
+        mapped: [u64; 3],
+        state: &ControllerState,
+    ) -> io::Result<Self> {
+        Self::build(vm, vga, mapped, Some(state))
+    }
+
+    fn build(
+        vm: &Arc<KvmVm>,
+        vga: Vga,
+        mapped: [u64; 3],
+        state: Option<&ControllerState>,
+    ) -> io::Result<Self> {
         validate_mappings(
             &vm.resource_allocator().mmio32_memory,
             mapped.into_iter().zip(BAR_SIZES),
         )?;
-        let memory = Memory::new(vga.framebuffer_mapping())?;
-        let controller = Controller::new(memory, mapped[0], mapped[1]).map_err(io::Error::other)?;
+        let controller = match state {
+            Some(state) => {
+                Controller::restore(vga.framebuffer_mapping(), state, mapped[0], mapped[1])
+            }
+            None => Controller::new(
+                Memory::new(vga.framebuffer_mapping())?,
+                mapped[0],
+                mapped[1],
+            ),
+        }
+        .map_err(io::Error::other)?;
         let [ram0, ram1, vram, rom] =
             controller
                 .memory()

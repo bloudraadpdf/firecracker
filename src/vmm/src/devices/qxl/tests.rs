@@ -172,12 +172,14 @@ fn primary_surface_decodes_the_packed_layout_and_signed_stride() {
     assert_eq!(surface.address(), 0x0102_0000_0000_1234);
     assert_eq!(surface.format(), SurfaceFormat::Xrgb8888);
     assert!(surface.keep_data());
+    assert_eq!(PrimarySurface::decode(&surface.encode()).unwrap(), surface);
     data[8..12].copy_from_slice(&(-5464i32).to_le_bytes());
     data[12..16].copy_from_slice(&96u32.to_le_bytes());
     let surface = PrimarySurface::decode(&data).unwrap();
     assert_eq!(surface.stride(), -5464);
     assert_eq!(surface.length(), 5464 * 768);
     assert_eq!(surface.format(), SurfaceFormat::Argb8888);
+    assert_eq!(PrimarySurface::decode(&surface.encode()).unwrap(), surface);
 }
 
 #[test]

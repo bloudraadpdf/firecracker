@@ -7,6 +7,7 @@ use super::bitmap::{Bitmap, chunks};
 use super::memory::Memory;
 use super::protocol::{DecodeError, bytes};
 use super::raster::alpha_over;
+use super::state::{CursorPixels, PointerState, ShapeState};
 use super::transport::{AddressSpace, TransportError};
 use crate::devices::display::Frame;
 
@@ -230,6 +231,87 @@ pub(super) struct Pointer {
 }
 
 impl Pointer {
+    pub(super) fn save(&self) -> PointerState {
+        PointerState {
+            shape: self.shape.as_ref().map(|shape| ShapeState {
+                width: shape.width,
+                height: shape.height,
+                hotspot: shape.hotspot,
+                pixels: match &shape.pixels {
+                    Pixels::Alpha(pixels) => CursorPixels::Alpha(pixels.clone()),
+                    Pixels::Masked(pixels) => CursorPixels::Masked(pixels.clone()),
+                },
+            }),
+            position: self.position,
+            visible: self.visible,
+            length: self.length,
+            frequency: self.frequency,
+            sampled: self.sampled,
+            history: self.history.clone(),
+        }
+    }
+
+    pub(super) fn restore(state: &PointerState) -> Result<Self, DecodeError> {
+        if state.length > 64
+            || state.history.len() > state.length
+            || state.frequency > u64::from(u16::MAX)
+            || (state.length > 0 && state.frequency == 0)
+        {
+            return Err(DecodeError::Parameter);
+        }
+        let shape = state
+            .shape
+            .as_ref()
+            .map(|shape| {
+                if shape.width > 256 || shape.height > 256 {
+                    return Err(DecodeError::Parameter);
+                }
+                let empty = shape.width == 0 && shape.height == 0 && shape.hotspot == [0, 0];
+                if !empty
+                    && (shape.width == 0
+                        || shape.height == 0
+                        || shape.hotspot[0] >= shape.width
+                        || shape.hotspot[1] >= shape.height)
+                {
+                    return Err(DecodeError::Parameter);
+                }
+                let count = usize::from(shape.width) * usize::from(shape.height);
+                let pixels = match &shape.pixels {
+                    CursorPixels::Alpha(pixels) if pixels.len() == count => {
+                        Pixels::Alpha(pixels.clone())
+                    }
+                    CursorPixels::Masked(pixels)
+                        if !empty
+                            && pixels.len() == count
+                            && pixels.iter().all(|[and, xor]| {
+                                *xor <= 0x00ff_ffff
+                                    && (*and == 0
+                                        || (*and == 0x00ff_ffff && matches!(*xor, 0 | 0x00ff_ffff)))
+                            }) =>
+                    {
+                        Pixels::Masked(pixels.clone())
+                    }
+                    _ => return Err(DecodeError::Parameter),
+                };
+                Ok(Shape {
+                    width: shape.width,
+                    height: shape.height,
+                    hotspot: shape.hotspot,
+                    pixels,
+                })
+            })
+            .transpose()?;
+        Ok(Self {
+            shape,
+            position: state.position,
+            visible: state.visible,
+            length: state.length,
+            frequency: state.frequency,
+            sampled: state.sampled,
+            history: state.history.clone(),
+        })
+    }
+
     fn advance(&mut self, now: u64) {
         if now < self.sampled {
             self.history.clear();

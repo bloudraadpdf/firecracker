@@ -20,6 +20,17 @@ struct Fixture {
 }
 
 impl Fixture {
+    fn boot_copy(&self) -> std::sync::Arc<vm_memory::MmapRegion> {
+        let mut bytes = vec![0; super::memory::SURFACE_BYTES];
+        self.controller
+            .memory()
+            .read(Region::Ram, 0, &mut bytes)
+            .unwrap();
+        let mut vga = crate::devices::display::Vga::default();
+        vga.write_framebuffer(0, &bytes);
+        vga.framebuffer_mapping()
+    }
+
     fn new() -> Self {
         let (memory, _) = memory();
         let mut fixture = Self {
@@ -85,6 +96,13 @@ impl Fixture {
         );
     }
 
+    fn fill_release_ring(&mut self) {
+        for color in 1..=8 {
+            self.draw(color);
+            self.controller.poll(u64::from(color)).unwrap();
+        }
+    }
+
     fn word(&self, region: Region, offset: usize) -> u32 {
         let mut data = [0; 4];
         self.controller
@@ -93,6 +111,119 @@ impl Fixture {
             .unwrap();
         u32::from_le_bytes(data)
     }
+}
+
+#[test]
+fn checkpoint_resumes_pending_commands_and_deferred_releases_after_bar_relocation() {
+    let mut fixture = Fixture::new();
+    fixture.fill_release_ring();
+    fixture.draw(9);
+    fixture.store(UPDATE_AREA, &rect([0, 0, 4, 2]));
+    fixture.controller.io_write(2, 0, 10).unwrap();
+    fixture.draw(10);
+    fixture
+        .controller
+        .memory()
+        .write(Region::Vram, 128, &[0xa5])
+        .unwrap();
+    fixture
+        .controller
+        .memory()
+        .write(Region::Ram, super::memory::SURFACE_BYTES + 128, &[0x5a])
+        .unwrap();
+    fixture
+        .controller
+        .memory()
+        .store(RAM_HEADER + 8, 1)
+        .unwrap();
+    let boot = fixture.boot_copy();
+    let state = fixture.controller.save().unwrap();
+    assert_eq!(state.queues.releases.len(), 1);
+    let encoded = bitcode::serialize(&state).unwrap();
+    let decoded = bitcode::deserialize(&encoded).unwrap();
+    let mut restored =
+        Controller::restore(boot, &decoded, RAM + (64 << 20), RAM + (96 << 20)).unwrap();
+    assert_eq!(restored.frame(10).unwrap().unwrap().pixels, [9; 8]);
+    let mut byte = [0];
+    restored
+        .memory()
+        .read(Region::Vram, 128, &mut byte)
+        .unwrap();
+    assert_eq!(byte, [0xa5]);
+    restored
+        .memory()
+        .read(Region::Ram, super::memory::SURFACE_BYTES + 128, &mut byte)
+        .unwrap();
+    assert_eq!(byte, [0x5a]);
+    assert!(restored.irq_level().unwrap());
+    assert!(restored.poll(11).unwrap());
+    restored.memory().store(RELEASE_RING + 12, 4).unwrap();
+    assert!(!restored.poll(12).unwrap());
+    assert_eq!(restored.frame(12).unwrap().unwrap().pixels, [10; 8]);
+    assert_eq!(restored.memory().load(COMMAND_RING + 12).unwrap(), 10);
+    assert_eq!(restored.memory().load(RELEASE_RING + 4).unwrap(), 10);
+    let mut link = [0; 8];
+    restored
+        .memory()
+        .read(Region::Ram, 4096 + 8 * 256, &mut link)
+        .unwrap();
+    assert_eq!(link, [0; 8]);
+    assert_eq!(
+        fixture.controller.frame(12).unwrap().unwrap().pixels,
+        [9; 8]
+    );
+}
+
+#[test]
+fn checkpoint_rejects_invalid_host_metadata_without_modifying_boot_memory() {
+    let fixture = Fixture::new();
+    let boot = fixture.boot_copy();
+    let mut state = fixture.controller.save().unwrap();
+    let restore = |state: &super::state::ControllerState| {
+        Controller::restore(boot.clone(), state, RAM, RAM + (32 << 20))
+    };
+    state.primary.as_mut().unwrap().pop();
+    restore(&state).unwrap_err();
+    state.primary = None;
+    restore(&state).unwrap_err();
+    state.attached = false;
+    let slot = state.addresses.slots[0].take();
+    state.addresses.slots[0] = Some(super::state::SlotState {
+        region: super::state::SlotRegion::Ram,
+        range: 0..u64::MAX,
+    });
+    restore(&state).unwrap_err();
+    state.addresses.slots[0] = slot;
+    state.queues.consumers[0] = 1;
+    restore(&state).unwrap_err();
+    state.queues.consumers[0] = 0;
+    state.queues.release_producer = 9;
+    restore(&state).unwrap_err();
+    state.queues.release_producer = 0;
+    state.queues.releases.push(super::state::ReleaseState {
+        address: SLOT | 4096,
+        id: [0; 8],
+    });
+    restore(&state).unwrap_err();
+    state.queues.releases[0].id = [1; 8];
+    state.queues.releases.push(state.queues.releases[0].clone());
+    restore(&state).unwrap_err();
+    state.queues.releases.clear();
+    state.memory.rom[52] = 2;
+    restore(&state).unwrap_err();
+    state.memory.rom[52] = 1;
+    state.memory.rom[20..24].copy_from_slice(&999u32.to_le_bytes());
+    restore(&state).unwrap_err();
+    state.memory.rom[20..24].copy_from_slice(&u32::MAX.to_le_bytes());
+    state.memory.vram.pop();
+    restore(&state).unwrap_err();
+    use vm_memory::{Bytes, VolatileMemory};
+    let mut pixels = [0; 32];
+    boot.get_slice(64, pixels.len())
+        .unwrap()
+        .read_slice(&mut pixels, 0)
+        .unwrap();
+    assert_eq!(pixels, [0; 32]);
 }
 
 #[test]
@@ -167,10 +298,7 @@ fn release_backpressure_requires_more_polling_and_resumes_without_duplicates() {
 #[test]
 fn synchronous_update_defers_release_publication_without_waiting_for_the_guest() {
     let mut fixture = Fixture::new();
-    for color in 1..=8 {
-        fixture.draw(color);
-        fixture.controller.poll(u64::from(color)).unwrap();
-    }
+    fixture.fill_release_ring();
     fixture.draw(9);
     fixture.controller.io_write(2, 0, 10).unwrap();
     assert_eq!(

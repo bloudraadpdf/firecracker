@@ -7,6 +7,7 @@ use super::memory::{
     CREATE_SURFACE, MEMORY_SLOT, MODES, Memory, RAM_HEADER, Region, UPDATE_AREA, UPDATE_SURFACE,
 };
 use super::protocol::{Command, CommandKind, DecodeError, PrimarySurface, Rect, bytes};
+use super::state::ControllerState;
 use super::surface::Surface;
 use super::transport::{AddressSpace, Queue, Queues, TransportError};
 use crate::devices::display::Frame;
@@ -22,6 +23,55 @@ pub struct Controller {
 }
 
 impl Controller {
+    /// Capture private memory and host metadata while the guest is paused.
+    pub fn save(&self) -> Result<ControllerState, TransportError> {
+        Ok(ControllerState {
+            memory: self.memory.save()?,
+            addresses: self.addresses.save(),
+            queues: self.queues.save(),
+            primary: self.primary.map(|primary| primary.encode().to_vec()),
+            attached: self.attached,
+            pointer: self.pointer.save(),
+        })
+    }
+
+    /// Validate checkpoint metadata before it can reach drawing or queue execution.
+    pub fn restore(
+        boot: std::sync::Arc<vm_memory::MmapRegion>,
+        state: &ControllerState,
+        ram: u64,
+        vram: u64,
+    ) -> Result<Self, TransportError> {
+        if (state.attached && state.primary.is_none())
+            || state
+                .primary
+                .as_ref()
+                .is_some_and(|primary| primary.len() != PrimarySurface::SIZE)
+        {
+            return Err(DecodeError::Parameter.into());
+        }
+        let pointer = Pointer::restore(&state.pointer)?;
+        let addresses = AddressSpace::restore(&state.addresses, ram, vram)?;
+        let memory = Memory::restore(boot, &state.memory)?;
+        let queues = Queues::restore(&state.queues, &memory, &addresses)?;
+        let primary = state
+            .primary
+            .as_ref()
+            .map(|primary| PrimarySurface::decode(primary))
+            .transpose()?;
+        if let Some(primary) = primary {
+            Surface::open(&memory, &addresses, primary)?;
+        }
+        Ok(Self {
+            memory,
+            addresses,
+            queues,
+            primary,
+            attached: state.attached,
+            pointer,
+        })
+    }
+
     pub fn new(memory: Memory, ram: u64, vram: u64) -> Result<Self, TransportError> {
         Ok(Self {
             memory,
