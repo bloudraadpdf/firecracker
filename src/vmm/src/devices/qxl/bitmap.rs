@@ -6,7 +6,6 @@ use super::protocol::{DecodeError, Rect};
 use super::transport::{AddressSpace, TransportError};
 
 const MAX_BYTES: usize = 32 << 20;
-const MAX_DIMENSION: u32 = 4096;
 const MAX_CHUNKS: usize = 4096;
 
 pub(super) fn chunks(
@@ -115,13 +114,11 @@ impl Bitmap {
             || flags & !7 != 0
             || width == 0
             || height == 0
-            || width > MAX_DIMENSION
-            || height > MAX_DIMENSION
+            || u64::from(width) * u64::from(height) > (MAX_BYTES / 4) as u64
             || width != word(20)
             || height != word(24)
             || stride < (width as usize * bits).div_ceil(8)
             || length.is_none_or(|size| size > MAX_BYTES)
-            || width as usize * height as usize > MAX_BYTES / 4
         {
             return Err(DecodeError::Parameter.into());
         }
@@ -164,8 +161,6 @@ impl Bitmap {
     ) -> Result<Self, DecodeError> {
         if width == 0
             || height == 0
-            || width > MAX_DIMENSION
-            || height > MAX_DIMENSION
             || u64::from(width) * u64::from(height) != pixels.len() as u64
             || pixels.len() > MAX_BYTES / 4
         {
@@ -208,7 +203,12 @@ impl Bitmap {
             .collect())
     }
 
-    pub(super) fn pixel(row: &[u8], x: usize, format: u8, palette: &[u32]) -> Result<u32, DecodeError> {
+    pub(super) fn pixel(
+        row: &[u8],
+        x: usize,
+        format: u8,
+        palette: &[u32],
+    ) -> Result<u32, DecodeError> {
         let index = match format {
             1 => Some((row[x / 8] >> (x % 8)) & 1),
             2 => Some((row[x / 8] >> (7 - x % 8)) & 1),

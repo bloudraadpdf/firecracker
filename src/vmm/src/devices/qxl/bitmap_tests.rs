@@ -189,6 +189,35 @@ fn chained_data_can_split_pixels_and_start_with_an_empty_chunk() {
 }
 
 #[test]
+fn bitmap_atlases_can_extend_beyond_display_dimensions() {
+    let (memory, addresses) = setup();
+    for (width, height, area) in [
+        (32, 4256, [0, 992, 32, 1019]),
+        (4256, 32, [992, 0, 1019, 32]),
+    ] {
+        let pixels = vec![0x8040_2010u32; width as usize * height as usize];
+        let data: Vec<_> = pixels
+            .iter()
+            .flat_map(|pixel| pixel.to_le_bytes())
+            .collect();
+        image(&memory, 9, 0, width, height, width * 4);
+        chunk(&memory, DATA, 0, 0, &data);
+        let bitmap = decode(&memory, &addresses).unwrap();
+        assert_eq!(bitmap.dimensions(), (width, height));
+        assert_eq!(bitmap.pixels(), pixels);
+        bitmap
+            .validate_rect(Rect::new(area[0], area[1], area[2], area[3]).unwrap())
+            .unwrap();
+        assert_eq!(
+            Bitmap::from_pixels(width, height, pixels.clone())
+                .unwrap()
+                .pixels(),
+            pixels
+        );
+    }
+}
+
+#[test]
 fn malformed_chains_fail_before_exposing_pixels() {
     for (previous, next, bytes) in [
         (1, 0, vec![0; 4]),
