@@ -172,8 +172,18 @@ disk copy; the full snapshot's memory, state and disk hashes remain unchanged.
 These runs use the default restore notification and clock policies.
 
 Other keyboard layouts and native viewer input remain open for this QXL profile.
-With optional VMClock disabled, the current XP inventory has one unresolved
-device: `ACPI\VMGENCTR`, Code 28. The display, keyboard and pointer report Code 0.
+With optional VMClock disabled, the XP inventory initially has one unresolved
+device: `ACPI\VMGENCTR`, Code 28. The original Microsoft KMDF 1.9 standalone
+installer completes with exit zero and registers the framework. Normal driver
+installation then binds the original Microsoft x86 generation-counter package
+with exit zero. After shutdown and cold boot, the selected signed `oem2.inf`
+driver is version 6.3.9600.17831, `gencounter` and `Wdf01000` run, and the device
+inventory reports no errors. Two current Rust polling queries return the same
+nonzero ID and exit zero. Read-only stopped-disk collection confirms that the
+selected INF, installed SYS and staged INF/SYS/CAT match the original Microsoft
+package. The framework and loader files are version 1.9.7600.16385. This uses
+the [original framework installer](../tools/windows/generation/README.md#xp-driver-prerequisites)
+and no signing-policy change.
 These checks do not establish complete XP or Windows 7 graphics support.
 
 ## Windows 7 native QXL checks
