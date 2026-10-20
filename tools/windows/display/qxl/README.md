@@ -48,8 +48,8 @@ is retained in [NOTICE](NOTICE).
 From the repository root, with its pinned Rust toolchain:
 
 ```sh
-cargo test --manifest-path tools/windows/display/qxl/Cargo.toml
-cargo clippy --manifest-path tools/windows/display/qxl/Cargo.toml --all-targets -- -D warnings
+cargo test --locked --manifest-path tools/windows/display/qxl/Cargo.toml
+cargo clippy --locked --manifest-path tools/windows/display/qxl/Cargo.toml --all-targets -- -D warnings
 cargo fmt --manifest-path tools/windows/display/qxl/Cargo.toml --check
 ```
 
@@ -83,3 +83,16 @@ The port covers the full XP/7 driver package. The remaining source mapping is:
 
 The build must use Rust ABI declarations, raw DLL imports and Rust's linker.
 Do not add `wdk-build`, bindgen, SDK import libraries or a C compilation step.
+
+`src/videoport.rs` declares the Windows VideoPort interface directly in Rust,
+with `extern "system"` and raw imports from `videoprt.sys`. It checks pointer
+layout for both Windows architectures at compile time. The declarations use
+Microsoft's [VideoPort DDI reference](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/video/),
+including
+[initialisation data](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/video/ns-video-_video_hw_initialization_data),
+[configuration](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/video/ns-video-_video_port_config_info),
+[access ranges](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/video/ns-video-_video_access_range)
+and [request packets](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/video/ns-video-_video_request_packet).
+The configuration declaration contains only the stable prefix the driver reads.
+ABI declarations and compile checks do not prove that a driver loads or runs.
+The [safety contract](SAFETY.md) defines the ABI, mapping and pointer obligations.

@@ -74,7 +74,7 @@ impl CommandRing {
     /// # Safety
     /// `base..base+length` must remain live, readable and writable for this
     /// endpoint's lifetime. It must be a little-endian QXL command/cursor ring
-    /// in normal cacheable shared RAM. Serialise all guest access through this
+    /// in shared RAM with consistent mapping cache attributes. Serialise all guest access through this
     /// endpoint, and stop using it before the device resets or unmaps the RAM.
     /// The host may consume entries and update its consumer/notification fields.
     pub unsafe fn new(base: NonNull<u8>, length: usize) -> Result<Self, RingError> {
@@ -183,10 +183,8 @@ mod tests {
         assert_eq!(ring.0.read(PROD), 0);
         for index in 0..16 {
             // SAFETY: the final entry lies within the live test mapping.
-            assert_eq!(
-                unsafe { read_volatile(ring.0.item(u32::MAX).add(index)) },
-                0x51
-            );
+            let byte = unsafe { read_volatile(ring.0.item(u32::MAX).add(index)) };
+            assert_eq!(byte, 0x51);
         }
     }
 
