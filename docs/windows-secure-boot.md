@@ -129,7 +129,7 @@ and both restore types. Its installation used Microsoft's CA2023 boot files with
 the recorded revocation database and a signed viostor driver, without
 hardware-check bypasses or forced unsigned drivers. Public TPM baselines also
 matched across the cold boot between TAP and CONNECT runs. These results do not
-qualify the current format-34 platform.
+qualify the [current snapshot format](windows-console.md#state-and-platform-limits).
 
 Current Pro and Enterprise observations also retain Secure Boot and a ready
 owned TPM. Pro reached 100% encryption; Enterprise was recorded at 80%. Both
