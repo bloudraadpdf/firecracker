@@ -208,9 +208,9 @@ QXL attachment, interrupt delivery, deferred work, error/reset handling and
 snapshot restore have native KVM component coverage. Native XP/7 vendor-driver
 loading and eighteen-mode pixel/input checks pass through the real RFB bridge.
 See the [guest validation records](windows-validation.md#windows-xp-native-qxl-checks)
-for signing conditions, cold boot and stopped-file evidence. Native viewer,
-complete device inventory and guest full/differential restore checks remain
-open; these results do not establish complete Windows support.
+for signing conditions, cold boot, stopped-file evidence and XP full/differential
+restore. Native viewer, complete device inventory and Windows 7 guest restore
+checks remain open; these results do not establish complete Windows support.
 
 For an installed Windows 10 guest, attach the pinned virtio driver ISO and run
 this in an elevated command prompt, using its actual drive letter:
