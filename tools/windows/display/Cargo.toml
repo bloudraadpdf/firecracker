@@ -8,9 +8,5 @@ publish = false
 [workspace]
 
 [[test]]
-name = "xp-miniport"
-path = "miniport.rs"
-
-[[test]]
 name = "mode-probe"
 path = "probe/probe.rs"
