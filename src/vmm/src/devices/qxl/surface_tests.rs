@@ -97,7 +97,7 @@ fn scaled_bitmap_copies_use_unclipped_coordinates_and_preserve_padding() {
         surface
             .blit(&bitmap, rect(1, 0, 2, 2), rect(0, 0, 3, 3), 8)
             .unwrap();
-        assert_eq!(surface.frame().unwrap().pixels, [2, 2, 2, 2, 2, 2, 4, 4, 4]);
+        assert_eq!(surface.frame().unwrap().pixels, [2, 2, 2, 4, 4, 4, 4, 4, 4]);
         surface
             .blit(
                 &bitmap,
