@@ -11,6 +11,8 @@ use crate::devices::display::pci::memory::FramebufferMemory;
 use crate::devices::display::pci::{pio_port, validate_mappings};
 use crate::vstate::vm::KvmVm;
 
+pub mod device;
+
 pub const BAR_SIZES: [u64; 3] = [RAM_BYTES as u64, VRAM_BYTES as u64, ROM_BYTES as u64];
 
 #[derive(Debug)]
