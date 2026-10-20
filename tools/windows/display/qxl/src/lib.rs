@@ -6,6 +6,8 @@
 mod abi;
 
 pub mod arena;
+#[cfg(any(test, all(windows, any(target_arch = "x86", target_arch = "x86_64"))))]
+pub mod control;
 pub mod cosmetic;
 pub mod display_device;
 pub mod display_modes;

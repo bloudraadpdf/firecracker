@@ -30,6 +30,7 @@ const ALLOCATION_TAG: u32 = u32::from_le_bytes(*b"qxld");
     link(name = "win32k.sys", kind = "raw-dylib", modifiers = "+verbatim")
 )]
 unsafe extern "system" {
+    pub(crate) fn EngClearEvent(event: *mut c_void);
     pub(crate) fn EngCreatePalette(
         mode: u32,
         count: u32,

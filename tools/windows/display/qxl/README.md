@@ -353,3 +353,22 @@ through all GDI, pool and host access, and stop those users before destruction.
 Validation checks reported geometry; it cannot prove that a kernel address is
 mapped. Five focused tests cover the geometry and rejection paths; native
 mapping and teardown still require Windows qualification.
+
+## Hardware control commands
+
+`src/control.rs` ports the serialised control-port path from `qxldd.h` and
+`driver.c`. One channel belongs to each physical adapter and must be shared
+across its PDevs. Exclusive access covers shared-header writes, stale-event
+clear, port issue and completion. Revision checks select the original legacy
+or asynchronous port and reject unsupported operations before touching memory.
+
+The native wait uses
+[KeWaitForSingleObject](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-kewaitforsingleobject)
+with a relative 60-second timeout. Only `STATUS_SUCCESS` proves completion;
+timeouts and other results latch the channel failed and prevent further writes.
+This avoids the ambiguous Boolean returned by
+[EngWaitForSingleObject](https://learn.microsoft.com/en-us/windows/win32/api/winddi/nf-winddi-engwaitforsingleobject).
+It uses a raw Windows kernel import, with no SDK library or new dependency.
+Failure does not prove the host has stopped: retain all command resources and
+mappings until explicit hardware quiescence. Native PDev integration and
+qualification remain part of the unfinished display DLL.
