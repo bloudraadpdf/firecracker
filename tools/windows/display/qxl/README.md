@@ -79,7 +79,7 @@ The port covers the full XP/7 driver package. The remaining source mapping is:
 | `miniport/qxl.c` | Release-path callbacks and SYS builds ported; native load, lifecycle and request qualification remain. |
 | `display/driver.c` | Cosmetic styles, slot encoding and mode enumeration ported; GDI device lifecycle, escapes and path submission remain. |
 | `display/res.c` | Slot conversion, rings and output/resource ownership ported; caches and drawing payloads remain. |
-| `display/surface.c` | Surface allocation, upload, synchronisation and destruction remain. |
+| `display/surface.c` | Surface allocation and create/destroy ownership ported; GDI bitmap binding, synchronisation and RAM migration remain. |
 | `display/rop.c` | ROP2/ROP3 selection ported in `src/rop.rs`; drawing submission remains. |
 | `display/brush.c`, `text.c`, `pointer.c` | Brush realisation, text and cursor operations remain. |
 | `display/quic*.c` | Compression remains. |
@@ -261,3 +261,31 @@ shared resource lifetimes, bounded release chains, cancellation, allocation
 failure, malformed completions and reuse of storage. These memory paths also
 pass Miri. Native PDev lifecycle and drawing callbacks still need to connect
 the pool to the Windows driver.
+
+## Surface lifecycle
+
+`src/surface.rs` allocates checked RGB555 and xRGB8888 secondary surfaces and
+publishes their create/destroy commands through the output pool. Layouts use
+four-byte-aligned positive storage strides and bottom-up memory. QXL records
+carry the negative stride. Both the packed 41-byte surface command and 40-byte
+primary-create record use explicit field encoding.
+
+A prepared surface owns an unpublished allocation and permits a safe mutable
+pixel slice. Publication consumes it and returns an active surface, which
+exposes only a raw pixel pointer. A failed publication returns the prepared
+surface with pixels intact for retry or cancellation. `keep_data` preserves
+pixels supplied before creation, including data restored from system memory.
+
+Creation and destruction each retain a command reference to the allocation.
+Completion of creation leaves the active surface reference live; publication
+of destruction transfers that reference to the destroy command. Video memory
+stays live until all command references are released, including destruction.
+A full ring returns the active surface so destruction can be retried.
+Device-stop cleanup requires proof that the host no longer accesses the surface.
+
+The PDev surface table must reserve IDs within the advertised device limit and
+preserve command ordering when reusing them. GDI bitmap binding, CPU/hardware
+synchronisation and migration between video and system memory are still needed
+for the complete Windows callbacks. Five focused tests cover the current
+layout, wire-format and ownership paths; all pass Miri using the shared ring
+fixtures from `display_resources/test_utils.rs`.
