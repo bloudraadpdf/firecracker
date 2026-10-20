@@ -153,3 +153,35 @@ Record reads are unaligned copies of the integer-only miniport ABI.
 That output must be writable for its reported capacity and must not alias
 callback-owned state. Its checked extent fits both `ULONG` and `isize` before
 the Rust slice is formed. Iterators cannot outlive their owned mode buffer.
+
+## Display output pool
+
+The pool exclusively owns disjoint main/video arenas. Its private node headers
+are separate from every payload range exposed to guest or host users. A resource
+token owns one counted reference; retaining, attaching and releasing references
+requires the mutable pool borrow. A final release moves all allocation tokens
+off the node before freeing the storage containing it. Constructors initialise
+every header field and payload byte. Tokens from another pool are returned
+without node access or ownership loss.
+
+Output tokens represent unpublished builders only. Publication consumes the
+token; failure removes its temporary pending registration and returns the token.
+The command ring belongs to the same device and slot generation. Payload writes
+must finish before submission, and host ownership lasts until release. A safe
+builder slice borrows both the token and pool, preventing submission or
+cancellation while that slice remains live. Resource pointers remain raw:
+callers must prove exclusive payload access before forming references.
+
+Release-ring publication must establish host completion. Only live pending
+nodes resolve an opaque release ID. Read the completed payload's packed next
+ID with volatile access; validate the next live ID before freeing the current
+output. Remove nodes before moving their owned references and allocation tokens.
+Budget limits retain the next ID without releasing its output. Corrupt chains
+leave unreleased allocations live for device-stop recovery.
+
+`discard_pending` requires proof that the device/host has stopped all reads and
+writes, including delayed completion writes. Neither a timeout nor an invalid
+release ID supplies that proof. It clears only pending outputs; caller-owned
+builders and cache references must also be released before mapping destruction.
+`Pool::is_empty()` covers both output and resource allocations. Dropping tokens
+or the pool never implicitly frees memory potentially in use by the host.
