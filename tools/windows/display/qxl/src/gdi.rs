@@ -16,6 +16,22 @@ pub struct Size {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
+pub struct Point {
+    pub x: i32,
+    pub y: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct Rect {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
 pub struct SurfaceObject {
     pub driver_surface: *mut c_void,
     pub surface: *mut c_void,
@@ -43,6 +59,8 @@ pub(crate) fn bottom_up(
 
 const _: () = {
     assert!(size_of::<Size>() == 8);
+    assert!(size_of::<Point>() == 8);
+    assert!(size_of::<Rect>() == 16);
     assert!(offset_of!(SurfaceObject, driver_device) == 2 * size_of::<usize>());
     assert!(offset_of!(SurfaceObject, size) == 4 * size_of::<usize>());
 };
