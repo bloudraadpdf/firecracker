@@ -5,9 +5,10 @@ and video miniport (`qxl.sys`) to Rust for Windows XP x86 and Windows 7 x64.
 It is outside the Firecracker Apache-2.0 workspace. It has no DDK, C compiler,
 CRT or third-party Rust dependencies.
 
-The port is in progress. The current crate contains cosmetic-line conversion;
-it does not yet produce an installable driver. The installed vendor binaries
-remain validation references, not the final implementation.
+The port is in progress. The current crate contains cosmetic-line conversion
+and miniport mode handling; it does not yet produce an installable driver. The
+installed vendor binaries remain validation references, not the final
+implementation.
 
 ## Source and licence
 
@@ -21,6 +22,12 @@ retains the source licence. Do not link this crate into Firecracker.
 Custom styles include the GDI density when converted to QXL Q28.4 pixels;
 alternate styles retain single-pixel marks and gaps. Invalid lengths, counts
 and overflow return an error before a command can be submitted.
+
+`src/modes.rs` ports `FillVidModeInfo` and `SetVideoModeInfo` from
+`xddm/miniport/qxl.c`. It reads packed ROM mode records with checked bounds,
+preserves mode IDs and orientation, and defines the documented
+[VIDEO_MODE_INFORMATION ABI](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddvdeo/ns-ntddvdeo-_video_mode_information)
+directly in Rust. No SDK headers or libraries are used.
 
 ## Development checks
 

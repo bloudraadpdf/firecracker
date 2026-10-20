@@ -4,3 +4,4 @@
 #![no_std]
 
 pub mod cosmetic;
+pub mod modes;
