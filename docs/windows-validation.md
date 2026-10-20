@@ -200,8 +200,20 @@ shutdown, read-only NTFS inspection confirms all eighteen saved files contain
 exactly bytes 32 through 126. Its owned loop device is detached and the
 disk-closed check passes.
 
-Other keyboard layouts, native viewer input, complete device inventory and
-full/differential snapshot restore remain separate checks for this QXL profile.
+Format 41 full and differential loads each preserve every paused framebuffer
+byte at 2560 by 1440. The differential load also retains Caps Lock state.
+The runs use paired stopped disk copies, the matching snapshot editor and the
+default restore notification and clock policies. After resume, pointer input
+focuses Notepad and text can be entered and saved. Following normal shutdown,
+read-only NTFS inspection confirms the exact 59 bytes displayed in the final
+document. The full snapshot's memory, state and disk hashes remain unchanged.
+
+The first post-full-restore Ctrl+End sequence did not move the caret to the
+document end: the marker was inserted at the clicked position. That text and
+the capture are retained. A later separate Ctrl+End sequence moved the caret;
+its cause remains unresolved, so these results do not establish a clean
+post-restore navigation pass. Other keyboard layouts, native viewer input and
+complete device inventory remain separate checks for this QXL profile.
 
 ## Windows 11 native GPU checks
 
