@@ -30,6 +30,8 @@ pub const TIMER_PORT: u64 = POWER_PORT + 8;
 pub const SCI_GSI: u32 = 3;
 pub const GPE0_PORT: u64 = POWER_PORT + 12;
 pub const PORT_COUNT: usize = 14;
+const POWER_BUTTON_EVENT: u16 = 1 << 8;
+const PM1_EVENTS: u16 = 1 | POWER_BUTTON_EVENT;
 #[cfg(feature = "windows")]
 const TIMER_HZ: u64 = 3_579_545;
 #[cfg(feature = "windows")]
@@ -48,8 +50,8 @@ pub struct AcpiPowerState {
 
 impl AcpiPowerState {
     pub(crate) fn validate(&self) -> std::io::Result<()> {
-        if self.status & !1 != 0
-            || self.enable & !1 != 0
+        if self.status & !PM1_EVENTS != 0
+            || self.enable & !PM1_EVENTS != 0
             || self.control & !0x1c00 != 0
             || self.gpe_status & !1 != 0
             || self.gpe_enable & !1 != 0
@@ -122,7 +124,7 @@ impl AcpiPower {
     }
 
     fn signal_sci(&mut self) -> std::io::Result<()> {
-        let pending = self.state.status & self.state.enable & 1 != 0
+        let pending = self.state.status & self.state.enable & PM1_EVENTS != 0
             || self.state.gpe_status & self.state.gpe_enable & 1 != 0;
         if pending && !self.sci_asserted {
             self.sci_evt.write(1)?;
@@ -135,6 +137,11 @@ impl AcpiPower {
         if let Err(err) = self.signal_sci() {
             error!("Failed to signal ACPI SCI: {err}");
         }
+    }
+
+    pub(crate) fn notify_power_button(&mut self) -> std::io::Result<()> {
+        self.state.status |= POWER_BUTTON_EVENT;
+        self.signal_sci()
     }
 
     pub(crate) fn notify_vmgenid(&mut self) -> std::io::Result<()> {
@@ -217,8 +224,8 @@ impl BusDevice for AcpiPower {
                 let value = u16::from(*byte) << shift;
                 let mask = 0xffu16 << shift;
                 match address {
-                    2..4 => self.state.status &= !(value & 1),
-                    4..6 => self.state.enable = (self.state.enable & !mask) | (value & 1),
+                    2..4 => self.state.status &= !(value & PM1_EVENTS),
+                    4..6 => self.state.enable = (self.state.enable & !mask) | (value & PM1_EVENTS),
                     6..8 => {
                         self.state.control = (self.state.control & !mask) | (value & 0x1c00);
                         sleep |= value & 0x2000 != 0;
@@ -283,6 +290,71 @@ mod tests {
     use event_manager::SubscriberOps;
 
     use super::*;
+
+    #[test]
+    fn power_button_latches_until_enabled_and_guest_acknowledges() {
+        let exit = EventFd::new(libc::EFD_NONBLOCK).unwrap();
+        let mut power = AcpiPower::new(exit.try_clone().unwrap()).unwrap();
+        power.notify_power_button().unwrap();
+        assert_eq!(power.state.status, POWER_BUTTON_EVENT);
+        assert_eq!(
+            power.sci_evt.read().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        let mut restored = AcpiPower::new(exit.try_clone().unwrap()).unwrap();
+        restored.restore(&power.save()).unwrap();
+        restored.write(POWER_PORT, 5, &[1]);
+        assert_eq!(restored.sci_evt.read().unwrap(), 1);
+        restored.notify_power_button().unwrap();
+        assert_eq!(
+            restored.sci_evt.read().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        restored.write(POWER_PORT, 2, &[0, 1]);
+        assert_eq!(restored.state.status, 0);
+        restored.notify_power_button().unwrap();
+        assert_eq!(restored.sci_evt.read().unwrap(), 1);
+        assert_eq!(
+            exit.read().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn pending_power_button_restores_and_resamples_with_timer_and_generation() {
+        let mut power = AcpiPower::new(EventFd::new(libc::EFD_NONBLOCK).unwrap()).unwrap();
+        power.write(POWER_PORT, 4, &PM1_EVENTS.to_le_bytes());
+        power.write(POWER_PORT, 13, &[1]);
+        power.advance_to(TIMER_HALF_PERIOD);
+        power.notify_power_button().unwrap();
+        power.notify_vmgenid().unwrap();
+        let mut restored = AcpiPower::new(EventFd::new(libc::EFD_NONBLOCK).unwrap()).unwrap();
+        restored.restore(&power.save()).unwrap();
+        assert_eq!(restored.sci_evt.read().unwrap(), 1);
+        let restored = Arc::new(Mutex::new(restored));
+        let mut events = crate::EventManager::new().unwrap();
+        events.add_subscriber(restored.clone());
+        {
+            let mut restored = restored.lock().unwrap();
+            restored.write(POWER_PORT, 3, &[1]);
+            assert_eq!(restored.state.status & POWER_BUTTON_EVENT, 0);
+            assert_eq!(restored.state.status & 1, 1);
+            restored.resample_evt.write(1).unwrap();
+        }
+        events.run_with_timeout(1000).unwrap();
+        {
+            let mut restored = restored.lock().unwrap();
+            assert_eq!(restored.sci_evt.read().unwrap(), 1);
+            restored.write(POWER_PORT, 2, &[1]);
+            restored.write(POWER_PORT, 12, &[1]);
+            restored.resample_evt.write(1).unwrap();
+        }
+        events.run_with_timeout(1000).unwrap();
+        assert_eq!(
+            restored.lock().unwrap().sci_evt.read().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
 
     #[test]
     fn timer_event_and_resample_survive_restore() {

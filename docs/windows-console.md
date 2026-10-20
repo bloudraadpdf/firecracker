@@ -523,6 +523,17 @@ For recovery of an existing disposable image, use
 [Microsoft's offline driver-servicing procedure](https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/add-and-remove-drivers-to-an-offline-windows-image).
 A manual recovery does not qualify the automatic installation path.
 
+### Guest lifecycle
+
+For an AMD64 PC profile, `PUT /actions` with
+`{"action_type":"SendPowerButton"}` delivers the fixed ACPI power-button event.
+It uses the existing PM1 registers and SCI interrupt, without a keyboard device.
+The [ACPI fixed-button contract](https://uefi.org/specs/ACPI/6.5/04_ACPI_Hardware_Specification.html#power-button)
+lets the guest choose the response. HTTP204 confirms delivery, not completion;
+wait for guest shutdown and the process result. The action requires the
+`windows` feature and configured PC power hardware, and is rejected before boot.
+See the [action reference](api_requests/actions.md#intel-and-amd-windows-feature-only-sendpowerbutton).
+
 Guest reset exits Firecracker. The supervisor starts a new process with the same
 writable disk to continue installation. A remote console connection does not own
 the VM lifetime; closing it must not stop the VM. Reconnect to the replacement
@@ -579,11 +590,14 @@ full installed-reference matrix covers the legacy VGA profile.
 AMD64 console snapshots contain display memory and registers, keyboard/mouse
 queues, held input, pending releases, keyboard LEDs and pending lock updates,
 USB controller/HID state, PCI state, optical transfer state and media identity.
-The current snapshot format is 42.0.0. Basic VGA state adds about 16 MiB; QXL
+The current snapshot format is 43.0.0. Basic VGA state adds about 16 MiB; QXL
 also saves 48 MiB of private RAM/VRAM, its protocol ROM, control state and
 validated secondary-surface descriptors. The
 bounded snapshot reader accepts at most 128 MiB, including GPU state. The guest
-disk remains a separate artifact, as with ordinary Firecracker snapshots.
+disk remains a separate artifact, as with ordinary Firecracker snapshots. The
+fixed ACPI power button's pending event and enable bit are saved with the power
+registers. The changed FADT declares this fixed hardware; format42 snapshots
+retain their earlier declaration and require their matching binary.
 
 ARM64 console snapshots save display/configuration and one typed virtio-input
 state in the PCI device manager. The console reuses that backend on restore; it
@@ -591,8 +605,8 @@ does not save a second held-key or LED state. Pending frames, partial-frame
 cursor, position, held releases and guest/pending lock LEDs travel with Input.
 Missing, stray or mismatched console/input topology is rejected before backend
 attachment. Format29 through format39 snapshots require their matching older
-binaries; format42 has no decoder for them. Formats40 and41 also require their
-matching binaries. Snapshots do not move between AMD64 and ARM64.
+binaries; format43 has no decoder for them. Formats40 through42 also require
+their matching binaries. Snapshots do not move between AMD64 and ARM64.
 
 The historical format31 Windows 11 test edition was IoT Enterprise LTSC 2024. It
 passed Setup's hardware check without registry bypasses. The optional

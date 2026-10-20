@@ -156,8 +156,15 @@ All instance actions can be found in the [Swagger](https://swagger.io)
 specification:
 [firecracker.yaml](./../src/firecracker/swagger/firecracker.yaml).
 
-| Action           | keyboard | serial console | virtio-block | vhost-user-block | virtio-net | virtio-vsock |
-| ---------------- | :------: | :------------: | :----------: | :--------------: | :--------: | :----------: |
-| `FlushMetrics`   |    O     |       O        |      O       |        O         |     O      |      O       |
-| `InstanceStart`  |    O     |       O        |      O       |        O         |     O      |      O       |
-| `SendCtrlAltDel` |  **R**   |       O        |      O       |        O         |     O      |      O       |
+| Action            | keyboard | serial console | virtio-block | vhost-user-block | virtio-net | virtio-vsock |
+| ----------------- | :------: | :------------: | :----------: | :--------------: | :--------: | :----------: |
+| `FlushMetrics`    |    O     |       O        |      O       |        O         |     O      |      O       |
+| `InstanceStart`   |    O     |       O        |      O       |        O         |     O      |      O       |
+| `SendCtrlAltDel`  |  **R**   |       O        |      O       |        O         |     O      |      O       |
+| `SendPowerButton` |    O     |       O        |      O       |        O         |     O      |      O       |
+
+`SendPowerButton` requires an x86_64 build with the `windows` feature and an
+attached ACPI power device, which is not a column in this matrix. It is available
+only after boot. Guest policy determines the response; API success does not
+confirm shutdown completion. See the
+[action reference](api_requests/actions.md#intel-and-amd-windows-feature-only-sendpowerbutton).

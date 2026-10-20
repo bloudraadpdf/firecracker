@@ -223,6 +223,9 @@ pub enum VmmError {
     MmioDeviceManager(device_manager::mmio::MmioError),
     /// Error getting the KVM dirty bitmap. {0}
     DirtyBitmap(kvm_ioctls::Error),
+    #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+    /// ACPI power event error: {0}
+    AcpiPower(io::Error),
     /// I8042 error: {0}
     I8042Error(devices::legacy::I8042DeviceError),
     #[cfg(target_arch = "x86_64")]
@@ -513,6 +516,21 @@ impl Vmm {
             .expect("i8042 lock was poisoned")
             .trigger_ctrl_alt_del()
             .map_err(VmmError::I8042Error)
+    }
+
+    /// Notify the guest's fixed ACPI power button without forcing a VM exit.
+    #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+    pub fn send_power_button(&mut self) -> Result<(), VmmError> {
+        self.device_manager
+            .legacy_devices
+            .as_ref()
+            .and_then(|legacy| legacy.pc.as_ref())
+            .ok_or(VmmError::NotSupported)?
+            .acpi_power
+            .lock()
+            .expect("ACPI power lock was poisoned")
+            .notify_power_button()
+            .map_err(VmmError::AcpiPower)
     }
 
     /// Saves the state of a paused Microvm.

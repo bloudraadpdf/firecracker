@@ -7,7 +7,7 @@ use vmm::rpc_interface::VmmAction;
 
 use super::super::parsed_request::{ParsedRequest, RequestError};
 use super::Body;
-#[cfg(target_arch = "aarch64")]
+#[cfg(not(all(feature = "windows", target_arch = "x86_64")))]
 use super::StatusCode;
 
 // The names of the members from this enum must precisely correspond (as a string) to the possible
@@ -18,6 +18,7 @@ enum ActionType {
     FlushMetrics,
     InstanceStart,
     SendCtrlAltDel,
+    SendPowerButton,
 }
 
 // The model of the json body from a sync request. We use Serde to transform each associated
@@ -48,12 +49,42 @@ pub(crate) fn parse_put_actions(body: &Body) -> Result<ParsedRequest, RequestErr
             #[cfg(target_arch = "x86_64")]
             Ok(ParsedRequest::new_sync(VmmAction::SendCtrlAltDel))
         }
+        #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+        ActionType::SendPowerButton => Ok(ParsedRequest::new_sync(VmmAction::SendPowerButton)),
+        #[cfg(not(all(feature = "windows", target_arch = "x86_64")))]
+        ActionType::SendPowerButton => Err(RequestError::Generic(
+            StatusCode::BadRequest,
+            "SendPowerButton requires an x86_64 build with the windows feature.".to_string(),
+        )),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_send_power_button() {
+        let body = Body::new(r#"{"action_type":"SendPowerButton"}"#);
+
+        #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+        assert_eq!(
+            parse_put_actions(&body).unwrap(),
+            ParsedRequest::new_sync(VmmAction::SendPowerButton)
+        );
+
+        #[cfg(not(all(feature = "windows", target_arch = "x86_64")))]
+        assert!(matches!(
+            parse_put_actions(&body),
+            Err(RequestError::Generic(StatusCode::BadRequest, message))
+                if message == "SendPowerButton requires an x86_64 build with the windows feature."
+        ));
+
+        parse_put_actions(&Body::new(
+            r#"{"action_type":"SendPowerButton","unknown":true}"#,
+        ))
+        .unwrap_err();
+    }
 
     #[test]
     fn test_parse_put_actions_request() {

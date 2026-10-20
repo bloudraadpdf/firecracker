@@ -54,10 +54,33 @@ and `CONFIG_KEYBOARD_ATKBD`.
 > i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd
 > ```
 
+The [AMD64 PC lifecycle contract](../windows-console.md#guest-lifecycle)
+reports guest reboot separately from normal shutdown.
+
 ### SendCtrlAltDel Example
 
 ```bash
 curl --unix-socket /tmp/firecracker.socket -i \
     -X PUT "http://localhost/actions" \
     -d '{ "action_type": "SendCtrlAltDel" }'
+```
+
+## [Intel and AMD, Windows feature only] SendPowerButton
+
+This action signals the fixed ACPI power button (PM1 status bit 8) after the
+microVM has booted. It requires an x86_64 build with the `windows` feature and
+an attached ACPI power device. Other builds and architectures return HTTP 400
+Bad Request.
+
+The guest chooses how to handle the event under its power-button policy. The
+action does not inject keyboard input or force the VMM to stop. A successful
+API response confirms the button event was signalled, not that guest shutdown
+has completed. Observe guest shutdown and VMM exit separately.
+
+### SendPowerButton Example
+
+```bash
+curl --unix-socket /tmp/firecracker.socket -i \
+    -X PUT "http://localhost/actions" \
+    -d '{ "action_type": "SendPowerButton" }'
 ```

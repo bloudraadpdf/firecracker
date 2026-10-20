@@ -1576,12 +1576,18 @@ definitions:
       - action_type
     properties:
       action_type:
-        description: Enumeration indicating what type of action is contained in the payload
+        description: >-
+          Enumeration indicating what type of action is contained in the payload.
+          SendPowerButton requires an x86_64 build with the windows feature and a
+          booted microVM with ACPI power support. It signals the fixed ACPI power
+          button; guest policy determines the response. A successful request does
+          not confirm shutdown completion.
         type: string
         enum:
           - FlushMetrics
           - InstanceStart
           - SendCtrlAltDel
+          - SendPowerButton
 
   InstanceInfo:
     type: object
