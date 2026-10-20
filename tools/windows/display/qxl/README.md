@@ -29,6 +29,11 @@ preserves mode IDs and orientation, and defines the documented
 [VIDEO_MODE_INFORMATION ABI](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddvdeo/ns-ntddvdeo-_video_mode_information)
 directly in Rust. No SDK headers or libraries are used.
 
+`src/slots.rs` ports the shared miniport/display slot address calculation from
+`CreateMemSlots`, `CreateVRamSlot`, `PA` and `VA`. A slot validates its physical
+and virtual ranges, ID and generation. Address conversion checks the complete
+buffer and rejects stale generations before use.
+
 ## Development checks
 
 From the repository root, with its pinned Rust toolchain:
