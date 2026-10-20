@@ -133,6 +133,30 @@ It exposes one revision-two QXL PCI device. Component checks do not establish gu
 driver loading or rendering. Graphics qualification across all agreed guests
 must finish before work returns to unrelated platform features.
 
+## Windows XP native QXL checks
+
+Runtime source `9c581a595` passes an initial native AMD64 check with XP SP3 x86
+on a private disk copy. The original reference is unchanged. This GNU
+development run used `--no-seccomp`, the QXL SeaBIOS profile and the pinned
+virtio-win 0.1.302 ISO's `qxl/xp/x86` package. Normal Device Manager installation
+required consent to XP's Windows Logo warning; this does not establish WHQL
+trust. After cold boot, WMI reports Code 0, `qxldd.dll` and version 5.1.0.10018.
+
+Opening Display Properties first exposed a rejected 32 by 4256 pixel icon
+bitmap. The corrected decoder bounds bitmap storage independently of display
+dimensions. Regression checks cover that bitmap shape and wide-image
+interpolation arithmetic. In the guest, Display Properties then rendered,
+applied 2560 by 1440 at 32bpp, reverted on confirmation timeout and retained the
+mode after Keep. WMI and the console frame independently report that geometry.
+A pointer click reached the OK button at the expected position. Win+R and text
+input saved a Notepad marker whose bytes were read back through the serial port.
+These are direct console checks, not VNC or native viewer qualification.
+
+All-mode pixel comparisons, pointer bounds, other keyboard layouts, selected-mode
+cold boot and full/differential restore remain open for this QXL profile. The
+test reference also has unresolved ACPI device warnings. It does not establish
+complete XP or Windows 7 graphics support.
+
 ## Windows 11 native GPU checks
 
 Runtime source `ae208ad25` passes native AMD64 scanout checks on Windows 11 Pro
