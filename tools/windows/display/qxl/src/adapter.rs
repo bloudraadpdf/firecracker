@@ -83,20 +83,13 @@ impl Adapter {
                     {
                         return Err(87);
                     }
-                    let base = self.resources.vram.address().as_ptr() as usize;
+                    let base = self.resources.vram.address().as_ptr().cast();
                     let length = self.resources.vram.length();
-                    let size = if size_of::<usize>() == 8 { 32 } else { 16 };
-                    output(request, size, |bytes| {
-                        bytes.fill(0);
-                        let second = size / 2;
-                        for offset in [0, second] {
-                            bytes[offset..offset + size_of::<usize>()]
-                                .copy_from_slice(&base.to_le_bytes());
-                            let offset = offset + size_of::<usize>();
-                            bytes[offset..offset + 4].copy_from_slice(&length.to_le_bytes());
-                        }
-                        Some(size)
-                    })
+                    output(
+                        request,
+                        size_of::<crate::display_device::VideoMemoryInformation>(),
+                        |bytes| crate::display_device::encode_mapping(base, length, bytes),
+                    )
                 }
                 UNMAP_VIDEO_MEMORY => {
                     input::<{ size_of::<usize>() }>(request)?;

@@ -354,6 +354,10 @@ Validation checks reported geometry; it cannot prove that a kernel address is
 mapped. Focused tests cover the geometry and rejection paths; native
 mapping and teardown still require Windows qualification.
 
+The miniport map response uses the same native record encoder as interface
+queries. Pointer fields retain their provenance, padding is cleared, and
+short response buffers remain unchanged.
+
 ## Hardware control commands
 
 `src/control.rs` ports the serialised control-port path from `qxldd.h` and
