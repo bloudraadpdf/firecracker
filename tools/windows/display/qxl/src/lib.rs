@@ -5,3 +5,4 @@
 
 pub mod cosmetic;
 pub mod modes;
+pub mod slots;
