@@ -8,6 +8,8 @@ use crate::slots::SlotLayout;
 
 pub const ROM_PREFIX_BYTES: usize = 69;
 pub const RAM_HEADER_BYTES: u32 = 5348;
+pub const REVISION_ASYNC: u8 = 3;
+pub const REVISION_MONITORS: u8 = 4;
 pub const COMMAND_RING_OFFSET: u32 = 4108;
 pub const CURSOR_RING_OFFSET: u32 = 4640;
 pub const RELEASE_RING_OFFSET: u32 = 5172;
