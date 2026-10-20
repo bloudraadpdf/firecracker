@@ -58,7 +58,7 @@ unsafe extern "system" {
     pub(crate) fn EngDeleteSurface(surface: *mut c_void) -> i32;
     fn EngAllocMem(flags: u32, bytes: u32, tag: u32) -> *mut c_void;
     fn EngFreeMem(memory: *mut c_void);
-    fn EngDeviceIoControl(
+    pub(crate) fn EngDeviceIoControl(
         device: *mut c_void,
         code: u32,
         input: *mut c_void,

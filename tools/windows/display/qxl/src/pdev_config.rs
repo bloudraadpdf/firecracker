@@ -459,4 +459,3 @@ mod tests {
         assert_eq!(short, [0xa5; 8]);
     }
 }
-

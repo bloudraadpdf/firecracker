@@ -11,6 +11,12 @@ pub const RAM_HEADER_BYTES: u32 = 5348;
 pub const COMMAND_RING_OFFSET: u32 = 4108;
 pub const CURSOR_RING_OFFSET: u32 = 4640;
 pub const RELEASE_RING_OFFSET: u32 = 5172;
+pub const UPDATE_AREA_OFFSET: u32 = 5256;
+pub const UPDATE_SURFACE_OFFSET: u32 = 5272;
+pub const SLOT_START_OFFSET: u32 = 5276;
+pub const SLOT_END_OFFSET: u32 = 5284;
+pub const PRIMARY_CREATE_OFFSET: u32 = 5292;
+pub const MONITORS_CONFIG_OFFSET: u32 = 5340;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LayoutError {
