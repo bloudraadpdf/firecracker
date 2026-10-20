@@ -9,6 +9,7 @@ mod abi;
 mod kernel_object;
 
 pub mod arena;
+pub mod bitmap;
 #[cfg(any(test, all(windows, any(target_arch = "x86", target_arch = "x86_64"))))]
 pub mod control;
 pub mod cosmetic;
@@ -16,26 +17,33 @@ pub mod cursor;
 pub mod display_device;
 pub mod display_modes;
 pub mod display_resources;
+pub mod draw;
 pub mod driver_info;
 pub mod gdi;
 #[cfg(any(test, all(windows, any(target_arch = "x86", target_arch = "x86_64"))))]
 pub mod hardware;
 pub mod hash;
+pub mod image;
 pub mod ioctl;
 pub mod memory;
 pub mod modes;
 #[cfg(any(test, all(windows, any(target_arch = "x86", target_arch = "x86_64"))))]
 pub mod native_bitmap;
+pub mod paint;
+pub mod palette;
+pub mod path;
 pub mod pdev_config;
 
 #[cfg(any(test, all(windows, any(target_arch = "x86", target_arch = "x86_64"))))]
 pub mod pdev;
+pub mod raster_draw;
 #[cfg(any(test, all(windows, any(target_arch = "x86", target_arch = "x86_64"))))]
 pub mod render;
 pub mod ring;
 pub mod rop;
 pub mod slots;
 pub mod surface;
+pub mod text;
 
 #[cfg(all(windows, any(target_arch = "x86", target_arch = "x86_64")))]
 pub mod videoport;

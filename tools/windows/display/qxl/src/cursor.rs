@@ -356,7 +356,7 @@ impl<'memory> Shape<'memory> {
         bytes[14..22].copy_from_slice(&self.physical.to_le_bytes());
         // SAFETY: the caller retains the active mapping/ring; the attached
         // reference keeps the immutable shape live independently of this owner.
-        unsafe { pool.submit_retained(output, ring, &self.memory) }
+        unsafe { pool.submit_retained(output, ring, &[&self.memory]) }
     }
 }
 

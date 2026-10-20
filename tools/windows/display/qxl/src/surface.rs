@@ -236,7 +236,7 @@ impl<'memory> Surface<'memory, Prepared> {
             Err(error) => return Err((error, self)),
         };
         // SAFETY: the caller supplies the active ring and mapping relationship.
-        match unsafe { pool.submit_retained(output, ring, &self.memory) } {
+        match unsafe { pool.submit_retained(output, ring, &[&self.memory]) } {
             Ok(notify) => Ok((self.change_state(), notify)),
             Err(error) => Err((error, self)),
         }
@@ -267,7 +267,7 @@ impl<'memory> Surface<'memory, Active> {
             Err(error) => return Err((error, self)),
         };
         // SAFETY: the caller retains the device and command ordering contract.
-        match unsafe { pool.submit_retained(output, ring, &self.memory) } {
+        match unsafe { pool.submit_retained(output, ring, &[&self.memory]) } {
             Ok(notify) => {
                 // The destroy command retains its own reference through release.
                 pool.release(self.memory)

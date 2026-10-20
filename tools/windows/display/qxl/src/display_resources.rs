@@ -221,8 +221,12 @@ impl<'memory> Pool<'memory> {
         })
     }
 
+    pub(crate) fn owns(&self, resource: &Resource<'memory>) -> bool {
+        resource.owner == self.owner
+    }
+
     pub fn retain(&mut self, resource: &Resource<'memory>) -> Result<Resource<'memory>, Error> {
-        if resource.owner != self.owner {
+        if !self.owns(resource) {
             return Err(Error::WrongPool);
         }
         // SAFETY: the noncopyable token owns a live reference to this pool's
@@ -244,15 +248,33 @@ impl<'memory> Pool<'memory> {
         &mut self,
         resource: Resource<'memory>,
     ) -> Result<(), (Error, Resource<'memory>)> {
-        if resource.owner != self.owner {
+        if !self.owns(&resource) {
             return Err((Error::WrongPool, resource));
         }
+        self.release_owned(resource);
+        Ok(())
+    }
+
+    pub(crate) fn release_pair(
+        &mut self,
+        first: Resource<'memory>,
+        second: Resource<'memory>,
+    ) -> Result<(), (Error, Resource<'memory>, Resource<'memory>)> {
+        if !self.owns(&first) || !self.owns(&second) {
+            return Err((Error::WrongPool, first, second));
+        }
+        self.release_owned(first);
+        self.release_owned(second);
+        Ok(())
+    }
+
+    fn release_owned(&mut self, resource: Resource<'memory>) {
         // SAFETY: this token owns a live reference; node headers cannot alias
         // payload users. The pool borrow serialises count updates.
         let node = unsafe { &mut *resource.node.as_ptr() };
         node.references -= 1;
         if node.references != 0 {
-            return Ok(());
+            return;
         }
         // SAFETY: no other references remain; move ownership off the allocation
         // before freeing either its video payload or its main-memory header.
@@ -266,7 +288,6 @@ impl<'memory> Pool<'memory> {
         }
         self.free_main(ManuallyDrop::into_inner(node.allocation));
         self.resources -= 1;
-        Ok(())
     }
 
     pub fn output(&mut self, command: Command, length: usize) -> Result<Output<'memory>, Error> {
@@ -353,23 +374,32 @@ impl<'memory> Pool<'memory> {
         &mut self,
         mut output: Output<'memory>,
         ring: &mut CommandRing,
-        memory: &Resource<'memory>,
+        resources: &[&Resource<'memory>],
     ) -> Result<bool, Error> {
-        let retained = match self.retain(memory) {
-            Ok(retained) => retained,
-            Err(error) => {
-                self.cancel(output).expect("local command ownership");
+        if resources.len() > MAX_RESOURCES {
+            self.cancel(output).map_err(|(error, _)| error)?;
+            return Err(Error::TooManyResources);
+        }
+        for resource in resources {
+            let retained = match self.retain(resource) {
+                Ok(retained) => retained,
+                Err(error) => {
+                    self.cancel(output).map_err(|(error, _)| error)?;
+                    return Err(error);
+                }
+            };
+            if let Err((error, retained)) = self.attach(&mut output, retained) {
+                self.release(retained).map_err(|(error, _)| error)?;
+                self.cancel(output).map_err(|(error, _)| error)?;
                 return Err(error);
             }
-        };
-        self.attach(&mut output, retained)
-            .expect("first local command resource slot");
-        // SAFETY: the caller retains the active device/ring/mapping; the output
-        // now retains its resource independently through host release.
+        }
+        // SAFETY: the caller retains the active mapping; the output now owns
+        // every immutable source independently until host completion.
         match unsafe { self.submit(output, ring) } {
             Ok(notify) => Ok(notify),
             Err((error, output)) => {
-                self.cancel(output).expect("local command ownership");
+                self.cancel(output).map_err(|(error, _)| error)?;
                 Err(error)
             }
         }
@@ -550,6 +580,35 @@ pub(crate) mod test_utils;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paired_release_and_multi_source_submission_reject_foreign_ownership_atomically() {
+        use crate::display_resources::test_utils::{Bytes, HostRing, empty, pool};
+        let mut first_memory = [0u64; 512];
+        let mut second_memory = [0u64; 512];
+        let mut first_pool = pool(&mut first_memory, None);
+        let mut second_pool = pool(&mut second_memory, None);
+        let first = first_pool.resource(Region::Main, 16).unwrap();
+        let second = second_pool.resource(Region::Main, 16).unwrap();
+        let (error, first, second) = first_pool.release_pair(first, second).unwrap_err();
+        assert_eq!(error, Error::WrongPool);
+        let output = first_pool.output(Command::Draw, 8).unwrap();
+        let mut memory = Bytes([0; 532]);
+        let host = HostRing::new(&mut memory, 32, 16);
+        // SAFETY: the fake host retains this complete ring mapping.
+        let mut commands = unsafe { CommandRing::new(host.base, 532) }.unwrap();
+        // SAFETY: this unpublished output and endpoint belong to the first pool;
+        // the foreign second source must fail before any host publication.
+        let rejected =
+            unsafe { first_pool.submit_retained(output, &mut commands, &[&first, &second]) };
+        assert_eq!(rejected, Err(Error::WrongPool));
+        assert_eq!(host.get(4), 0);
+        assert_eq!(first_pool.outstanding_outputs(), 0);
+        first_pool.release(first).unwrap();
+        second_pool.release(second).unwrap();
+        empty(&mut first_pool);
+        empty(&mut second_pool);
+    }
 
     use super::test_utils::*;
 
