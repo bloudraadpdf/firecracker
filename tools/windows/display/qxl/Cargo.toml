@@ -11,6 +11,9 @@ publish = false
 unsafe_op_in_unsafe_fn = "deny"
 missing_debug_implementations = "warn"
 
+[lints.clippy]
+undocumented_unsafe_blocks = "warn"
+
 [profile.release]
 panic = "abort"
 lto = true
