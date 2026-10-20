@@ -323,8 +323,10 @@ impl<'a> ScaledBitmap<'a> {
 
     fn interpolate(&self, x: u32, y: u32) -> u32 {
         let axis = |value: u32, source: (i64, i64), target: (i64, i64)| {
+            let source = (i128::from(source.0), i128::from(source.1));
+            let target = (i128::from(target.0), i128::from(target.1));
             let position = source.0 * 65536
-                + ((i64::from(value) - target.0) * 2 + 1) * (source.1 - source.0) * 32768
+                + ((i128::from(value) - target.0) * 2 + 1) * (source.1 - source.0) * 32768
                     / (target.1 - target.0)
                 - 32768;
             let first = position.div_euclid(65536);
