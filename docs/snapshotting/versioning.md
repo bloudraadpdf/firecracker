@@ -131,6 +131,17 @@ creating and restoring snapshots on hosts that have the same CPU model.
 
 Restoring from an Intel snapshot on AMD (or vice-versa) is not supported.
 
+On x86, a guest that exposes shadow stacks requires KVM support for the
+`IA32_U_CET` and `IA32_PL3_SSP` MSRs and `KVM_CAP_ONE_REG`. Firecracker saves the
+live shadow stack pointer with `KVM_REG_GUEST_SSP`, separately from the saved
+ring-transition pointer in `IA32_PL3_SSP`. An unavailable register or incomplete
+shadow stack state causes the snapshot operation to fail. A guest that hides
+shadow stacks does not require the live pointer register. The user CET control
+MSR is also saved when the guest exposes indirect branch tracking.
+
+Snapshot format 15 adds the live pointer field. Its state files are incompatible
+with format 14, including for guests that do not use CET.
+
 It is important to note that guest workloads can still execute instructions that
 are being [masked](../cpu_templates/cpu-templates.md) by CPUID and restoring and
 saving of such workloads will lead to undefined result. Firecracker retrieves

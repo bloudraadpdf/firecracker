@@ -13,11 +13,12 @@ use kvm_bindings::{
     CpuId, KVM_MAX_CPUID_ENTRIES, KVM_MAX_MSR_ENTRIES, Msrs, Xsave, kvm_debugregs, kvm_lapic_state,
     kvm_mp_state, kvm_regs, kvm_sregs, kvm_vcpu_events, kvm_xcrs, kvm_xsave, kvm_xsave2,
 };
-use kvm_ioctls::{VcpuExit, VcpuFd};
+use kvm_ioctls::{Cap, VcpuExit, VcpuFd};
 use serde::{Deserialize, Serialize};
 use vmm_sys_util::fam::{self, FamStruct};
 
 use crate::arch::EntryPoint;
+use crate::arch::x86_64::cet::{CetError, Features as CetFeatures};
 use crate::arch::x86_64::generated::msr_index::{MSR_IA32_TSC, MSR_IA32_TSC_DEADLINE};
 use crate::arch::x86_64::interrupts;
 use crate::arch::x86_64::msr::{MsrError, create_boot_msr_entries};
@@ -49,6 +50,8 @@ const DEFERRED_MSRS: [u32; 1] = [
 /// Errors associated with the wrappers over KVM ioctls.
 #[derive(Debug, PartialEq, Eq, thiserror::Error, displaydoc::Display)]
 pub enum KvmVcpuError {
+    /// Failed to preserve CET state: {0}
+    Cet(#[from] CetError),
     /// Invalid PIT-free timer configuration: {0}
     PitlessTimers(#[from] cpuid::PitlessTimerError),
     /// Failed to convert `kvm_bindings::CpuId` to `Cpuid`: {0}
@@ -158,6 +161,7 @@ pub struct KvmVcpu {
     ///
     /// `None` if `KVM_CAP_XSAVE2` not supported.
     xsave2_size: Option<usize>,
+    one_reg_supported: bool,
     pit_enabled: bool,
 }
 
@@ -189,6 +193,7 @@ impl KvmVcpu {
             peripherals: Default::default(),
             msrs_to_save: vm.msrs_to_save().to_vec(),
             xsave2_size: vm.xsave2_size(),
+            one_reg_supported: vm.kvm().fd.check_extension(Cap::OneReg),
             pit_enabled: vm.pit_enabled,
         })
     }
@@ -634,7 +639,10 @@ impl KvmVcpu {
             None
         });
         let cpuid = self.get_cpuid()?;
-        let saved_msrs = self.get_msr_chunks(self.msrs_to_save.iter().copied())?;
+        let cet = CetFeatures::from_cpuid(&cpuid);
+        let guest_ssp = cet.save_ssp(&self.fd, self.one_reg_supported)?;
+        let msr_indices = cet.snapshot_msrs(&self.msrs_to_save)?;
+        let saved_msrs = self.get_msr_chunks(msr_indices.into_iter())?;
         let vcpu_events = self
             .fd
             .get_vcpu_events()
@@ -643,6 +651,7 @@ impl KvmVcpu {
         Ok(VcpuState {
             cpuid,
             saved_msrs,
+            guest_ssp,
             debug_regs,
             lapic,
             mp_state,
@@ -691,6 +700,15 @@ impl KvmVcpu {
 
     /// Use provided state to populate KVM internal state.
     pub fn restore_state(&self, state: &VcpuState) -> Result<(), KvmVcpuError> {
+        let cet = CetFeatures::from_cpuid(&state.cpuid);
+        cet.validate_ssp(self.one_reg_supported, state.guest_ssp)?;
+        cet.snapshot_msrs(&self.msrs_to_save)?;
+        let saved_indices = state
+            .saved_msrs
+            .iter()
+            .flat_map(|msrs| msrs.as_slice().iter().map(|entry| entry.index))
+            .collect::<Vec<_>>();
+        cet.validate_saved_msrs(&saved_indices)?;
         if !self.pit_enabled {
             cpuid::validate_pitless_timers(&state.cpuid)?;
         }
@@ -753,6 +771,7 @@ impl KvmVcpu {
                 return Err(KvmVcpuError::VcpuSetMsrsIncomplete);
             }
         }
+        cet.restore_ssp(&self.fd, self.one_reg_supported, state.guest_ssp)?;
         self.fd
             .set_vcpu_events(&state.vcpu_events)
             .map_err(KvmVcpuError::VcpuSetVcpuEvents)?;
@@ -808,6 +827,8 @@ pub struct VcpuState {
     pub cpuid: CpuId,
     /// Saved msrs.
     pub saved_msrs: Vec<Msrs>,
+    /// Live shadow stack pointer, distinct from the ring-transition PL3_SSP MSR.
+    pub guest_ssp: Option<u64>,
     /// Debug regs.
     pub debug_regs: kvm_debugregs,
     /// Lapic.
@@ -838,6 +859,7 @@ impl Debug for VcpuState {
         f.debug_struct("VcpuState")
             .field("cpuid", &self.cpuid)
             .field("saved_msrs", &debug_kvm_regs)
+            .field("guest_ssp", &self.guest_ssp)
             .field("debug_regs", &self.debug_regs)
             .field("lapic", &self.lapic)
             .field("mp_state", &self.mp_state)
@@ -876,6 +898,7 @@ mod tests {
             VcpuState {
                 cpuid: CpuId::new(1).unwrap(),
                 saved_msrs: vec![Msrs::new(1).unwrap()],
+                guest_ssp: None,
                 debug_regs: Default::default(),
                 lapic: Default::default(),
                 mp_state: Default::default(),
@@ -1013,6 +1036,111 @@ mod tests {
                 assert!(!t2a_res);
             }
         }
+    }
+
+    #[test]
+    fn test_snapshot_without_guest_cet() {
+        use crate::arch::x86_64::generated::msr_index::{MSR_IA32_PL3_SSP, MSR_IA32_U_CET};
+
+        let (vm, mut vcpu) = setup_vcpu(0x10000);
+        let mut cpuid = vm.kvm().supported_cpuid.clone();
+        for entry in cpuid.as_mut_slice() {
+            if entry.function == 7 && entry.index == 0 {
+                entry.ecx &= !(1 << 7);
+                entry.edx &= !(1 << 20);
+            }
+        }
+        vcpu.fd.set_cpuid2(&cpuid).unwrap();
+        // A non-CET guest must not depend on the new x86 ONE_REG capability.
+        vcpu.one_reg_supported = false;
+        let state = vcpu.save_state().unwrap();
+        assert_eq!(state.guest_ssp, None);
+        assert!(state.saved_msrs.iter().all(|msrs| {
+            msrs.as_slice()
+                .iter()
+                .all(|entry| ![MSR_IA32_U_CET, MSR_IA32_PL3_SSP].contains(&entry.index))
+        }));
+
+        let encoded = bitcode::serialize(&state).unwrap();
+        let decoded: VcpuState = bitcode::deserialize(&encoded).unwrap();
+        let (_vm, mut restored) = setup_vcpu(0x10000);
+        restored.one_reg_supported = false;
+        restored.restore_state(&decoded).unwrap();
+        assert_eq!(restored.save_state().unwrap().guest_ssp, None);
+    }
+
+    #[test]
+    fn test_snapshot_preserves_distinct_shadow_stack_pointers() {
+        use crate::arch::x86_64::generated::msr_index::{MSR_IA32_PL3_SSP, MSR_IA32_U_CET};
+        use crate::arch::x86_64::msr::set_msrs;
+
+        let (vm, vcpu) = setup_vcpu(0x10000);
+        let cpuid = &vm.kvm().supported_cpuid;
+        if !cpuid
+            .as_slice()
+            .iter()
+            .any(|entry| entry.function == 7 && entry.index == 0 && entry.ecx & (1 << 7) != 0)
+        {
+            return;
+        }
+        vcpu.fd.set_cpuid2(cpuid).unwrap();
+        let cet = CetFeatures::from_cpuid(cpuid);
+        set_msrs(
+            &vcpu.fd,
+            &[
+                kvm_msr_entry {
+                    index: MSR_IA32_U_CET,
+                    data: 1,
+                    ..Default::default()
+                },
+                kvm_msr_entry {
+                    index: MSR_IA32_PL3_SSP,
+                    data: 0x2000,
+                    ..Default::default()
+                },
+            ],
+        )
+        .unwrap();
+        cet.restore_ssp(&vcpu.fd, vcpu.one_reg_supported, Some(0x3000))
+            .unwrap();
+
+        let encoded = bitcode::serialize(&vcpu.save_state().unwrap()).unwrap();
+        let decoded: VcpuState = bitcode::deserialize(&encoded).unwrap();
+        assert_eq!(decoded.guest_ssp, Some(0x3000));
+        let (_vm, restored) = setup_vcpu(0x10000);
+        restored.restore_state(&decoded).unwrap();
+        let msrs = restored
+            .get_msrs([MSR_IA32_U_CET, MSR_IA32_PL3_SSP].into_iter())
+            .unwrap();
+        assert_eq!(msrs[&MSR_IA32_U_CET], 1);
+        assert_eq!(msrs[&MSR_IA32_PL3_SSP], 0x2000);
+        assert_eq!(restored.save_state().unwrap().guest_ssp, Some(0x3000));
+    }
+
+    #[test]
+    fn test_restore_rejects_missing_live_ssp() {
+        let (_vm, mut vcpu) = setup_vcpu(0x10000);
+        vcpu.one_reg_supported = true;
+        let mut state = VcpuState::default();
+        state.cpuid.as_mut_slice()[0].function = 7;
+        state.cpuid.as_mut_slice()[0].ecx = 1 << 7;
+        assert_eq!(
+            vcpu.restore_state(&state),
+            Err(KvmVcpuError::Cet(CetError::InvalidSspState))
+        );
+    }
+
+    #[test]
+    fn test_restore_rejects_hidden_cet_msrs() {
+        use crate::arch::x86_64::generated::msr_index::MSR_IA32_U_CET;
+
+        let (_vm, vcpu) = setup_vcpu(0x10000);
+        let mut state = VcpuState::default();
+        state.saved_msrs[0].as_mut_slice()[0].index = MSR_IA32_U_CET;
+        assert_eq!(
+            vcpu.restore_state(&state),
+            Err(KvmVcpuError::Cet(CetError::UnexpectedMsr(MSR_IA32_U_CET)))
+        );
     }
 
     #[test]
@@ -1196,7 +1324,8 @@ mod tests {
     fn test_get_msrs_with_msrs_to_save() {
         // Test `get_msrs()` with the MSR indices that should be serialized into snapshots.
         // The MSR indices should be valid and this test should succeed.
-        let (_, vcpu) = setup_vcpu(0x1000);
+        let (vm, vcpu) = setup_vcpu(0x1000);
+        vcpu.fd.set_cpuid2(&vm.kvm().supported_cpuid).unwrap();
         vcpu.get_msrs(vcpu.msrs_to_save.iter().copied()).unwrap();
     }
 
@@ -1204,7 +1333,8 @@ mod tests {
     fn test_get_msrs_with_msrs_to_dump() {
         // Test `get_msrs()` with the MSR indices that should be dumped.
         // All the MSR indices should be valid and the call should succeed.
-        let (_, vcpu) = setup_vcpu(0x1000);
+        let (vm, vcpu) = setup_vcpu(0x1000);
+        vcpu.fd.set_cpuid2(&vm.kvm().supported_cpuid).unwrap();
 
         let kvm = kvm_ioctls::Kvm::new().unwrap();
         let msrs_to_dump = crate::arch::x86_64::msr::get_msrs_to_dump(&kvm).unwrap();
@@ -1325,6 +1455,7 @@ mod tests {
         // Regression test for #4666
         let vm = setup_vm();
         let vcpu = KvmVcpu::new(0, &vm).unwrap();
+        vcpu.fd.set_cpuid2(&vm.kvm().supported_cpuid).unwrap();
 
         // The list of supported MSR indices, in the order they were returned by KVM
         let msrs_to_save = vm.msrs_to_save();
@@ -1345,5 +1476,325 @@ mod tests {
                     .chain(DEFERRED_MSRS.iter()),
             )
             .for_each(|(left, &right)| assert_eq!(left.index, right));
+    }
+
+    mod cet_execution {
+        use std::mem::size_of_val;
+
+        use super::*;
+        use crate::arch::x86_64::{
+            gdt::{gdt_entry, kvm_segment_from_gdt},
+            generated::msr_index::{
+                MSR_IA32_PL3_SSP, MSR_IA32_S_CET, MSR_IA32_U_CET, MSR_IA32_XSS, MSR_LSTAR,
+                MSR_STAR, MSR_SYSCALL_MASK,
+            },
+            msr::set_msrs,
+        };
+        use crate::vstate::memory::{Bytes, GuestAddress};
+        use kvm_bindings::{KVM_GUESTDBG_ENABLE, KVM_GUESTDBG_USE_SW_BP, kvm_guest_debug};
+
+        const RAM_SIZE: usize = 0x30000;
+        const PML4: u64 = 0x1000;
+        const PDPT: u64 = 0x2000;
+        const PD: u64 = 0x3000;
+        const PT: u64 = 0x4000;
+        const GDT: u64 = 0x5000;
+        const TSS: u32 = 0x6000;
+        const USER_CODE: u64 = 0x10000;
+        const CALLEE: u64 = USER_CODE + 0x20;
+        const KERNEL_CODE: u64 = 0x11000;
+        const STACK_TOP: u64 = 0x21000;
+        const SHADOW_TOP: u64 = 0x23000;
+        const PL3_SENTINEL: u64 = 0x25000;
+        const RETURN_ADDRESS: u64 = USER_CODE + 5;
+        const SUCCESS_BREAKPOINT: u64 = USER_CODE + 10;
+        const SUCCESS: u64 = 0xc37;
+        const NX: u64 = 1 << 63;
+
+        #[derive(Clone, Copy, Debug)]
+        enum PauseAt {
+            User,
+            Kernel,
+        }
+
+        impl PauseAt {
+            fn breakpoint(self) -> u64 {
+                match self {
+                    Self::User => CALLEE,
+                    Self::Kernel => KERNEL_CODE,
+                }
+            }
+        }
+
+        fn install_breakpoints(vcpu: &KvmVcpu) {
+            vcpu.fd
+                .set_guest_debug(&kvm_guest_debug {
+                    control: KVM_GUESTDBG_ENABLE | KVM_GUESTDBG_USE_SW_BP,
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+
+        fn write_pte(vm: &KvmVm, address: u64, flags: u64) {
+            vm.guest_memory()
+                .write_obj(address | flags, GuestAddress(PT + address / 4096 * 8))
+                .unwrap();
+        }
+
+        fn setup(pause: PauseAt) -> Option<(KvmVm, KvmVcpu, bool)> {
+            let (vm, vcpu) = setup_vcpu(RAM_SIZE);
+            let cpuid = &vm.kvm().supported_cpuid;
+            let shstk = cpuid
+                .as_slice()
+                .iter()
+                .any(|entry| entry.function == 7 && entry.index == 0 && entry.ecx & (1 << 7) != 0);
+            if !shstk || !vcpu.one_reg_supported {
+                eprintln!("SKIP executed CET snapshot: KVM SHSTK and ONE_REG are required");
+                return None;
+            }
+            CetFeatures::from_cpuid(cpuid)
+                .snapshot_msrs(&vcpu.msrs_to_save)
+                .unwrap();
+            vcpu.fd.set_cpuid2(cpuid).unwrap();
+            let memory = vm.guest_memory();
+            memory.write_obj(PDPT | 7, GuestAddress(PML4)).unwrap();
+            memory.write_obj(PD | 7, GuestAddress(PDPT)).unwrap();
+            memory.write_obj(PT | 7, GuestAddress(PD)).unwrap();
+            for address in (0..RAM_SIZE as u64).step_by(4096) {
+                write_pte(&vm, address, 3 | NX);
+            }
+            write_pte(&vm, USER_CODE, 5);
+            write_pte(&vm, KERNEL_CODE, 1);
+            write_pte(&vm, STACK_TOP - 4096, 7 | NX);
+            // x86 shadow-stack leaf encoding is user, present, read-only and dirty.
+            write_pte(&vm, SHADOW_TOP - 4096, 0x45 | NX);
+
+            let table = [
+                0,
+                gdt_entry(0xa09b, 0, 0xfffff),
+                gdt_entry(0xc093, 0, 0xfffff),
+                gdt_entry(0xc0f3, 0, 0xfffff),
+                gdt_entry(0xa0fb, 0, 0xfffff),
+                gdt_entry(0x008b, TSS, 0x67),
+                0,
+            ];
+            for (index, entry) in table.iter().enumerate() {
+                memory
+                    .write_obj(*entry, GuestAddress(GDT + index as u64 * 8))
+                    .unwrap();
+            }
+            // CALL callee; MOV EAX,success; INT3. The callee pauses before its RET.
+            memory
+                .write_slice(
+                    &[0xe8, 0x1b, 0, 0, 0, 0xb8, 0x37, 0x0c, 0, 0, 0xcc],
+                    GuestAddress(USER_CODE),
+                )
+                .unwrap();
+            match pause {
+                PauseAt::User => memory
+                    .write_slice(&[0xcc, 0xc3, 0x0f, 0x0b], GuestAddress(CALLEE))
+                    .unwrap(),
+                PauseAt::Kernel => memory
+                    .write_slice(&[0x0f, 0x05, 0xc3, 0x0f, 0x0b], GuestAddress(CALLEE))
+                    .unwrap(),
+            }
+            // Kernel pause; SYSRETQ. The syscall leaves the ordinary user RSP intact.
+            memory
+                .write_slice(
+                    &[0xcc, 0x48, 0x0f, 0x07, 0x0f, 0x0b],
+                    GuestAddress(KERNEL_CODE),
+                )
+                .unwrap();
+
+            let mut sregs = vcpu.fd.get_sregs().unwrap();
+            sregs.cr0 = 0x8001_0033; // PG, WP, NE, ET, MP, PE.
+            sregs.cr3 = PML4;
+            sregs.cr4 = (1 << 23) | (1 << 10) | (1 << 9) | (1 << 5); // CET, OSXMMEXCPT, OSFXSR, PAE.
+            sregs.efer = 0xd01; // NXE, LMA, LME, SCE.
+            sregs.gdt.base = GDT;
+            sregs.gdt.limit = u16::try_from(size_of_val(&table) - 1).unwrap();
+            sregs.idt.base = 0;
+            sregs.idt.limit = 0;
+            sregs.cs = kvm_segment_from_gdt(table[4], 4);
+            sregs.cs.selector |= 3;
+            sregs.ss = kvm_segment_from_gdt(table[3], 3);
+            sregs.ss.selector |= 3;
+            sregs.ds = sregs.ss;
+            sregs.es = sregs.ss;
+            sregs.fs = sregs.ss;
+            sregs.gs = sregs.ss;
+            sregs.tr = kvm_segment_from_gdt(table[5], 5);
+            sregs.ldt.unusable = 1;
+            vcpu.fd.set_sregs(&sregs).unwrap();
+            vcpu.fd
+                .set_regs(&kvm_regs {
+                    rip: USER_CODE,
+                    rsp: STACK_TOP,
+                    rflags: 2,
+                    ..Default::default()
+                })
+                .unwrap();
+            let has_cet_xss = cpuid.as_slice().iter().any(|entry| {
+                entry.function == 0xd && entry.index == 1 && entry.ecx & (1 << 11) != 0
+            });
+            let mut msrs = vec![
+                kvm_msr_entry {
+                    index: MSR_IA32_U_CET,
+                    data: 1,
+                    ..Default::default()
+                },
+                kvm_msr_entry {
+                    index: MSR_IA32_S_CET,
+                    data: 0,
+                    ..Default::default()
+                },
+                kvm_msr_entry {
+                    index: MSR_IA32_PL3_SSP,
+                    data: PL3_SENTINEL,
+                    ..Default::default()
+                },
+                kvm_msr_entry {
+                    index: MSR_STAR,
+                    data: (0x10 << 48) | (8 << 32),
+                    ..Default::default()
+                },
+                kvm_msr_entry {
+                    index: MSR_LSTAR,
+                    data: KERNEL_CODE,
+                    ..Default::default()
+                },
+                kvm_msr_entry {
+                    index: MSR_SYSCALL_MASK,
+                    data: 1 << 9,
+                    ..Default::default()
+                },
+            ];
+            if has_cet_xss {
+                msrs.push(kvm_msr_entry {
+                    index: MSR_IA32_XSS,
+                    data: 1 << 11,
+                    ..Default::default()
+                });
+            }
+            set_msrs(&vcpu.fd, &msrs).unwrap();
+            CetFeatures::from_cpuid(cpuid)
+                .restore_ssp(&vcpu.fd, vcpu.one_reg_supported, Some(SHADOW_TOP))
+                .unwrap();
+            install_breakpoints(&vcpu);
+            Some((vm, vcpu, has_cet_xss))
+        }
+
+        fn run_to_breakpoint(vcpu: &mut KvmVcpu, address: u64) {
+            match vcpu.fd.run().unwrap() {
+                VcpuExit::Debug(debug) => {
+                    assert_eq!(debug.exception, 3);
+                    assert!(debug.pc == address || debug.pc == address + 1);
+                }
+                other => panic!("CET guest did not reach breakpoint {address:#x}: {other:?}"),
+            }
+            let rip = vcpu.fd.get_regs().unwrap().rip;
+            assert!(rip == address || rip == address + 1);
+        }
+
+        fn saved_msr(state: &VcpuState, index: u32) -> u64 {
+            state
+                .saved_msrs
+                .iter()
+                .flat_map(|msrs| msrs.as_slice())
+                .find(|entry| entry.index == index)
+                .unwrap()
+                .data
+        }
+
+        fn restored(state: &VcpuState, ram: &[u8], pause: PauseAt) -> (KvmVm, KvmVcpu) {
+            let (vm, vcpu) = setup_vcpu(RAM_SIZE);
+            vm.guest_memory().write_slice(ram, GuestAddress(0)).unwrap();
+            vcpu.restore_state(state).unwrap();
+            install_breakpoints(&vcpu);
+            let mut registers = vcpu.fd.get_regs().unwrap();
+            registers.rip = pause.breakpoint() + 1;
+            vcpu.fd.set_regs(&registers).unwrap();
+            (vm, vcpu)
+        }
+
+        fn round_trip(pause: PauseAt) {
+            let Some((vm, mut vcpu, has_cet_xss)) = setup(pause) else {
+                return;
+            };
+            run_to_breakpoint(&mut vcpu, pause.breakpoint());
+            assert_eq!(
+                vm.guest_memory()
+                    .read_obj::<u64>(GuestAddress(SHADOW_TOP - 8))
+                    .unwrap(),
+                RETURN_ADDRESS
+            );
+            let state = vcpu.save_state().unwrap();
+            assert_eq!(saved_msr(&state, MSR_IA32_U_CET), 1);
+            if has_cet_xss {
+                assert_eq!(saved_msr(&state, MSR_IA32_XSS), 1 << 11);
+            }
+            match pause {
+                PauseAt::User => {
+                    assert_eq!(state.sregs.cs.dpl, 3);
+                    assert_eq!(state.guest_ssp, Some(SHADOW_TOP - 8));
+                    assert_eq!(saved_msr(&state, MSR_IA32_PL3_SSP), PL3_SENTINEL);
+                    assert_ne!(
+                        state.guest_ssp.unwrap(),
+                        saved_msr(&state, MSR_IA32_PL3_SSP)
+                    );
+                }
+                PauseAt::Kernel => {
+                    assert_eq!(state.sregs.cs.dpl, 0);
+                    assert_eq!(saved_msr(&state, MSR_IA32_PL3_SSP), SHADOW_TOP - 8);
+                }
+            }
+            let mut ram = vec![0; RAM_SIZE];
+            vm.guest_memory()
+                .read_slice(&mut ram, GuestAddress(0))
+                .unwrap();
+            let encoded = bitcode::serialize(&(state, ram)).unwrap();
+            let (mut state, ram): (VcpuState, Vec<u8>) = bitcode::deserialize(&encoded).unwrap();
+            let (_restored_vm, mut resumed) = restored(&state, &ram, pause);
+            assert_eq!(resumed.save_state().unwrap().guest_ssp, state.guest_ssp);
+            run_to_breakpoint(&mut resumed, SUCCESS_BREAKPOINT);
+            let registers = resumed.fd.get_regs().unwrap();
+            assert_eq!(registers.rax, SUCCESS);
+            assert_eq!(registers.rsp, STACK_TOP);
+            assert_eq!(resumed.save_state().unwrap().guest_ssp, Some(SHADOW_TOP));
+
+            // A missing live SSP at CPL3, or saved user SSP at CPL0, must make RET fail.
+            match pause {
+                PauseAt::User => state.guest_ssp = Some(0),
+                PauseAt::Kernel => {
+                    for entry in state
+                        .saved_msrs
+                        .iter_mut()
+                        .flat_map(|msrs| msrs.as_mut_slice())
+                    {
+                        if entry.index == MSR_IA32_PL3_SSP {
+                            entry.data = 0;
+                        }
+                    }
+                }
+            }
+            let (_broken_vm, mut broken) = restored(&state, &ram, pause);
+            assert!(
+                matches!(broken.fd.run().unwrap(), VcpuExit::Shutdown),
+                "invalid SSP unexpectedly returned successfully"
+            );
+            eprintln!(
+                "executed CET snapshot round-trip and invalid-SSP control passed at {pause:?}"
+            );
+        }
+
+        #[test]
+        fn test_cet_executed_cpl3_snapshot_round_trip() {
+            round_trip(PauseAt::User);
+        }
+
+        #[test]
+        fn test_cet_executed_cpl0_snapshot_round_trip() {
+            round_trip(PauseAt::Kernel);
+        }
     }
 }
