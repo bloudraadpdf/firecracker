@@ -430,3 +430,22 @@ for all PDevs; driver shutdown requires every PDev to have been destroyed.
 These callbacks are not registered yet. Hardware/surface attachment, rendering
 state, compression and the remaining callbacks must be complete before the full
 DDI table is published. The PDev setup callbacks do not activate hardware.
+
+## Native bitmap migration
+
+`src/native_bitmap.rs` binds stable driver contexts to GDI bitmaps. Primary
+bitmaps retain their context until the owned GDI handle is deleted; they do
+not expose `EngModifySurface` transitions, which Windows forbids after the
+primary surface is published.
+
+Secondary device bitmaps own their video resource and private GDI draw area.
+RAM migration copies synchronised pixels, switches GDI to a bottom-up system
+buffer and retains the old video resource. Detaching that resource requires
+completed hardware shutdown. The resulting system bitmap has no dependency
+on the old mapping and can restore into a new generation.
+
+Restoration publishes the copied video surface before switching GDI back. A
+failed GDI switch leaves the RAM bitmap intact and retires the new host surface;
+if retirement cannot be queued, the error retains that candidate explicitly.
+GDI-owned device handles are not deleted a second time by their driver callback.
+Full PDev callback attachment and native migration qualification remain required.

@@ -24,6 +24,8 @@ pub mod hash;
 pub mod ioctl;
 pub mod memory;
 pub mod modes;
+#[cfg(any(test, all(windows, any(target_arch = "x86", target_arch = "x86_64"))))]
+pub mod native_bitmap;
 pub mod pdev_config;
 
 #[cfg(any(test, all(windows, any(target_arch = "x86", target_arch = "x86_64"))))]

@@ -61,6 +61,16 @@ unsafe extern "system" {
     pub(crate) fn EngLockSurface(surface: *mut c_void) -> *mut SurfaceObject;
     pub(crate) fn EngUnlockSurface(object: *mut SurfaceObject);
     pub(crate) fn EngDeleteSurface(surface: *mut c_void) -> i32;
+    pub(crate) fn EngModifySurface(
+        surface: *mut c_void,
+        device: *mut c_void,
+        hooks: u32,
+        flags: u32,
+        context: *mut c_void,
+        first_scan: *mut c_void,
+        stride: i32,
+        reserved: *mut c_void,
+    ) -> i32;
     fn EngAllocMem(flags: u32, bytes: u32, tag: u32) -> *mut c_void;
     fn EngFreeMem(memory: *mut c_void);
     pub(crate) fn EngDeviceIoControl(
@@ -75,13 +85,17 @@ unsafe extern "system" {
 }
 
 #[derive(Debug)]
-struct Memory(NonNull<u8>);
+pub(crate) struct Memory(NonNull<u8>);
 
 impl Memory {
-    unsafe fn zeroed(bytes: u32) -> Result<Self, u32> {
+    pub(crate) unsafe fn zeroed(bytes: u32) -> Result<Self, u32> {
         // SAFETY: the caller is a passive-level kernel display callback.
         let memory = unsafe { EngAllocMem(1, bytes, ALLOCATION_TAG) };
         Ok(Self(NonNull::new(memory.cast()).ok_or(NOT_ENOUGH_MEMORY)?))
+    }
+
+    pub(crate) fn as_ptr(&self) -> NonNull<u8> {
+        self.0
     }
 }
 

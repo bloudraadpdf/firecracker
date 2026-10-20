@@ -225,6 +225,21 @@ only registered hooks. The context must support deletion even during failed
 construction. After handoff, GDI owns the bitmap; its deletion callback ends
 the driver's context lifetime. Private helper bitmaps remain driver-owned.
 
+`native_bitmap` keeps each callback context in a stable heap object. The bitmap
+handle is destroyed before that context. Primary bitmaps retain their original
+binding; only secondary bitmaps use `EngModifySurface`. A handed-off handle is
+not deleted again by the Rust owner.
+
+Video-to-RAM migration requires completed host writes and stopped GDI/CPU users.
+It copies the complete checked extent before changing the GDI binding. The old
+video reference remains owned until hardware quiescence permits detach; a failed
+change retains the original bitmap. Detach ends the old mapping dependency.
+Restoration publishes the copied video surface before making GDI opaque again.
+If that change fails, the RAM bitmap remains live and the candidate is destroyed
+on the same FIFO. A failed compensating destroy returns its video owner for
+retry. Forward notification flags on failure as well as success. Never release
+these owners or unmap their arenas merely because a wait timed out.
+
 PDev palettes own their `EngCreatePalette` handles through GDI device teardown.
 Their raw handles in `DEVINFO` do not extend that lifetime. Native record
 encoding writes only named fields, clears padding and preserves short output
