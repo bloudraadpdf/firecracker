@@ -218,10 +218,18 @@ version 1.9.7600.16385. The current Rust generation-counter probe exits zero and
 returns a nonzero ID. Read-only collection confirms that the installed SYS
 matches the original Microsoft package. No signing-policy change is used.
 
-WMI reports the inherited viostor 61.77.104.17200 package as unsigned. The full
-BCD inventory has no test-signing or integrity-bypass entries. This storage
-driver's signing metadata remains unresolved; the generation-counter result
-does not establish that all installed driver packages are trusted.
+WMI reports `IsSigned=False` for the inherited viostor 61.77.104.17200 package,
+and PnP Utility leaves its signer field blank. Native Windows
+`Get-AuthenticodeSignature` checks nevertheless report `Valid` for its catalogue,
+DriverStore SYS and installed SYS. The INF digest matches its catalogue member.
+SetupAPI identifies Red Hat as its Authenticode signer and returns `0xe0000242`,
+the [publisher trust category](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/signature-categories-and-driver-installation),
+rather than an absent signature. This is a vendor Authenticode package, not a
+WHQL result. A normal same-package PnP installation attempt returns 259 and
+installs nothing; the installed SYS hash is unchanged. No publisher certificate
+is enrolled. The full BCD inventory has no test-signing or integrity-bypass
+entries. These native checks establish the recorded files' signature validity;
+the WMI flag does not replace that check or prove publisher enrolment.
 
 The first post-full-restore Ctrl+End sequence did not move the caret to the
 document end: the marker was inserted at the clicked position. That text and
