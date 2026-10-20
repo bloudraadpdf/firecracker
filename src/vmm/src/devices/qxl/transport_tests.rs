@@ -106,6 +106,26 @@ fn completed_commands_publish_release_ids_and_terminate_the_guest_chain() {
 }
 
 #[test]
+fn bar_relocation_preserves_offsets_and_generations_and_rejects_partial_changes() {
+    let (memory, mut addresses, _) = setup();
+    addresses.add(2, VRAM + 8192..VRAM + 12288).unwrap();
+    memory.write(Region::Ram, 0, &[1]).unwrap();
+    memory.write(Region::Vram, 8192, &[2]).unwrap();
+    let vram = 0x0201_0000_0000_0000;
+    addresses.relocate(0xa000_0000, 0xa200_0000).unwrap();
+    let mut byte = [0];
+    addresses.read(&memory, pointer(1, 0), &mut byte).unwrap();
+    assert_eq!(byte, [1]);
+    addresses.read(&memory, vram, &mut byte).unwrap();
+    assert_eq!(byte, [2]);
+    addresses.relocate(0xa400_0000, 0xa400_0000).unwrap_err();
+    assert_eq!(addresses.resolve(vram, 1), Ok((Region::Vram, 8192)));
+    addresses.reset();
+    assert_eq!(addresses.add(1, 0xa000_0000..0xa000_1000), Ok(2));
+    addresses.resolve(pointer(1, 0), 1).unwrap_err();
+}
+
+#[test]
 fn synchronous_dispatch_does_not_wait_for_later_submissions() {
     let (memory, addresses, mut queues) = setup();
     submit(&memory, 0, 1);

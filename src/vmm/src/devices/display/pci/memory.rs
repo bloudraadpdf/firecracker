@@ -16,6 +16,7 @@ pub(crate) struct FramebufferMemory {
     memory: Arc<MmapRegion>,
     slot: u32,
     address: Option<u64>,
+    flags: u32,
 }
 
 impl FramebufferMemory {
@@ -28,7 +29,15 @@ impl FramebufferMemory {
             memory,
             slot,
             address: None,
+            flags: 0,
         })
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) fn new_read_only(vm: &Arc<KvmVm>, memory: Arc<MmapRegion>) -> io::Result<Self> {
+        let mut mapping = Self::new(vm, memory)?;
+        mapping.flags = kvm_bindings::KVM_MEM_READONLY;
+        Ok(mapping)
     }
 
     pub(crate) fn set_address(&mut self, address: Option<u64>) -> io::Result<()> {
@@ -41,7 +50,7 @@ impl FramebufferMemory {
             .ok_or_else(|| io::Error::other("framebuffer VM is gone"))?;
         let region = kvm_userspace_memory_region {
             slot: self.slot,
-            flags: 0,
+            flags: self.flags,
             guest_phys_addr: address.unwrap_or(0),
             memory_size: if address.is_some() {
                 self.memory.size() as u64
@@ -77,6 +86,66 @@ mod tests {
 
     fn backing() -> Arc<MmapRegion> {
         Arc::new(MmapRegion::new(crate::devices::display::FRAMEBUFFER_SIZE).unwrap())
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn read_only_slot_allows_reads_and_exits_before_guest_writes() {
+        use kvm_bindings::kvm_regs;
+        use kvm_ioctls::VcpuExit;
+        use vm_memory::{Bytes, GuestAddress, VolatileMemory};
+
+        let mut vm = setup_vm_with_memory(0x10000);
+        vm.setup_irqchip(true).unwrap();
+        let vm = Arc::new(vm);
+        let memory = Arc::new(MmapRegion::new(4096).unwrap());
+        memory
+            .get_slice(0, 1)
+            .unwrap()
+            .write_slice(&[0xa5], 0)
+            .unwrap();
+        let mut slot = FramebufferMemory::new_read_only(&vm, memory.clone()).unwrap();
+        slot.set_address(Some(0x80000)).unwrap();
+        let mut vcpu = vm.common.fd.create_vcpu(0).unwrap();
+        let mut sregs = vcpu.get_sregs().unwrap();
+        sregs.cs.base = 0;
+        sregs.cs.selector = 0;
+        sregs.ds.base = 0x80000;
+        sregs.ds.selector = 0x8000;
+        vcpu.set_sregs(&sregs).unwrap();
+        vm.guest_memory()
+            .write_slice(
+                &[
+                    0xa0, 0, 0, 0xe6, 0x80, 0xc6, 0x06, 0, 0, 0x5a, 0xe6, 0x80, 0xf4,
+                ],
+                GuestAddress(0x1000),
+            )
+            .unwrap();
+        vcpu.set_regs(&kvm_regs {
+            rip: 0x1000,
+            rflags: 2,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(matches!(
+            vcpu.run().unwrap(),
+            VcpuExit::IoOut(0x80, &[0xa5])
+        ));
+        assert!(matches!(
+            vcpu.run().unwrap(),
+            VcpuExit::MmioWrite(0x80000, &[0x5a])
+        ));
+        let mut byte = [0];
+        memory
+            .get_slice(0, 1)
+            .unwrap()
+            .read_slice(&mut byte, 0)
+            .unwrap();
+        assert_eq!(byte, [0xa5]);
+        assert!(matches!(
+            vcpu.run().unwrap(),
+            VcpuExit::IoOut(0x80, &[0xa5])
+        ));
     }
 
     fn available(vm: &Arc<KvmVm>, address: u64) -> bool {

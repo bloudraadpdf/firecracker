@@ -85,6 +85,40 @@ impl AddressSpace {
         self.slots.fill(None);
     }
 
+    pub fn relocate(&mut self, ram: u64, vram: u64) -> Result<(), DecodeError> {
+        let mut next = Self::new(ram, vram)?;
+        next.generations = self.generations;
+        for (index, slot) in self.slots.iter().copied().enumerate() {
+            if let Some((slot, region)) = slot {
+                let (old, backing) = match region {
+                    Region::Ram => (
+                        self.ram.start,
+                        next.ram.start..next.ram.start + u64::try_from(RAM_HEADER).unwrap(),
+                    ),
+                    Region::Vram => (self.vram.start, next.vram.clone()),
+                    Region::Rom => return Err(DecodeError::Slot),
+                };
+                let address = |value: u64| {
+                    value
+                        .checked_sub(old)
+                        .and_then(|offset| backing.start.checked_add(offset))
+                        .ok_or(DecodeError::Address)
+                };
+                let range = slot.range();
+                let range = address(range.start)?..address(range.end)?;
+                let slot = MemorySlot::new(
+                    u8::try_from(index + 1).unwrap(),
+                    self.generations[index],
+                    range,
+                    backing,
+                )?;
+                next.slots[index] = Some((slot, region));
+            }
+        }
+        *self = next;
+        Ok(())
+    }
+
     pub fn resolve(&self, address: u64, length: usize) -> Result<(Region, usize), DecodeError> {
         let id = u8::try_from(address >> 56).unwrap();
         let (slot, region) = self.slots[Self::index(id)?].ok_or(DecodeError::Slot)?;

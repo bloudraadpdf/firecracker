@@ -114,6 +114,18 @@ interval of one millisecond. Controller checks cover ordering, pressure and
 retry, slot invalidation, signed rows, padding, interrupt masks and cursor trails.
 The controller still needs PCI, console and snapshot integration and native
 guest validation.
+
+The PCI memory layer maps RAM, VRAM and the read-only protocol ROM through the
+existing KVM slot owner. Boot VGA and QXL share the first 16 MiB of RAM; they do
+not create overlapping KVM mappings. Decode changes roll back completed slot
+changes if a later mapping fails. BAR relocation preserves slot offsets and
+generations, so an active primary surface keeps its pixels. Checks cover a
+conflicting KVM mapping, cleanup after disable/drop, live relocation and failed
+relocation without partial metadata changes. A real vCPU can read the protected
+ROM, and a guest write exits as MMIO without changing its bytes. The VGA option
+ROM loader and BAR handling are shared with the existing display implementation.
+PCI identity, bus registration, I/O and interrupt/event integration remain to be
+connected before the guest driver can bind.
 The layout follows
 the published [QXL device ABI](https://sources.debian.org/src/spice-protocol/0.12.14-1/spice/qxl_dev.h/).
 It does not expose a QXL PCI device yet. Component checks do not establish guest
