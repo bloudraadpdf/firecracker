@@ -9,7 +9,8 @@ use core::mem::size_of;
 use core::ptr::{copy_nonoverlapping, null_mut, read_volatile, write_volatile};
 use core::sync::atomic::{AtomicU8, Ordering, fence};
 
-use crate::driver_info::{DriverInfo, GET_INFO, MemSlot, SET_CUSTOM_DISPLAY};
+use crate::driver_info::{DriverInfo, MemSlot};
+use crate::ioctl::*;
 use crate::memory::{COMMAND_RING_OFFSET, CURSOR_RING_OFFSET, RELEASE_RING_OFFSET};
 use crate::mode_pool::ModePool;
 use crate::modes::ModeError;
@@ -19,13 +20,6 @@ use crate::videoport::*;
 
 const INTERRUPT_MASK: u32 = 7;
 const INVALID_DATA: u32 = 13;
-const QUERY_AVAILABLE_MODES: u32 = 0x230000;
-const QUERY_MODE_COUNT: u32 = 0x230004;
-const QUERY_CURRENT_MODE: u32 = 0x230008;
-const SET_CURRENT_MODE: u32 = 0x23000c;
-const RESET_DEVICE: u32 = 0x230010;
-const MAP_VIDEO_MEMORY: u32 = 0x230058;
-const UNMAP_VIDEO_MEMORY: u32 = 0x23005c;
 
 #[derive(Debug)]
 pub struct Adapter {

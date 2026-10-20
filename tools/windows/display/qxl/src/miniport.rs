@@ -11,7 +11,7 @@ use core::ptr::{NonNull, null_mut, read_unaligned, write, write_unaligned};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::adapter::Adapter;
-use crate::driver_info::GET_INFO;
+use crate::ioctl::GET_INFO;
 use crate::resources::DeviceResources;
 use crate::videoport::*;
 
