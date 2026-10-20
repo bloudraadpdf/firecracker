@@ -169,7 +169,7 @@ mod tests {
         }
 
         fn base(&mut self) -> NonNull<u8> {
-            NonNull::from(&mut self.0[0])
+            NonNull::from(self.0.as_mut_slice()).cast()
         }
     }
 
