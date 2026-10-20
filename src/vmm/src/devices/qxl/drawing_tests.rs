@@ -463,6 +463,22 @@ fn alpha_commands_decode_both_layouts_and_surface_alpha_flags() {
 }
 
 #[test]
+fn alpha_rounding_uses_the_bitmap_format_even_for_opaque_argb_pixels() {
+    for (format, expected) in [(8, 0xff2b773e), (9, 0xff2c773e)] {
+        let fixture = Fixture::new(20);
+        fixture.background(0xff317352);
+        fixture.image(IMAGE, format, 1, 1, &[3, 0x83, 0x1b, 0xff]);
+        let mut data = vec![0, 0, 64];
+        data.extend(image_payload(24));
+        fixture.store(DRAW, &command(Layout::Modern, 13, [1, 0, 2, 1], &data));
+        fixture.draw(Layout::Modern);
+        let mut pixel = [0; 4];
+        fixture.memory.read(Region::Ram, 68, &mut pixel).unwrap();
+        assert_eq!(u32::from_le_bytes(pixel), expected);
+    }
+}
+
+#[test]
 fn primary_surface_images_capture_overlapping_sources_and_only_read_their_header() {
     for layout in [Layout::Modern, Layout::Compat] {
         let fixture = Fixture::new(20);

@@ -315,8 +315,12 @@ impl<'a> ScaledBitmap<'a> {
         }
         let [left, top, right, bottom] = self.source;
         let [target_left, target_top, target_right, target_bottom] = self.target;
-        let x = left + (i64::from(x) - target_left) * (right - left) / (target_right - target_left);
-        let y = top + (i64::from(y) - target_top) * (bottom - top) / (target_bottom - target_top);
+        let x = left
+            + ((i64::from(x) - target_left) * 2 + 1) * (right - left)
+                / ((target_right - target_left) * 2);
+        let y = top
+            + ((i64::from(y) - target_top) * 2 + 1) * (bottom - top)
+                / ((target_bottom - target_top) * 2);
         self.bitmap.pixels
             [usize::try_from(y).unwrap() * self.bitmap.width as usize + usize::try_from(x).unwrap()]
     }

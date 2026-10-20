@@ -116,19 +116,34 @@ pub fn ternary(opcode: u8, source: u32, brush: u32, destination: u32) -> u32 {
     result
 }
 
-pub fn alpha_over(source: u32, destination: u32, alpha: u8, destination_has_alpha: bool) -> u32 {
+pub fn alpha_over(
+    source: u32,
+    destination: u32,
+    alpha: u8,
+    destination_has_alpha: bool,
+    source_has_alpha: bool,
+) -> u32 {
     let multiply = |value: u32, alpha: u32| (value * alpha + 127) / 255;
     let alpha = u32::from(alpha);
-    let source_alpha = multiply(source >> 24, alpha);
+    let source_alpha = if source_has_alpha {
+        multiply(source >> 24, alpha)
+    } else {
+        alpha
+    };
     let mut result = if destination_has_alpha {
         (source_alpha + multiply(destination >> 24, 255 - source_alpha)).min(255) << 24
     } else {
         0xff00_0000
     };
     for shift in [0, 8, 16] {
-        let source = multiply((source >> shift) & 255, alpha);
-        let destination = multiply((destination >> shift) & 255, 255 - source_alpha);
-        result |= (source + destination).min(255) << shift;
+        let source = (source >> shift) & 255;
+        let destination = (destination >> shift) & 255;
+        let channel = if source_has_alpha {
+            multiply(source, alpha) + multiply(destination, 255 - source_alpha)
+        } else {
+            (source * alpha + destination * (255 - alpha) + 127) / 255
+        };
+        result |= channel.min(255) << shift;
     }
     result
 }
@@ -195,16 +210,42 @@ mod tests {
 
     #[test]
     fn premultiplied_alpha_combines_pixel_and_constant_alpha() {
-        assert_eq!(alpha_over(0x8040_0000, 0x8000_0080, 0, true), 0x8000_0080);
-        assert_eq!(alpha_over(0x8040_0000, 0x8000_0080, 128, true), 0xa020_0060);
-        assert_eq!(alpha_over(0x8040_0000, 0x8000_0080, 255, true), 0xc040_0040);
         assert_eq!(
-            alpha_over(0xff20_4060, 0xff60_4020, 128, false),
+            alpha_over(0x8040_0000, 0x8000_0080, 0, true, true),
+            0x8000_0080
+        );
+        assert_eq!(
+            alpha_over(0x8040_0000, 0x8000_0080, 128, true, true),
+            0xa020_0060
+        );
+        assert_eq!(
+            alpha_over(0x8040_0000, 0x8000_0080, 255, true, true),
+            0xc040_0040
+        );
+        assert_eq!(
+            alpha_over(0xff20_4060, 0xff60_4020, 128, false, true),
             0xff40_4040
         );
         assert_eq!(
-            alpha_over(0x8040_0000, 0x8000_0080, 128, false),
+            alpha_over(0x8040_0000, 0x8000_0080, 128, false, true),
             0xff20_0060
+        );
+    }
+
+    #[test]
+    fn constant_alpha_rounds_the_combined_colour_once() {
+        // XP GDI's XRGB and premultiplied-ARGB paths use distinct rounding.
+        assert_eq!(
+            alpha_over(0xff1b_8303, 0xff31_7352, 64, false, false),
+            0xff2b_773e
+        );
+        assert_eq!(
+            alpha_over(0xff1b_8303, 0xff31_7352, 64, false, true),
+            0xff2c_773e
+        );
+        assert_eq!(
+            alpha_over(0x001b_8303, 0xff31_7352, 255, false, false),
+            0xff1b_8303
         );
     }
 

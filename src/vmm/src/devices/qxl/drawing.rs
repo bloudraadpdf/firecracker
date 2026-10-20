@@ -206,7 +206,7 @@ enum ImageAction {
     Alpha {
         alpha: u8,
         destination_has_alpha: bool,
-        source_surface_has_alpha: bool,
+        source_has_alpha: bool,
     },
 }
 
@@ -219,7 +219,7 @@ impl ImageAction {
         }
     }
 
-    fn apply(&self, source: u32, x: u32, y: u32, destination: u32, surface_source: bool) -> u32 {
+    fn apply(&self, source: u32, x: u32, y: u32, destination: u32) -> u32 {
         match self {
             Self::Raster(op) => op.apply(source, 0, destination),
             Self::Opaque { brush, op } => op.apply_opaque(source, brush.sample(x, y)),
@@ -236,15 +236,14 @@ impl ImageAction {
             Self::Alpha {
                 alpha,
                 destination_has_alpha,
-                source_surface_has_alpha,
-            } => {
-                let source = if surface_source && !source_surface_has_alpha {
-                    source | 0xff00_0000
-                } else {
-                    source
-                };
-                alpha_over(source, destination, *alpha, *destination_has_alpha)
-            }
+                source_has_alpha,
+            } => alpha_over(
+                source,
+                destination,
+                *alpha,
+                *destination_has_alpha,
+                *source_has_alpha,
+            ),
         }
     }
 }
@@ -288,7 +287,7 @@ impl Operation {
         memory: &Memory,
         addresses: &AddressSpace,
         data: &[u8],
-        action: ImageAction,
+        mut action: ImageAction,
         mode: u8,
         mask: Option<&[u8]>,
         bounds: Rect,
@@ -306,6 +305,13 @@ impl Operation {
             } else {
                 let bitmap = Bitmap::decode(memory, addresses, address)?;
                 bitmap.validate_rect(area)?;
+                if let ImageAction::Alpha {
+                    source_has_alpha, ..
+                } = &mut action
+                {
+                    *source_has_alpha =
+                        matches!(read::<1>(memory, addresses, address, 18)?[0], 9 | 10);
+                }
                 ImagePixels::Bitmap(bitmap)
             };
             (Some(ImageSource { pixels, area }), ScaleMode::decode(mode)?)
@@ -544,7 +550,7 @@ impl Drawable {
                     ImageAction::Alpha {
                         alpha,
                         destination_has_alpha: flags & 1 != 0,
-                        source_surface_has_alpha: flags & 2 != 0,
+                        source_has_alpha: flags & 2 != 0,
                     },
                     0,
                     None,
@@ -684,12 +690,7 @@ impl Drawable {
                             destination
                         }
                     }
-                    Operation::Image {
-                        source,
-                        action,
-                        mask,
-                        ..
-                    } => {
+                    Operation::Image { action, mask, .. } => {
                         if mask
                             .as_ref()
                             .is_none_or(|mask| mask.covers(x, y, self.bounds))
@@ -699,9 +700,6 @@ impl Drawable {
                                 x,
                                 y,
                                 destination,
-                                source.as_ref().is_some_and(|source| {
-                                    matches!(source.pixels, ImagePixels::PrimarySurface)
-                                }),
                             )
                         } else {
                             destination

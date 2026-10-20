@@ -142,7 +142,7 @@ impl Shape {
                     + usize::try_from(target_x).unwrap();
                 let pixel = &mut frame.pixels[target];
                 *pixel = match &self.pixels {
-                    Pixels::Alpha(colors) => alpha_over(colors[source], *pixel, 255, false),
+                    Pixels::Alpha(colors) => alpha_over(colors[source], *pixel, 255, false, true),
                     Pixels::Masked(masks) => (*pixel & masks[source][0]) ^ masks[source][1],
                 } & 0x00ff_ffff;
             }

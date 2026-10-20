@@ -13,6 +13,23 @@ const DATA: usize = 512;
 const PALETTE: usize = 256;
 
 #[test]
+fn nearest_uses_gdi_pixel_centres_for_enlargement_and_reduction() {
+    let bitmap = Bitmap::from_pixels(24, 20, (0..480).collect()).unwrap();
+    let source = Rect::new(0, 0, 24, 20).unwrap();
+    let enlarged = ScaledBitmap::new(&bitmap, source, Rect::new(16, 40, 56, 68).unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(enlarged.sample(19, 40), 2);
+    assert_eq!(enlarged.sample(55, 67), 479);
+    let reduced = ScaledBitmap::new(&bitmap, source, Rect::new(80, 40, 97, 53).unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(reduced.sample(81, 40), 2);
+    assert_eq!(reduced.sample(88, 40), 12);
+    assert_eq!(reduced.sample(96, 52), 479);
+}
+
+#[test]
 fn interpolation_samples_pixel_centres_and_clamps_source_edges() {
     let bitmap = Bitmap::from_pixels(
         2,
@@ -29,7 +46,7 @@ fn interpolation_samples_pixel_centres_and_clamps_source_edges() {
     assert_eq!(sampler.sample(1, 1), 0xff40_4040);
     assert_eq!(sampler.sample(2, 2), 0xff00_00ff);
     let nearest = ScaledBitmap::new(&bitmap, source, target).unwrap().unwrap();
-    assert_eq!(nearest.sample(1, 1), 0xff00_0000);
+    assert_eq!(nearest.sample(1, 1), 0xff00_00ff);
     let crop = ScaledBitmap::with_mode(
         &bitmap,
         Rect::new(1, 0, 2, 2).unwrap(),
