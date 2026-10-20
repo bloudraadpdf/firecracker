@@ -157,6 +157,24 @@ cold boot and full/differential restore remain open for this QXL profile. The
 test reference also has unresolved ACPI device warnings. It does not establish
 complete XP or Windows 7 graphics support.
 
+## Windows 7 native QXL checks
+
+Runtime source `9c581a595` also boots a private Windows 7 SP1 x64 reference with
+the QXL profile. An elevated stock PnP Utility installs the pinned ISO's
+`qxl/w7/amd64` package as `oem3.inf`, version 6.1.0.10024. Installation required
+normal UAC consent and no signature-policy change. A clean shutdown and cold
+boot follow installation. WMI then reports the Red Hat QXL GPU with Code 0.
+
+WMI leaves the active driver and geometry fields empty on this reference.
+Microsoft documents [inaccurate WMI properties for non-WDDM adapters](https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-videocontroller).
+Separate evidence confirms the native primary surface and processed draw/cursor
+queues. The Screen Resolution UI names the QXL adapter, accepts pointer dragging
+to 2560 by 1440 and retains that mode after Keep. The console frame independently
+reports 2560 by 1440. No QXL protocol error was logged during these checks.
+
+These initial checks do not establish all-mode pixels, complete keyboard/pointer
+behaviour, VNC or native viewer input, selected-mode cold boot or snapshot restore.
+
 ## Windows 11 native GPU checks
 
 Runtime source `ae208ad25` passes native AMD64 scanout checks on Windows 11 Pro
