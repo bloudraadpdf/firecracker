@@ -350,10 +350,32 @@ mod native {
             // SAFETY: the retained session exclusively owns the release endpoint.
             unsafe { self.reap_completed(64) }?;
             let slot = self.resources.main_slot();
-            let image = self
-                .images
-                .acquire(&mut self.resources.pool, slot, width, height, pixels, alpha)
-                .map_err(Error::Pool)?;
+            // SAFETY: mapped-device validation retains this aligned ROM field.
+            let compression = unsafe { self.device.info().compression_level.read_volatile() };
+            let header = crate::quic::Header {
+                format: if alpha {
+                    crate::quic::Format::Bgra32
+                } else {
+                    crate::quic::Format::Bgrx32
+                },
+                width: width as usize,
+                height: height as usize,
+            };
+            let compressed = if compression != 0 {
+                // SAFETY: this active session exclusively owns the pool and slot.
+                unsafe {
+                    crate::quic::native::compress(header, pixels, &mut self.resources.pool, slot)
+                }
+            } else {
+                None
+            };
+            let image = match compressed {
+                Some(image) => image,
+                None => self
+                    .images
+                    .acquire(&mut self.resources.pool, slot, width, height, pixels, alpha)
+                    .map_err(Error::Pool)?,
+            };
             // SAFETY: both image and destination remain retained by this session.
             let result =
                 unsafe { self.draw(|resources, clock| operation(&image, resources, clock)) };

@@ -2,7 +2,7 @@
 // Copyright 2026 Bloudraad.
 // SPDX-License-Identifier: GPL-2.0-only
 
-//! Owned raw QXL images from display/res.c.
+//! Owned raw and QUIC QXL images from display/res.c.
 
 use crate::bitmap::{Bitmap, Format};
 use crate::display_resources::{Error, Pool, Region, Resource};
@@ -19,6 +19,7 @@ pub struct Image<'memory> {
     height: u32,
     format: Format,
     palette: Option<Palette<'memory>>,
+    compressed: bool,
 }
 
 impl<'memory> Image<'memory> {
@@ -72,6 +73,7 @@ impl<'memory> Image<'memory> {
             height: bitmap.height,
             format: bitmap.format,
             palette: retained,
+            compressed: false,
         };
         // SAFETY: the fresh allocation owns the entire unpublished image record.
         let output = unsafe { core::slice::from_raw_parts_mut(image.memory.as_ptr(), bytes) };
@@ -85,6 +87,62 @@ impl<'memory> Image<'memory> {
             return Err(error);
         }
         Ok(image)
+    }
+
+    #[cfg(any(test, all(windows, any(target_arch = "x86", target_arch = "x86_64"))))]
+    pub(crate) fn allocate_quic(
+        pool: &mut Pool<'memory>,
+        slot: MemorySlot,
+        header: crate::quic::Header,
+        stream: &[u8],
+    ) -> Result<Self, Error> {
+        header.pixel_bytes().map_err(|_| Error::InvalidSize)?;
+        if stream.len() < 24 || !stream.len().is_multiple_of(4) {
+            return Err(Error::InvalidSize);
+        }
+        let expected = [
+            u32::from_le_bytes(*b"QUIC"),
+            0,
+            header.format as u32,
+            header.width as u32,
+            header.height as u32,
+        ];
+        for (word, expected) in stream[..20].as_chunks::<4>().0.iter().zip(expected) {
+            if *word != expected.to_le_bytes() {
+                return Err(Error::InvalidSize);
+            }
+        }
+        let format = match header.format {
+            crate::quic::Format::Rgb555 => Format::Rgb555,
+            crate::quic::Format::Bgr24 => Format::Bgr24,
+            crate::quic::Format::Bgrx32 => Format::Bgrx32,
+            crate::quic::Format::Bgra32 => Format::Bgra32,
+            crate::quic::Format::Gray => return Err(Error::InvalidSize),
+        };
+        let size = u32::try_from(stream.len()).map_err(|_| Error::InvalidSize)?;
+        let bytes = 42usize
+            .checked_add(stream.len())
+            .ok_or(Error::InvalidSize)?;
+        let (memory, physical) = allocate_record(pool, slot, bytes)?;
+        // SAFETY: the fresh resource exclusively owns this unpublished record.
+        let output = unsafe { core::slice::from_raw_parts_mut(memory.as_ptr(), bytes) };
+        output[..42].fill(0);
+        output[..8].copy_from_slice(&3u64.to_le_bytes());
+        output[8] = 1;
+        output[10..14].copy_from_slice(&(header.width as u32).to_le_bytes());
+        output[14..18].copy_from_slice(&(header.height as u32).to_le_bytes());
+        output[18..22].copy_from_slice(&size.to_le_bytes());
+        output[22..26].copy_from_slice(&size.to_le_bytes());
+        output[42..].copy_from_slice(stream);
+        Ok(Self {
+            memory,
+            physical,
+            width: header.width as u32,
+            height: header.height as u32,
+            format,
+            palette: None,
+            compressed: true,
+        })
     }
 
     pub fn address(&self) -> u64 {
@@ -118,6 +176,7 @@ impl<'memory> Image<'memory> {
             height: self.height,
             format: self.format,
             palette,
+            compressed: self.compressed,
         })
     }
 
@@ -136,7 +195,9 @@ impl<'memory> Image<'memory> {
         bitmap: Bitmap<'_>,
         palette: Option<&Palette<'memory>>,
     ) -> bool {
-        if (self.width, self.height, self.format) != (bitmap.width, bitmap.height, bitmap.format)
+        if self.compressed
+            || (self.width, self.height, self.format)
+                != (bitmap.width, bitmap.height, bitmap.format)
             || self.memory.len() - HEADER_BYTES != bitmap.pixels.len()
         {
             return false;
@@ -270,6 +331,47 @@ mod tests {
                 core::mem::size_of_val(memory) as u64,
             )
             .unwrap()
+    }
+
+    #[test]
+    fn compressed_image_has_one_retained_chunk_and_never_aliases_raw_cache_entries() {
+        let header = crate::quic::Header {
+            format: crate::quic::Format::Bgrx32,
+            width: 32,
+            height: 8,
+        };
+        let pixels = [0x37; 32 * 8 * 4];
+        let mut stream = [0; 2048];
+        let mut correlations = [0; 33 * 3];
+        let mut models = core::array::from_fn(|_| crate::quic::Model::new());
+        let length =
+            crate::quic::encode(header, &pixels, &mut stream, &mut correlations, &mut models)
+                .unwrap();
+        let mut memory = [0u64; 1024];
+        let slot = slot(&mut memory);
+        let mut pool = pool(&mut memory, None);
+        let image = Image::allocate_quic(&mut pool, slot, header, &stream[..length]).unwrap();
+        assert_eq!(image.bytes(), 42 + length);
+        assert!(image.bytes() < pixels.len());
+        assert!(!image.matches(32, 8, &pixels, false));
+        // SAFETY: the live image retains its complete immutable allocation.
+        let bytes = unsafe { core::slice::from_raw_parts(image.memory.as_ptr(), image.bytes()) };
+        assert_eq!(bytes[8], 1);
+        assert_eq!(&bytes[18..22], &(length as u32).to_le_bytes());
+        assert_eq!(&bytes[22..26], &(length as u32).to_le_bytes());
+        assert_eq!(&bytes[26..42], &[0; 16]);
+        assert_eq!(&bytes[42..], &stream[..length]);
+        let retained = image.retain(&mut pool).unwrap();
+        image.release(&mut pool).unwrap();
+        assert!(!pool.is_empty());
+        retained.release(&mut pool).unwrap();
+        empty(&mut pool);
+        stream[8] ^= 1;
+        assert!(matches!(
+            Image::allocate_quic(&mut pool, slot, header, &stream[..length]),
+            Err(Error::InvalidSize)
+        ));
+        empty(&mut pool);
     }
 
     #[test]

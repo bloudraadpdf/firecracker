@@ -48,6 +48,7 @@ mod native_raster;
 pub mod pdev;
 #[cfg(all(windows, any(target_arch = "x86", target_arch = "x86_64")))]
 pub mod pointer;
+pub mod quic;
 pub mod raster_draw;
 #[cfg(any(test, all(windows, any(target_arch = "x86", target_arch = "x86_64"))))]
 pub mod render;
