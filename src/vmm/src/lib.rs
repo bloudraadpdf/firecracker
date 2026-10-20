@@ -179,6 +179,8 @@ pub enum FcExitCode {
     GenericError = 1,
     /// Generic exit code error; not possible to occur if the program logic is sound.
     UnexpectedError = 2,
+    /// A configured PC guest requested a reboot; a supervisor may cold-start it.
+    GuestReboot = 3,
     /// Firecracker was shut down after intercepting a restricted system call.
     BadSyscall = 148,
     /// Firecracker was shut down after intercepting `SIGBUS`.
@@ -533,6 +535,25 @@ impl Vmm {
             .map_err(VmmError::AcpiPower)
     }
 
+    #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+    fn guest_reset_requested(&self) -> bool {
+        let Some(legacy) = &self.device_manager.legacy_devices else {
+            return false;
+        };
+        let Some(pc) = &legacy.pc else {
+            return false;
+        };
+        pc.acpi_power
+            .lock()
+            .expect("ACPI power lock was poisoned")
+            .reset_requested()
+            || legacy
+                .i8042
+                .lock()
+                .expect("i8042 lock was poisoned")
+                .reset_requested()
+    }
+
     /// Saves the state of a paused Microvm.
     pub fn save_state(&mut self, vm_info: &VmInfo) -> Result<MicrovmState, MicrovmStateError> {
         self.check_unsnapshottable_devices()?;
@@ -866,6 +887,11 @@ impl MutEventSubscriber for Vmm {
                                     }
                                 }
                             }
+                        }
+
+                        #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+                        if self.guest_reset_requested() {
+                            break 'exit_code FcExitCode::GuestReboot;
                         }
 
                         // No CPUs exited with error status code, report "Ok"

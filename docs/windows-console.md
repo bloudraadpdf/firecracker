@@ -534,11 +534,18 @@ wait for guest shutdown and the process result. The action requires the
 `windows` feature and configured PC power hardware, and is rejected before boot.
 See the [action reference](api_requests/actions.md#intel-and-amd-windows-feature-only-sendpowerbutton).
 
-Guest reset exits Firecracker. The supervisor starts a new process with the same
-writable disk to continue installation. A remote console connection does not own
-the VM lifetime; closing it must not stop the VM. Reconnect to the replacement
-process after reboot. Eject before booting the installed disk when firmware
-would otherwise select installation media again.
+Guest reset exits Firecracker. A configured AMD64 PC returns exit code3 for an
+ACPI or i8042 reset, and code0 for normal shutdown. Other nonzero results are
+failures. The supervisor restarts only a recognised reset, with a bounded reboot
+count and the same writable disk, firmware, UUID and device configuration.
+Wait for the old process to exit before starting its replacement. Start a new
+serial-log phase and wait for guest readiness, not just the API listener.
+Existing non-PC profiles keep their previous exit behaviour.
+
+A remote console connection does not own the VM lifetime; closing it must not
+stop the VM. Reconnect to the replacement process after reboot. Eject before
+booting the installed disk when firmware would otherwise select installation
+media again.
 
 Each attached drive identifies normally with no inserted disc and preserves
 that state across restore. Closing an empty tray does not create a medium.

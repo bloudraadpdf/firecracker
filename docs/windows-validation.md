@@ -138,6 +138,27 @@ It exposes one revision-two QXL PCI device. Component checks do not establish gu
 driver loading or rendering. Graphics qualification across all agreed guests
 must finish before work returns to unrelated platform features.
 
+## Native PC power and reset checks
+
+The format43 AMD64 Windows-feature binary `7522cc8d` passes the new
+`SendPowerButton` action on the existing XP SP3 x86, Windows 7 SP1 x64,
+Windows 10 LTSC x64 and Windows 11 IoT LTSC x64 references. Each request
+returns HTTP204, followed by guest ACPI S5 and actual process exit0. The
+request does not force an exit or depend on keyboard input.
+
+An XP `shutdown /r /t 0` issues ACPI and i8042 reset requests and returns
+actual process exit3. A subsequent cold start and power-button shutdown
+return0. Unit checks cover both reset paths, pending button restore, shared
+SCI resampling, acknowledgement, enable masking and FADT declaration. The
+API parser covers supported and unsupported builds and preboot rejection.
+Strict Windows-feature and default-build Clippy pass. The final x86_64
+binary is unchanged by narrowing the reset accessor to its AMD64 caller.
+
+No graphics or network matrix was repeated. These lifecycle results do not
+constitute Toets backend integration or installer acceptance. All test guests
+are shut down; their disks are closed. See the
+[supervisor contract](windows-console.md#guest-lifecycle).
+
 ## Rust QXL compression and secondary surfaces
 
 The format42 host `cb05dd01` advertises QUIC and 1,024 surfaces. Separate

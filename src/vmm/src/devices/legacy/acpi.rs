@@ -76,6 +76,7 @@ pub struct AcpiPower {
     start: Instant,
     base_ticks: u64,
     sci_asserted: bool,
+    reset_requested: bool,
     registration: Result<(), String>,
 }
 
@@ -91,6 +92,7 @@ impl AcpiPower {
             start: Instant::now(),
             base_ticks: 0,
             sci_asserted: false,
+            reset_requested: false,
             registration: Err("ACPI events not registered".to_owned()),
         };
         device.arm_timer();
@@ -144,6 +146,10 @@ impl AcpiPower {
         self.signal_sci()
     }
 
+    pub(crate) fn reset_requested(&self) -> bool {
+        self.reset_requested
+    }
+
     pub(crate) fn notify_vmgenid(&mut self) -> std::io::Result<()> {
         self.state.gpe_status |= 1;
         self.signal_sci()
@@ -173,7 +179,8 @@ impl AcpiPower {
         self.signal_sci()
     }
 
-    fn shutdown(&self, reset: bool) {
+    fn shutdown(&mut self, reset: bool) {
+        self.reset_requested |= reset;
         info!(
             "Guest requested ACPI {}",
             if reset { "reset" } else { "S5 shutdown" }
@@ -318,6 +325,7 @@ mod tests {
             exit.read().unwrap_err().kind(),
             std::io::ErrorKind::WouldBlock
         );
+        assert!(!restored.reset_requested());
     }
 
     #[test]
@@ -354,6 +362,24 @@ mod tests {
             restored.lock().unwrap().sci_evt.read().unwrap_err().kind(),
             std::io::ErrorKind::WouldBlock
         );
+    }
+
+    #[test]
+    fn reset_and_guest_poweroff_have_distinct_host_latches() {
+        for reset in [false, true] {
+            let exit = EventFd::new(libc::EFD_NONBLOCK).unwrap();
+            let mut power = AcpiPower::new(exit.try_clone().unwrap()).unwrap();
+            if reset {
+                power.write(POWER_PORT, 0, &[1]);
+            } else {
+                power.write(POWER_PORT, 6, &0x3400u16.to_le_bytes());
+            }
+            assert_eq!(exit.read().unwrap(), 1);
+            assert_eq!(power.reset_requested(), reset);
+            let mut restored = AcpiPower::new(EventFd::new(libc::EFD_NONBLOCK).unwrap()).unwrap();
+            restored.restore(&power.save()).unwrap();
+            assert!(!restored.reset_requested());
+        }
     }
 
     #[test]

@@ -119,16 +119,27 @@ impl From<MainError> for FcExitCode {
 }
 
 fn main() -> ExitCode {
-    let result = main_exec();
-    if let Err(err) = result {
-        error_unrestricted!("{err}");
-        eprintln!("Error: {err:?}");
-        let exit_code = FcExitCode::from(err) as u8;
-        error_unrestricted!("Firecracker exiting with error. exit_code={exit_code}");
-        ExitCode::from(exit_code)
-    } else {
-        info_unrestricted!("Firecracker exiting successfully. exit_code=0");
-        ExitCode::SUCCESS
+    match main_exec() {
+        Err(MainError::RunWithApi(ApiServerError::MicroVMStoppedWithError(
+            FcExitCode::GuestReboot,
+        )))
+        | Err(MainError::RunWithoutApiError(RunWithoutApiError::Shutdown(
+            FcExitCode::GuestReboot,
+        ))) => {
+            info_unrestricted!("Guest requested reboot. exit_code=3");
+            ExitCode::from(FcExitCode::GuestReboot as u8)
+        }
+        Err(err) => {
+            error_unrestricted!("{err}");
+            eprintln!("Error: {err:?}");
+            let exit_code = FcExitCode::from(err) as u8;
+            error_unrestricted!("Firecracker exiting with error. exit_code={exit_code}");
+            ExitCode::from(exit_code)
+        }
+        Ok(()) => {
+            info_unrestricted!("Firecracker exiting successfully. exit_code=0");
+            ExitCode::SUCCESS
+        }
     }
 }
 
