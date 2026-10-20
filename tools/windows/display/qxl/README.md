@@ -36,6 +36,12 @@ Requests validate the aligned framebuffer size before they change mode state.
 and virtual ranges, ID and generation. Address conversion checks the complete
 buffer and rejects stale generations before use.
 
+`src/driver_info.rs` defines the version-3 display/miniport interface from
+`include/qxl_driver.h`: 264 bytes on x86 and 440 bytes on x64. Encoding writes
+each field and clears padding, rather than copying kernel stack padding into
+the returned record. Mode records also use explicit field encoding. Short
+output buffers remain unchanged.
+
 `src/ring.rs` ports the SPICE command/cursor producer and release consumer
 operations. Packed entries use byte access; counters use aligned volatile
 access. The original notification arm/barrier/recheck sequence is retained.
