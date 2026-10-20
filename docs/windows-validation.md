@@ -208,12 +208,28 @@ focuses Notepad and text can be entered and saved. Following normal shutdown,
 read-only NTFS inspection confirms the exact 59 bytes displayed in the final
 document. The full snapshot's memory, state and disk hashes remain unchanged.
 
+The current device inventory initially has one error: `ACPI\VMGENCTR`, Code 28.
+Normal Microsoft servicing installs KB4490628, KB4474419 and the intact
+KB3063109 integration CAB, with the required shutdowns and cold boots. The
+restarted guest reports no device errors. Its generation-counter driver is
+`wgencounter.inf`, version 6.3.9600.18080, with WMI `IsSigned=True`.
+`gencounter` and `Wdf01000` run; the collected framework and loader files are
+version 1.9.7600.16385. The current Rust generation-counter probe exits zero and
+returns a nonzero ID. Read-only collection confirms that the installed SYS
+matches the original Microsoft package. No signing-policy change is used.
+
+WMI reports the inherited viostor 61.77.104.17200 package as unsigned. The full
+BCD inventory has no test-signing or integrity-bypass entries. This storage
+driver's signing metadata remains unresolved; the generation-counter result
+does not establish that all installed driver packages are trusted.
+
 The first post-full-restore Ctrl+End sequence did not move the caret to the
 document end: the marker was inserted at the clicked position. That text and
 the capture are retained. A later separate Ctrl+End sequence moved the caret;
-its cause remains unresolved, so these results do not establish a clean
-post-restore navigation pass. Other keyboard layouts, native viewer input and
-complete device inventory remain separate checks for this QXL profile.
+an instrumented restore also observes Ctrl+End moving the caret to the end.
+The original cause remains unresolved, so these results do not establish a
+clean post-restore navigation pass. Other keyboard layouts and native viewer
+input remain separate checks for this QXL profile.
 
 ## Windows 11 native GPU checks
 
