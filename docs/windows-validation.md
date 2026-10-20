@@ -161,9 +161,20 @@ inspection confirms all eighteen saved files contain exactly bytes 32 through
 126. The inspection detaches its owned loop device and the disk-closed check
 passes. No failed case was rerun in this matrix.
 
-Other keyboard layouts, native viewer input and full/differential restore remain
-open for this QXL profile. The test reference also has unresolved ACPI device
-warnings. These checks do not establish complete XP or Windows 7 graphics support.
+The same runtime passes full and differential snapshot restore with format 41
+at 2560 by 1440. Each load starts paused and preserves every framebuffer byte.
+The differential load also retains Caps Lock state. After each resume, pointer
+input focuses Notepad and keyboard input appends and saves a distinct line.
+After normal shutdown, read-only NTFS inspection confirms the exact 59-byte
+three-line file. The differential memory is rebased onto a copy of the full
+memory with the matching snapshot editor. Each snapshot has its own stopped
+disk copy; the full snapshot's memory, state and disk hashes remain unchanged.
+These runs use the default restore notification and clock policies.
+
+Other keyboard layouts and native viewer input remain open for this QXL profile.
+With optional VMClock disabled, the current XP inventory has one unresolved
+device: `ACPI\VMGENCTR`, Code 28. The display, keyboard and pointer report Code 0.
+These checks do not establish complete XP or Windows 7 graphics support.
 
 ## Windows 7 native QXL checks
 
