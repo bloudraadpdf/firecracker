@@ -4,6 +4,7 @@
 #![no_std]
 
 pub mod cosmetic;
+pub mod hash;
 pub mod modes;
 pub mod ring;
 pub mod slots;

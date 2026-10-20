@@ -77,7 +77,7 @@ The port covers the full XP/7 driver package. The remaining source mapping is:
 | `display/rop.c`, `brush.c`, `text.c`, `pointer.c` | Raster operations, brush realisation, text and cursor operations remain. |
 | `display/quic*.c` | Compression remains. |
 | `display/mspace.c` | Shared-memory allocator remains. |
-| `include/murmur_hash2a.h` | Cache hashing remains. |
+| `include/murmur_hash2a.h` | Ported in `src/hash.rs`, including the Jump3 pixel variant. |
 | `miniport/minimal_snprintf.c` | Replace diagnostic formatting with `core::fmt`. |
 | `miniport/wdmhelper.c` | Contains only Windows 2000 compatibility code; XP/7 use VideoPort event APIs. |
 
