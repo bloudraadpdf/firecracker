@@ -19,6 +19,8 @@ use memory::VideoMemory;
 #[cfg(feature = "windows")]
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+#[cfg(target_arch = "x86_64")]
+pub(crate) mod rom;
 mod state;
 #[cfg(target_arch = "x86_64")]
 pub use state::VgaPciState;
