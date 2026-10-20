@@ -5,4 +5,5 @@
 
 pub mod cosmetic;
 pub mod modes;
+pub mod ring;
 pub mod slots;

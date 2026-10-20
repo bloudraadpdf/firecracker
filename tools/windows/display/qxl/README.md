@@ -34,6 +34,13 @@ directly in Rust. No SDK headers or libraries are used.
 and virtual ranges, ID and generation. Address conversion checks the complete
 buffer and rejects stale generations before use.
 
+`src/ring.rs` ports the SPICE command/cursor producer and release consumer
+operations. Packed entries use byte access; counters use aligned volatile
+access. The original notification arm/barrier/recheck sequence is retained.
+Its source is `spice/ipc_ring.h` at spice-protocol commit
+`d0cfb3648cc1635df4d14facf2fdda0c40876619` (v0.12.14); the upstream BSD notice
+is retained in [NOTICE](NOTICE).
+
 ## Development checks
 
 From the repository root, with its pinned Rust toolchain:
