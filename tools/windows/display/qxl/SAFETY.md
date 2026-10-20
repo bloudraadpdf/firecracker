@@ -185,3 +185,23 @@ release ID supplies that proof. It clears only pending outputs; caller-owned
 builders and cache references must also be released before mapping destruction.
 `Pool::is_empty()` covers both output and resource allocations. Dropping tokens
 or the pool never implicitly frees memory potentially in use by the host.
+
+## Surface states
+
+Only `Surface<Prepared>` exposes a safe mutable pixel slice. It owns the sole
+resource reference and has not been submitted. Publication consumes that state,
+so a pixel borrow cannot remain live across submission. Failure cancels the
+temporary command and returns the prepared owner unchanged. `Surface<Active>`
+does not expose a safe mutable slice; its raw pixel pointer needs GDI/hardware
+synchronisation before access.
+
+Both create and destroy commands retain the surface resource through their own
+host completion. Successful destruction drops the active reference; a failed
+publication returns that owner. The device-stop discard path requires the same
+proof as pending-output discard. Allocated surface slots must describe the
+correct live video mapping; encoding validates the complete pixel extent.
+
+The PDev surface table reserves nonzero IDs below the advertised surface count.
+Creation cannot reuse a live ID, and a destroy must be published before that ID
+can be reused. Creation, drawing and destruction must share the same command
+ordering and mapping generation. Mappings remain live through all completions.

@@ -15,6 +15,7 @@ pub mod modes;
 pub mod ring;
 pub mod rop;
 pub mod slots;
+pub mod surface;
 
 #[cfg(all(windows, any(target_arch = "x86", target_arch = "x86_64")))]
 pub mod videoport;
