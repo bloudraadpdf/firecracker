@@ -8,6 +8,7 @@ use super::memory::{
     COMMAND_RING, CURSOR_RING, Memory, RAM_BYTES, RAM_HEADER, RELEASE_RING, Region, VRAM_BYTES,
 };
 use super::protocol::{Command, CommandKind, DecodeError, MemorySlot, Ring, RingSize};
+use super::state::{AddressSpaceState, QueueState, ReleaseState, SlotRegion, SlotState};
 
 const MAX_DEFERRED_RELEASES: usize = 4096;
 
@@ -86,37 +87,62 @@ impl AddressSpace {
     }
 
     pub fn relocate(&mut self, ram: u64, vram: u64) -> Result<(), DecodeError> {
+        *self = Self::restore(&self.save(), ram, vram)?;
+        Ok(())
+    }
+
+    pub(super) fn save(&self) -> AddressSpaceState {
+        AddressSpaceState {
+            generations: self.generations,
+            slots: self.slots.map(|slot| {
+                slot.map(|(slot, region)| {
+                    let (region, base) = match region {
+                        Region::Ram => (SlotRegion::Ram, self.ram.start),
+                        Region::Vram => (SlotRegion::Vram, self.vram.start),
+                        Region::Rom => unreachable!(),
+                    };
+                    let range = slot.range();
+                    SlotState {
+                        region,
+                        range: range.start - base..range.end - base,
+                    }
+                })
+            }),
+        }
+    }
+
+    pub(super) fn restore(
+        state: &AddressSpaceState,
+        ram: u64,
+        vram: u64,
+    ) -> Result<Self, DecodeError> {
         let mut next = Self::new(ram, vram)?;
-        next.generations = self.generations;
-        for (index, slot) in self.slots.iter().copied().enumerate() {
-            if let Some((slot, region)) = slot {
-                let (old, backing) = match region {
-                    Region::Ram => (
-                        self.ram.start,
-                        next.ram.start..next.ram.start + u64::try_from(RAM_HEADER).unwrap(),
-                    ),
-                    Region::Vram => (self.vram.start, next.vram.clone()),
-                    Region::Rom => return Err(DecodeError::Slot),
+        next.generations = state.generations;
+        for (index, saved) in state.slots.iter().enumerate() {
+            if let Some(saved) = saved {
+                let (region, backing) = match saved.region {
+                    SlotRegion::Ram => (Region::Ram, ram..ram + u64::try_from(RAM_HEADER).unwrap()),
+                    SlotRegion::Vram => (Region::Vram, next.vram.clone()),
                 };
-                let address = |value: u64| {
-                    value
-                        .checked_sub(old)
-                        .and_then(|offset| backing.start.checked_add(offset))
+                let address = |offset| {
+                    backing
+                        .start
+                        .checked_add(offset)
                         .ok_or(DecodeError::Address)
                 };
-                let range = slot.range();
-                let range = address(range.start)?..address(range.end)?;
-                let slot = MemorySlot::new(
-                    u8::try_from(index + 1).unwrap(),
-                    self.generations[index],
-                    range,
-                    backing,
-                )?;
-                next.slots[index] = Some((slot, region));
+                let range = address(saved.range.start)?..address(saved.range.end)?;
+                next.slots[index] = Some((
+                    MemorySlot::new(
+                        u8::try_from(index + 1).unwrap(),
+                        state.generations[index],
+                        range,
+                        backing,
+                    )?,
+                    region,
+                ));
             }
         }
-        *self = next;
-        Ok(())
+        Ok(next)
     }
 
     pub fn resolve(&self, address: u64, length: usize) -> Result<(Region, usize), DecodeError> {
@@ -184,6 +210,65 @@ struct Release {
 }
 
 impl Queues {
+    pub(super) fn save(&self) -> QueueState {
+        QueueState {
+            consumers: self.consumers,
+            release_producer: self.release_producer,
+            release_consumer: self.release_consumer,
+            releases: self
+                .releases
+                .iter()
+                .map(|release| ReleaseState {
+                    address: release.address,
+                    id: release.id,
+                })
+                .collect(),
+        }
+    }
+
+    pub(super) fn restore(
+        state: &QueueState,
+        memory: &Memory,
+        addresses: &AddressSpace,
+    ) -> Result<Self, TransportError> {
+        let outstanding = state.release_producer.wrapping_sub(state.release_consumer);
+        if outstanding > 8
+            || state.releases.len() > MAX_DEFERRED_RELEASES
+            || memory.load(RELEASE_RING)? != 8
+            || memory.load(RELEASE_RING + 4)? != state.release_producer
+            || memory
+                .load(RELEASE_RING + 12)?
+                .wrapping_sub(state.release_consumer)
+                > outstanding
+        {
+            return Err(DecodeError::Ring.into());
+        }
+        let mut unique = std::collections::HashSet::with_capacity(state.releases.len());
+        for release in &state.releases {
+            addresses.resolve(release.address, 8)?;
+            if release.id == [0; 8] || !unique.insert(release.address) {
+                return Err(DecodeError::Parameter.into());
+            }
+        }
+        let next = Self {
+            consumers: state.consumers,
+            release_producer: state.release_producer,
+            release_consumer: state.release_consumer,
+            releases: state
+                .releases
+                .iter()
+                .map(|release| Release {
+                    address: release.address,
+                    id: release.id,
+                })
+                .collect(),
+        };
+        for queue in [Queue::Commands, Queue::Cursor] {
+            next.ring(memory, queue)?;
+        }
+        Ok(next)
+    }
+
     fn ring(&self, memory: &Memory, queue: Queue) -> Result<Ring, TransportError> {
         let offset = queue.offset();
         let mut header = [0; Ring::HEADER_SIZE];

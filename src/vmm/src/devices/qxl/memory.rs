@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 use vm_memory::{Bytes, MmapRegion, VolatileMemory};
 
 use super::protocol::{Command, Ring, RingSize};
+use super::state::MemoryState;
 
 pub const SURFACE_BYTES: usize = 16 << 20;
 pub const RAM_BYTES: usize = 32 << 20;
@@ -66,6 +67,47 @@ fn invalid() -> io::Error {
 }
 
 impl Memory {
+    pub(super) fn save(&self) -> io::Result<MemoryState> {
+        let read = |region, offset, size| {
+            let mut bytes = vec![0; size];
+            self.read(region, offset, &mut bytes)?;
+            Ok::<_, io::Error>(bytes)
+        };
+        Ok(MemoryState {
+            ram: read(Region::Ram, SURFACE_BYTES, RAM_BYTES - SURFACE_BYTES)?,
+            vram: read(Region::Vram, 0, VRAM_BYTES)?,
+            rom: read(Region::Rom, 0, ROM_BYTES)?,
+        })
+    }
+
+    pub(super) fn restore(boot: Arc<MmapRegion>, state: &MemoryState) -> io::Result<Self> {
+        if state.ram.len() != RAM_BYTES - SURFACE_BYTES
+            || state.vram.len() != VRAM_BYTES
+            || state.rom.len() != ROM_BYTES
+        {
+            return Err(invalid());
+        }
+        let memory = Self::new(boot)?;
+        let mut expected = vec![0; ROM_BYTES];
+        memory.read(Region::Rom, 0, &mut expected)?;
+        for range in [8..12, 20..24, 48..52, 68..69] {
+            expected[range.clone()].copy_from_slice(&state.rom[range]);
+        }
+        let mode = u32::from_le_bytes(state.rom[20..24].try_into().unwrap());
+        if expected != state.rom || (mode != u32::MAX && mode as usize >= MODES.len()) {
+            return Err(invalid());
+        }
+        memory.write(Region::Ram, SURFACE_BYTES, &state.ram)?;
+        memory.write(Region::Vram, 0, &state.vram)?;
+        memory
+            .rom
+            .get_slice(0, ROM_BYTES)
+            .map_err(io::Error::other)?
+            .write_slice(&state.rom, 0)
+            .map_err(io::Error::other)?;
+        Ok(memory)
+    }
+
     pub fn new(boot: Arc<MmapRegion>) -> io::Result<Self> {
         if boot.size() != SURFACE_BYTES {
             return Err(invalid());

@@ -9,9 +9,12 @@ use std::sync::{Arc, Barrier};
 use vm_allocator::{AllocPolicy, RangeInclusive};
 
 use super::{BAR_SIZES, QxlPci};
+use crate::devices::display::Vga;
+use crate::devices::qxl::state::PciState;
 use crate::pci::configuration::{BarPrefetchable, Bars, PciConfiguration};
 use crate::pci::intx::PCI_INTX_GSI;
 use crate::pci::{PciClassCode, PciDevice};
+use crate::vstate::vm::KvmVm;
 
 /// Revision-two synchronous ports, excluding later asynchronous extensions.
 pub const IO_SIZE: u64 = 16;
@@ -23,6 +26,20 @@ pub struct QxlDevice {
     config: PciConfiguration,
     bars: Bars,
     io_base: u64,
+}
+
+fn configuration() -> PciConfiguration {
+    let mut config = PciConfiguration::new_type0(
+        0x1b36,
+        0x0100,
+        2,
+        PciClassCode::DisplayController,
+        0,
+        0x1af4,
+        0x1100,
+    );
+    config.set_interrupt_line(u8::try_from(PCI_INTX_GSI).unwrap());
+    config
 }
 
 impl QxlDevice {
@@ -44,16 +61,6 @@ impl QxlDevice {
             .free(&RangeInclusive::new(io_base, end).map_err(io::Error::other)?)
             .map_err(io::Error::other)?;
         graphics.set_decode(false)?;
-        let mut config = PciConfiguration::new_type0(
-            0x1b36,
-            0x0100,
-            2,
-            PciClassCode::DisplayController,
-            0,
-            0x1af4,
-            0x1100,
-        );
-        config.set_interrupt_line(u8::try_from(PCI_INTX_GSI).unwrap());
         let mut bars = Bars::default();
         for (index, (base, size)) in graphics.mapped().into_iter().zip(BAR_SIZES).enumerate() {
             bars.set_bar_32(
@@ -70,10 +77,65 @@ impl QxlDevice {
         );
         Ok(Self {
             graphics,
-            config,
+            config: configuration(),
             bars,
             io_base,
         })
+    }
+
+    /// Save PCI registers, private banks and the shared VGA framebuffer once.
+    pub fn save(&self) -> io::Result<PciState> {
+        Ok(PciState {
+            config: self.config.state(),
+            bars: self.bars,
+            mapped: self.graphics.mapped(),
+            io_base: self.io_base,
+            vga: self.graphics.vga.lock().unwrap().save(),
+            controller: self.graphics.controller.save().map_err(io::Error::other)?,
+        })
+    }
+
+    /// Validate PCI identity, BAR shape and controller metadata before enabling KVM decode.
+    pub fn restore(vm: &Arc<KvmVm>, state: &PciState) -> io::Result<Self> {
+        let saved =
+            PciConfiguration::type0_from_state(state.config.clone()).map_err(io::Error::other)?;
+        let mut config = configuration();
+        for register in [1, 3, 15] {
+            config.write_reg(register, saved.read_reg(register));
+        }
+        if (0..1024).any(|register| config.read_reg(register) != saved.read_reg(register)) {
+            return Err(io::Error::other("invalid QXL PCI configuration"));
+        }
+        let graphics = QxlPci::restore(
+            vm,
+            Vga::restore(&state.vga)?,
+            state.mapped,
+            &state.controller,
+        )?;
+        let mut device = Self::new(graphics, state.io_base)?;
+        for (index, (actual, expected)) in state.bars.bars.iter().zip(device.bars.bars).enumerate()
+        {
+            let flags = expected.encoded_addr & !expected.encoded_size;
+            if actual.encoded_size != expected.encoded_size
+                || actual.encoded_addr & !expected.encoded_size != flags
+            {
+                return Err(io::Error::other("invalid QXL BAR type or size"));
+            }
+            if index < 4 {
+                let decode = if index == 3 { 1 } else { 2 };
+                let probe = actual.encoded_addr == expected.encoded_size | flags;
+                if config.read_reg(1) & decode != 0
+                    && !probe
+                    && actual.encoded_addr != expected.encoded_addr
+                {
+                    return Err(io::Error::other("QXL BAR differs from its live mapping"));
+                }
+            }
+        }
+        device.config = config;
+        device.bars = state.bars;
+        device.graphics.set_decode(device.command() & 2 != 0)?;
+        Ok(device)
     }
 
     /// Access the controller and shared boot framebuffer.
@@ -553,5 +615,106 @@ mod tests {
         )
         .unwrap();
         QxlDevice::new(graphics, larger).unwrap_err();
+    }
+
+    #[test]
+    fn adapter_checkpoint_restores_pci_probes_shared_vga_and_private_banks() {
+        let mut fixture = Fixture::new();
+        fixture.write(1, 3);
+        let mapped = fixture.device.graphics.mapped();
+        fixture
+            .device
+            .graphics
+            .write(mapped[0], 64, 2, &[0x12, 0x34])
+            .unwrap();
+        fixture
+            .device
+            .graphics
+            .write(mapped[1], 128, 2, &[0xa5])
+            .unwrap();
+        fixture.write(4, u32::MAX);
+        let state = fixture.device.save().unwrap();
+        let encoded = bitcode::serialize(&state).unwrap();
+        assert!(encoded.len() < 128 * 1024 * 1024);
+        let decoded = bitcode::deserialize(&encoded).unwrap();
+        let vm = Arc::new(setup_vm_with_memory(0x10000));
+        *vm.resource_allocator() = fixture.vm.resource_allocator().clone();
+        let mut restored = QxlDevice::restore(&vm, &decoded).unwrap();
+        assert_eq!(restored.command(), 3);
+        assert_eq!(
+            restored.read_config_register(4),
+            !(u32::try_from(BAR_SIZES[0]).unwrap() - 1)
+        );
+        assert_eq!(restored.graphics.mapped(), mapped);
+        let mut bytes = [0; 2];
+        restored
+            .graphics
+            .vga
+            .lock()
+            .unwrap()
+            .read_framebuffer(64, &mut bytes);
+        assert_eq!(bytes, [0x12, 0x34]);
+        restored
+            .graphics
+            .read(mapped[0], 64, 2, &mut bytes)
+            .unwrap();
+        assert_eq!(bytes, [0x12, 0x34]);
+        restored
+            .graphics
+            .read(mapped[1], 128, 2, &mut bytes[..1])
+            .unwrap();
+        assert_eq!(bytes[0], 0xa5);
+        restored
+            .graphics
+            .vga
+            .lock()
+            .unwrap()
+            .write_framebuffer(64, &[0x56]);
+        restored
+            .graphics
+            .read(mapped[0], 64, 2, &mut bytes)
+            .unwrap();
+        assert_eq!(bytes, [0x56, 0x34]);
+    }
+
+    #[test]
+    fn adapter_checkpoint_rejects_pci_identity_shape_and_live_address_mismatches() {
+        let mut fixture = Fixture::new();
+        fixture.write(1, 3);
+        let mut state = fixture.device.save().unwrap();
+        let vm = Arc::new(setup_vm_with_memory(0x10000));
+        *vm.resource_allocator() = fixture.vm.resource_allocator().clone();
+        let config = state.config.clone();
+        state.config = PciConfiguration::new_type0(
+            0x1234,
+            0x1111,
+            1,
+            PciClassCode::DisplayController,
+            0,
+            0x1234,
+            0x1111,
+        )
+        .state();
+        QxlDevice::restore(&vm, &state).unwrap_err();
+        state.config = config;
+        let bars = state.bars;
+        for case in 0..5 {
+            match case {
+                0 => state.bars.bars[4].encoded_addr = 0x1000,
+                1 => state.bars.bars[0].encoded_size = 0,
+                2 => state.bars.bars[0].encoded_addr |= 8,
+                3 => state.bars.bars[0].encoded_addr = u32::try_from(fixture.candidate(0)).unwrap(),
+                _ => state.bars.bars[3].encoded_addr += 16,
+            }
+            QxlDevice::restore(&vm, &state).unwrap_err();
+            state.bars = bars;
+        }
+        state.bars.bars[0].encoded_addr = u32::try_from(fixture.candidate(0)).unwrap();
+        let mut config = configuration();
+        config.write_reg(1, 0);
+        state.config = config.state();
+        let restored = QxlDevice::restore(&vm, &state).unwrap();
+        assert_eq!(restored.graphics.mapped(), state.mapped);
+        assert_eq!(restored.command(), 0);
     }
 }

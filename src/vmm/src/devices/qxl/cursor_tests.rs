@@ -1,7 +1,7 @@
 // Copyright 2026 Bloudraad.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::cursor::{Command, Shape};
+use super::cursor::{Command, Pointer, Shape};
 use super::memory::{Memory, RAM_HEADER, Region};
 use super::protocol::DecodeError;
 use super::test_utils::memory;
@@ -10,6 +10,98 @@ use crate::devices::display::Frame;
 
 const SLOT: u64 = 0x0101_0000_0000_0000;
 const SHAPE: usize = 1024;
+
+#[test]
+fn pointer_checkpoint_preserves_alpha_masks_and_timed_trails() {
+    let default = Pointer::default().save();
+    Pointer::restore(&default).unwrap();
+    let (memory, addresses) = memory();
+    for kind in [0, 1] {
+        let data = if kind == 0 {
+            vec![0xff; 8]
+        } else {
+            vec![0xc0, 0x80]
+        };
+        let shape = decode_shape(&memory, &addresses, kind, 2, [1, 0], &data).unwrap();
+        let mut pointer = Pointer::default();
+        pointer
+            .apply(
+                Command::Set {
+                    position: [0, 0],
+                    visible: true,
+                    shape,
+                },
+                0,
+            )
+            .unwrap();
+        pointer
+            .apply(
+                Command::Trail {
+                    length: 2,
+                    frequency: 10,
+                },
+                0,
+            )
+            .unwrap();
+        for (x, now) in [(1, 10), (2, 20)] {
+            pointer.apply(Command::Move([x, 0]), now).unwrap();
+        }
+        let encoded = bitcode::serialize(&pointer.save()).unwrap();
+        let state = bitcode::deserialize(&encoded).unwrap();
+        let mut restored = Pointer::restore(&state).unwrap();
+        for now in [20, 30, 50] {
+            let (mut original, mut resumed) = (frame(), frame());
+            pointer.draw(&mut original, now);
+            restored.draw(&mut resumed, now);
+            assert_eq!(original, resumed);
+        }
+    }
+}
+
+#[test]
+fn pointer_checkpoint_rejects_invalid_geometry_pixels_and_history() {
+    use super::state::{CursorPixels, ShapeState};
+    let mut state = Pointer::default().save();
+    state.shape = Some(ShapeState {
+        width: 1,
+        height: 1,
+        hotspot: [0, 0],
+        pixels: CursorPixels::Alpha(vec![0xffff_ffff]),
+    });
+    for case in 0..11 {
+        let mut invalid = state.clone();
+        match case {
+            0 => invalid.shape.as_mut().unwrap().width = 257,
+            1 => invalid.shape.as_mut().unwrap().height = 0,
+            2 => invalid.shape.as_mut().unwrap().hotspot[0] = 1,
+            3 => invalid.shape.as_mut().unwrap().pixels = CursorPixels::Alpha(vec![]),
+            4 => invalid.shape.as_mut().unwrap().pixels = CursorPixels::Masked(vec![[1, 0]]),
+            5 => {
+                invalid.shape.as_mut().unwrap().pixels =
+                    CursorPixels::Masked(vec![[0, 0xff00_0000]])
+            }
+            6 => {
+                invalid.shape.as_mut().unwrap().pixels =
+                    CursorPixels::Masked(vec![[0x00ff_ffff, 5]])
+            }
+            7 => invalid.length = 65,
+            8 => invalid.history.push_back([0, 0]),
+            9 => {
+                invalid.length = 1;
+                invalid.frequency = 0;
+            }
+            _ => invalid.frequency = u64::from(u16::MAX) + 1,
+        }
+        Pointer::restore(&invalid).unwrap_err();
+    }
+    state.shape = Some(ShapeState {
+        width: 0,
+        height: 0,
+        hotspot: [0, 0],
+        pixels: CursorPixels::Alpha(vec![]),
+    });
+    Pointer::restore(&state).unwrap();
+}
 
 fn decode_shape(
     memory: &Memory,
