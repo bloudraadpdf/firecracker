@@ -140,7 +140,7 @@ fn update_commands_publish_ids_and_respect_interrupt_masking() {
 }
 
 #[test]
-fn release_backpressure_requires_more_polling_and_cannot_complete_a_sync_update() {
+fn release_backpressure_requires_more_polling_and_resumes_without_duplicates() {
     let mut fixture = Fixture::new();
     for color in 1..=8 {
         fixture.draw(color);
@@ -148,10 +148,6 @@ fn release_backpressure_requires_more_polling_and_cannot_complete_a_sync_update(
     }
     fixture.draw(9);
     assert!(fixture.controller.poll(10).unwrap());
-    assert!(matches!(
-        fixture.controller.io_write(2, 0, 10).unwrap_err(),
-        TransportError::Busy
-    ));
     assert_eq!(
         fixture.controller.frame(10).unwrap().unwrap().pixels,
         [8; 8]
@@ -166,6 +162,30 @@ fn release_backpressure_requires_more_polling_and_cannot_complete_a_sync_update(
         fixture.controller.frame(11).unwrap().unwrap().pixels,
         [9; 8]
     );
+}
+
+#[test]
+fn synchronous_update_defers_release_publication_without_waiting_for_the_guest() {
+    let mut fixture = Fixture::new();
+    for color in 1..=8 {
+        fixture.draw(color);
+        fixture.controller.poll(u64::from(color)).unwrap();
+    }
+    fixture.draw(9);
+    fixture.controller.io_write(2, 0, 10).unwrap();
+    assert_eq!(
+        fixture.controller.frame(10).unwrap().unwrap().pixels,
+        [9; 8]
+    );
+    assert_eq!(fixture.word(Region::Ram, RELEASE_RING + 4), 8);
+    assert!(fixture.controller.poll(11).unwrap());
+    fixture
+        .controller
+        .memory()
+        .store(RELEASE_RING + 12, 4)
+        .unwrap();
+    assert!(!fixture.controller.poll(12).unwrap());
+    assert_eq!(fixture.word(Region::Ram, RELEASE_RING + 4), 9);
 }
 
 #[test]

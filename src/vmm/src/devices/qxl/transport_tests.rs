@@ -106,6 +106,86 @@ fn completed_commands_publish_release_ids_and_terminate_the_guest_chain() {
 }
 
 #[test]
+fn synchronous_dispatch_does_not_wait_for_later_submissions() {
+    let (memory, addresses, mut queues) = setup();
+    submit(&memory, 0, 1);
+    assert_eq!(
+        queues
+            .synchronize(&memory, &addresses, Queue::Commands, |_| {
+                submit(&memory, 1, 1);
+                Ok(())
+            })
+            .unwrap(),
+        1
+    );
+    assert_eq!(memory.load(COMMAND_RING + 12).unwrap(), 1);
+    assert!(queues.pending(&memory, Queue::Commands).unwrap());
+    assert_eq!(
+        queues
+            .drain(&memory, &addresses, Queue::Commands, |_| Ok(()))
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn deferred_release_storage_is_bounded_and_drains_before_executing_more_work() {
+    let (memory, addresses) = super::test_utils::memory();
+    let mut queues = Queues::default();
+    for sequence in 0..8 {
+        submit(&memory, sequence, 1);
+        queues
+            .drain(&memory, &addresses, Queue::Commands, |_| Ok(()))
+            .unwrap();
+    }
+    let mut executed = 0;
+    for batch in 0..128 {
+        for offset in 0..32 {
+            submit(&memory, 8 + batch * 32 + offset, 1);
+        }
+        assert_eq!(
+            queues
+                .synchronize(&memory, &addresses, Queue::Commands, |_| {
+                    executed += 1;
+                    Ok(())
+                })
+                .unwrap(),
+            32
+        );
+    }
+    assert_eq!(executed, 4096);
+    assert!(queues.pending_releases());
+    submit(&memory, 4104, 1);
+    assert!(matches!(
+        queues
+            .synchronize(&memory, &addresses, Queue::Commands, |_| {
+                panic!("release quota must stop execution")
+            })
+            .unwrap_err(),
+        TransportError::Busy
+    ));
+    assert_eq!(memory.load(COMMAND_RING + 12).unwrap(), 4104);
+    memory.store(RELEASE_RING + 12, 4).unwrap();
+    assert_eq!(
+        queues
+            .drain(&memory, &addresses, Queue::Commands, |_| Ok(()))
+            .unwrap(),
+        1
+    );
+    assert!(!queues.pending_releases());
+    assert_eq!(memory.load(RELEASE_RING + 4).unwrap(), 10);
+    let mut next = [0; 8];
+    addresses
+        .read(&memory, pointer(1, 8 * 16), &mut next)
+        .unwrap();
+    assert_eq!(u64::from_le_bytes(next), 109);
+    addresses
+        .read(&memory, pointer(1, 4103 * 16), &mut next)
+        .unwrap();
+    assert_eq!(next, [0; 8]);
+}
+
+#[test]
 fn a_full_command_dispatch_publishes_one_complete_release_chain() {
     let (memory, addresses, mut queues) = setup();
     for sequence in 0..32 {

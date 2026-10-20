@@ -9,9 +9,11 @@ use super::memory::{
 };
 use super::protocol::{Command, CommandKind, DecodeError, MemorySlot, Ring, RingSize};
 
+const MAX_DEFERRED_RELEASES: usize = 4096;
+
 #[derive(Debug, thiserror::Error)]
 pub enum TransportError {
-    #[error("QXL command completion is waiting for release-ring space")]
+    #[error("QXL operation is waiting for the guest to consume releases")]
     Busy,
     #[error(transparent)]
     Decode(#[from] DecodeError),
@@ -138,8 +140,10 @@ pub struct Queues {
     consumers: [u32; 2],
     release_producer: u32,
     release_consumer: u32,
+    releases: Vec<Release>,
 }
 
+#[derive(Debug)]
 struct Release {
     address: u64,
     id: [u8; 8],
@@ -161,6 +165,10 @@ impl Queues {
 
     pub fn pending(&self, memory: &Memory, queue: Queue) -> Result<bool, TransportError> {
         Ok(self.ring(memory, queue)?.pending() != 0)
+    }
+
+    pub fn pending_releases(&self) -> bool {
+        !self.releases.is_empty()
     }
 
     fn release_room(&mut self, memory: &Memory) -> Result<bool, TransportError> {
@@ -185,13 +193,30 @@ impl Queues {
         memory: &Memory,
         addresses: &AddressSpace,
         queue: Queue,
-        mut execute: impl FnMut(Command) -> Result<(), TransportError>,
+        execute: impl FnMut(Command) -> Result<(), TransportError>,
     ) -> Result<u32, TransportError> {
-        let mut releases = Vec::new();
-        let result = self.drain_commands(memory, addresses, queue, &mut releases, &mut execute);
-        if let Some(head) = releases.first() {
-            for (index, release) in releases.iter().enumerate() {
-                let next = releases.get(index + 1).map_or([0; 8], |release| release.id);
+        self.dispatch(memory, addresses, queue, None, execute)
+    }
+
+    pub fn synchronize(
+        &mut self,
+        memory: &Memory,
+        addresses: &AddressSpace,
+        queue: Queue,
+        execute: impl FnMut(Command) -> Result<(), TransportError>,
+    ) -> Result<u32, TransportError> {
+        let ring = self.ring(memory, queue)?;
+        let target = ring.consumer().wrapping_add(ring.pending());
+        self.dispatch(memory, addresses, queue, Some(target), execute)
+    }
+
+    fn publish(&mut self, memory: &Memory, addresses: &AddressSpace) -> Result<(), TransportError> {
+        if !self.releases.is_empty() && self.release_room(memory)? {
+            for (index, release) in self.releases.iter().enumerate() {
+                let next = self
+                    .releases
+                    .get(index + 1)
+                    .map_or([0; 8], |release| release.id);
                 addresses.write(memory, release.address, &next)?;
             }
             memory.write(
@@ -199,13 +224,31 @@ impl Queues {
                 RELEASE_RING
                     + Ring::HEADER_SIZE
                     + usize::try_from(self.release_producer & 7).unwrap() * 8,
-                &head.id,
+                &self.releases[0].id,
             )?;
             self.release_producer = self.release_producer.wrapping_add(1);
             memory.store(RELEASE_RING + 4, self.release_producer)?;
             if memory.load(RELEASE_RING + 8)? == self.release_producer {
                 memory.interrupt(1)?;
             }
+            self.releases.clear();
+        }
+        Ok(())
+    }
+
+    fn dispatch(
+        &mut self,
+        memory: &Memory,
+        addresses: &AddressSpace,
+        queue: Queue,
+        target: Option<u32>,
+        mut execute: impl FnMut(Command) -> Result<(), TransportError>,
+    ) -> Result<u32, TransportError> {
+        self.publish(memory, addresses)?;
+        let result = self.drain_commands(memory, addresses, queue, target, &mut execute);
+        self.publish(memory, addresses)?;
+        if result.is_ok() && target.is_some_and(|target| self.consumers[queue.index()] != target) {
+            return Err(DecodeError::Ring.into());
         }
         result
     }
@@ -215,14 +258,18 @@ impl Queues {
         memory: &Memory,
         addresses: &AddressSpace,
         queue: Queue,
-        releases: &mut Vec<Release>,
+        target: Option<u32>,
         execute: &mut impl FnMut(Command) -> Result<(), TransportError>,
     ) -> Result<u32, TransportError> {
         let offset = queue.offset();
         let index = queue.index();
         let mut completed = 0;
+        let mut started = false;
         // A producer can refill the ring while it is drained. Bound each dispatch.
         for _ in 0..32 {
+            if target == Some(self.consumers[index]) {
+                break;
+            }
             let mut ring = self.ring(memory, queue)?;
             let Some((item, notify)) = ring.pop() else {
                 memory.store(offset + 8, self.consumers[index].wrapping_add(1))?;
@@ -244,10 +291,17 @@ impl Queues {
                 if matches!(command.kind, CommandKind::Cursor) != matches!(queue, Queue::Cursor) {
                     return Err(DecodeError::Parameter.into());
                 }
-                if releases.is_empty() && !self.release_room(memory)? {
-                    break;
+                if !started {
+                    if !self.release_room(memory)? && target.is_none() {
+                        break;
+                    }
+                    started = true;
                 }
-                if releases
+                if self.releases.len() == MAX_DEFERRED_RELEASES {
+                    return Err(TransportError::Busy);
+                }
+                if self
+                    .releases
                     .iter()
                     .any(|release| release.address == command.address)
                 {
@@ -259,7 +313,7 @@ impl Queues {
                     return Err(DecodeError::Parameter.into());
                 }
                 execute(command)?;
-                releases.push(Release {
+                self.releases.push(Release {
                     address: command.address,
                     id: release,
                 });
