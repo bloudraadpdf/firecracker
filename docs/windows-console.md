@@ -1,7 +1,8 @@
 # Windows console (experimental)
 
 The optional console provides a private display/input endpoint without guest
-networking or vsock. The AMD64 profile adds VGA/VBE graphics, a PS/2 keyboard, a
+networking or vsock. The AMD64 profile adds selectable graphics with boot VGA/VBE,
+a PS/2 keyboard, a
 USB HID pointer and optional read-only ATAPI installation media. The ARM64
 profile adds an MMIO display and one combined virtio keyboard/absolute pointer.
 See the [validation record](windows-validation.md#latest-qualified-integration-baseline)
@@ -21,7 +22,7 @@ native GUI, remote browser or VNC viewer
              |
        Firecracker event loop
         |       |       |       |
-       VGA     PS/2   USB HID  ATAPI -- read-only ISO
+     display   PS/2   USB HID  ATAPI -- read-only ISO
         |       |       |       |
         +-------+---+---+-------+
                     |
@@ -204,9 +205,12 @@ Change modes through the guest driver. The host `/display` update API remains
 specific to virtio GPU.
 
 QXL attachment, interrupt delivery, deferred work, error/reset handling and
-snapshot restore have native KVM component coverage. Installation, signed-driver
-binding and interactive XP/7 qualification remain pending. This candidate does
-not establish those Windows versions as complete or validated.
+snapshot restore have native KVM component coverage. Native XP/7 vendor-driver
+loading and eighteen-mode pixel/input checks pass through the real RFB bridge.
+See the [guest validation records](windows-validation.md#windows-xp-native-qxl-checks)
+for signing conditions, cold boot and stopped-file evidence. Native viewer,
+complete device inventory and guest full/differential restore checks remain
+open; these results do not establish complete Windows support.
 
 For an installed Windows 10 guest, attach the pinned virtio driver ISO and run
 this in an elevated command prompt, using its actual drive letter:
