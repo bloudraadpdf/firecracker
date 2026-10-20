@@ -312,3 +312,27 @@ and [surface locking](https://learn.microsoft.com/en-us/windows/win32/api/winddi
 contracts. `SURFOBJ` is checked against the actual `winddi.h` layout: its private
 and public device-handle names are alternatives, not additional fields.
 Native PDev callbacks and Windows execution must still qualify these owners.
+
+## PDev configuration
+
+`src/pdev_config.rs` selects an exact supported mode from the requested
+`DEVMODEW` dimensions, depth, frequency and rotation. It retains the miniport's
+stride, colour masks and mode index, and initialises the original GDI defaults,
+fonts, colour calibration and cursor capabilities for the complete driver.
+Malformed input and unmatched modes fail before configuration is returned.
+These capability records must not be published until their callbacks exist.
+
+The native `GDIINFO`, `DEVINFO` and font layouts use the same field-by-field
+encoding as the display/miniport interface. `src/abi.rs` contains that shared
+encoder; arrays and nested records preserve native offsets while clearing
+padding. Constructors initialise valid field values rather than relying on
+struct padding. The native PDev retains a `gdi::Palette` for its bitfield colour
+masks and places that live handle in `DEVINFO`. The palette owner deletes its
+GDI handle on destruction. Callback lifecycle integration is still required
+before these records can be returned to Windows.
+
+`PreparedDevice::new` runs the native mode query, selection and palette creation.
+It drops the temporary mode buffer before creating the palette and owns that
+palette through device teardown. `device_info()` supplies the owner's live
+palette handle when the callback encodes its output. Preparation does not
+activate hardware or register an incomplete callback table.

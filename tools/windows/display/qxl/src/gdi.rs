@@ -61,16 +61,45 @@ mod native {
     use core::ptr::NonNull;
 
     use crate::engine::{
-        EngAssociateSurface, EngCreateBitmap, EngCreateDeviceBitmap, EngDeleteSurface,
-        EngLockSurface, EngUnlockSurface,
+        EngAssociateSurface, EngCreateBitmap, EngCreateDeviceBitmap, EngCreatePalette,
+        EngDeletePalette, EngDeleteSurface, EngLockSurface, EngUnlockSurface,
     };
-    use crate::surface::{Active, Format, Layout, Surface};
+    use crate::surface::{Active, Layout, Surface};
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Error {
         CreateBitmap,
+        CreatePalette,
         AssociateSurface,
         LockSurface,
+    }
+
+    #[derive(Debug)]
+    pub struct Palette(NonNull<c_void>);
+
+    impl Palette {
+        /// # Safety
+        /// Create, use and destroy at PASSIVE_LEVEL in serialised GDI callbacks.
+        /// Retain this owner while GDI can use the handle in DEVINFO.
+        pub unsafe fn new(masks: [u32; 3]) -> Result<Self, Error> {
+            // SAFETY: PAL_BITFIELDS=2 uses the three masks without a colour table.
+            let handle = unsafe {
+                EngCreatePalette(2, 0, core::ptr::null_mut(), masks[0], masks[1], masks[2])
+            };
+            Ok(Self(NonNull::new(handle).ok_or(Error::CreatePalette)?))
+        }
+
+        pub fn handle(&self) -> *mut c_void {
+            self.0.as_ptr()
+        }
+    }
+
+    impl Drop for Palette {
+        fn drop(&mut self) {
+            // SAFETY: this unique owner retains the valid palette until GDI
+            // device teardown, and its callback contract requires PASSIVE_LEVEL.
+            unsafe { EngDeletePalette(self.0.as_ptr()) };
+        }
     }
 
     #[derive(Debug)]
@@ -91,7 +120,11 @@ mod native {
             // SAFETY: the caller supplies the live callback context and device;
             // checked layouts have positive dimensions that fit GDI's SIZEL.
             let handle = unsafe {
-                EngCreateDeviceBitmap(context.as_ptr(), dimensions(layout), bitmap_format(layout))
+                EngCreateDeviceBitmap(
+                    context.as_ptr(),
+                    dimensions(layout),
+                    layout.format().bitmap_format(),
+                )
             };
             let bitmap = Self(NonNull::new(handle).ok_or(Error::CreateBitmap)?);
             // SAFETY: the bitmap was created above and the device/hooks are live.
@@ -165,7 +198,7 @@ mod native {
                 EngCreateBitmap(
                     dimensions(layout),
                     layout.stride(),
-                    bitmap_format(layout),
+                    layout.format().bitmap_format(),
                     0,
                     pixels.as_ptr().cast(),
                 )
@@ -205,14 +238,7 @@ mod native {
             height: layout.height() as i32,
         }
     }
-
-    fn bitmap_format(layout: Layout) -> u32 {
-        match layout.format() {
-            Format::Rgb555 => 4,
-            Format::Xrgb8888 => 6,
-        }
-    }
 }
 
 #[cfg(all(windows, any(target_arch = "x86", target_arch = "x86_64")))]
-pub use native::{Bitmap, DrawArea, Error};
+pub use native::{Bitmap, DrawArea, Error, Palette};

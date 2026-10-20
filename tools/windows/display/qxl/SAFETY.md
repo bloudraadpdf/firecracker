@@ -224,3 +224,9 @@ Device-bitmap construction requires a stable, initialised driver context and
 only registered hooks. The context must support deletion even during failed
 construction. After handoff, GDI owns the bitmap; its deletion callback ends
 the driver's context lifetime. Private helper bitmaps remain driver-owned.
+
+PDev palettes own their `EngCreatePalette` handles through GDI device teardown.
+Their raw handles in `DEVINFO` do not extend that lifetime. Native record
+encoding writes only named fields, clears padding and preserves short output
+buffers. Field constructors supply valid initial values, including null raw
+pointers and nested arrays; native struct padding is never copied to Windows.

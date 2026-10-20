@@ -30,6 +30,15 @@ const ALLOCATION_TAG: u32 = u32::from_le_bytes(*b"qxld");
     link(name = "win32k.sys", kind = "raw-dylib", modifiers = "+verbatim")
 )]
 unsafe extern "system" {
+    pub(crate) fn EngCreatePalette(
+        mode: u32,
+        count: u32,
+        colors: *mut u32,
+        red_mask: u32,
+        green_mask: u32,
+        blue_mask: u32,
+    ) -> *mut c_void;
+    pub(crate) fn EngDeletePalette(palette: *mut c_void) -> i32;
     pub(crate) fn EngCreateBitmap(
         size: Size,
         stride: i32,

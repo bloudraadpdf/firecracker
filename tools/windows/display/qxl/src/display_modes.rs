@@ -22,7 +22,11 @@ pub fn supported(mode: &VideoModeInformation) -> bool {
         && mode
             .width
             .checked_mul(mode.bits_per_plane / 8)
-            .is_some_and(|minimum| mode.stride >= minimum && mode.stride <= i32::MAX as u32)
+            .is_some_and(|minimum| {
+                mode.stride >= minimum
+                    && mode.stride <= i32::MAX as u32
+                    && mode.stride.is_multiple_of(4)
+            })
         && mode.framebuffer_bytes().is_some()
 }
 
@@ -112,7 +116,7 @@ mod tests {
                 ..valid
             },
             VideoModeInformation {
-                stride: 1599,
+                stride: 1601,
                 ..valid
             },
         ] {

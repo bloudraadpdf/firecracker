@@ -7,6 +7,8 @@
 use core::ffi::c_void;
 use core::mem::{offset_of, size_of};
 
+use crate::abi::{Field, record};
+
 #[repr(C, align(8))]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MemSlot {
@@ -17,28 +19,10 @@ pub struct MemSlot {
     pub virtual_end: u64,
 }
 
-trait Field: Copy {
-    fn write(self, output: &mut [u8]);
-}
-
-macro_rules! integer_field {
-    ($($ty:ty),+) => {$(
-        impl Field for $ty {
-            fn write(self, output: &mut [u8]) {
-                output.copy_from_slice(&self.to_le_bytes());
-            }
-        }
-    )+};
-}
-integer_field!(u8, u32, u64);
-
-impl<T> Field for *mut T {
-    fn write(self, output: &mut [u8]) {
-        output.copy_from_slice(&(self as usize).to_le_bytes());
-    }
-}
-
 impl Field for MemSlot {
+    fn zero() -> Self {
+        Self::default()
+    }
     fn write(self, output: &mut [u8]) {
         output.fill(0);
         output[0] = self.generation;
@@ -57,37 +41,7 @@ impl Field for MemSlot {
     }
 }
 
-macro_rules! driver_info {
-    ($($field:ident: $ty:ty),+ $(,)?) => {
-        #[repr(C)]
-        #[derive(Clone, Copy, Debug)]
-        pub struct DriverInfo { $(pub $field: $ty),+ }
-
-        impl Default for DriverInfo {
-            fn default() -> Self {
-                // SAFETY: every field is an integer, raw pointer, or MemSlot,
-                // each of which admits the all-zero representation.
-                unsafe { core::mem::zeroed() }
-            }
-        }
-
-        impl DriverInfo {
-            /// Encode fields individually so kernel padding never reaches the caller.
-            pub fn encode(&self, output: &mut [u8]) -> Option<usize> {
-                let size = size_of::<Self>();
-                let output = output.get_mut(..size)?;
-                output.fill(0);
-                $(
-                    let offset = offset_of!(Self, $field);
-                    Field::write(self.$field, &mut output[offset..offset + size_of::<$ty>()]);
-                )+
-                Some(size)
-            }
-        }
-    };
-}
-
-driver_info! {
+record! { DriverInfo {
     version: u32,
     command_ring: *mut c_void,
     cursor_ring: *mut c_void,
@@ -143,7 +97,7 @@ driver_info! {
     framebuffer_physical: u64,
     create_non_primary_surfaces: u8,
     monitors_config: *mut u64,
-}
+}}
 
 const _: () = {
     assert!(size_of::<MemSlot>() == 40);
