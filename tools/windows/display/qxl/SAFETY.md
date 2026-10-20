@@ -253,3 +253,24 @@ the ROM view, plus reported physical aliasing with main RAM. It does not prove
 the existence or cache attributes of a kernel mapping. Native constructors
 require those properties and their lifetimes from the miniport. Region getters
 return raw pointers and do not extend mapping lifetimes.
+
+## Control completion
+
+Create one `Control` for each physical adapter after reset has stopped earlier
+commands. Keep it shared across PDevs under exclusive adapter access; `&mut`
+covers header writes, event clear, port issue and wait. This also excludes
+miniport power and mode transitions. The mapped device outlives the channel.
+
+Native writes use volatile bytes because shared slot fields can be unaligned.
+The port instruction follows a memory fence. The completion event is the live
+nonpaged synchronization event created by VideoPort, not an EngMapEvent handle.
+The non-alertable KernelMode wait runs at PASSIVE_LEVEL and accepts exactly
+`STATUS_SUCCESS`; other positive NTSTATUS values do not prove completion.
+
+A failed wait latches the channel failed without issuing further operations.
+Neither failure nor Drop stops hardware. Keep all host-visible allocations,
+slots and mappings until explicit quiescence; a new channel must not clear a
+late completion from the previous channel. Successful destroy completion only
+releases the affected host use, not unrelated outstanding commands. The unsafe
+issue contract requires live surface IDs, bounded rectangles, the adapter's
+video BAR for slot registration and a live monitor-config allocation.
