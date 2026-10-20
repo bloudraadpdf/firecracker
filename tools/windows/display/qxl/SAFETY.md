@@ -1,6 +1,6 @@
 # Guest driver safety boundary
 
-The current crate builds unsigned miniport images. The display DLL, package
+The crate builds unsigned miniport and display images. Package
 and native driver qualification are incomplete.
 
 ## Windows ABI
@@ -279,8 +279,9 @@ miniport power and mode transitions. The mapped device outlives the channel.
 Native writes use volatile bytes because shared slot fields can be unaligned.
 The port instruction follows a memory fence. The completion event is the live
 nonpaged synchronization event created by VideoPort, not an EngMapEvent handle.
-The non-alertable KernelMode wait runs at PASSIVE_LEVEL and accepts exactly
-`STATUS_SUCCESS`; other positive NTSTATUS values do not prove completion.
+The GDI wait runs at PASSIVE_LEVEL. A signalled result proves completion only
+when the monotonic elapsed time is less than the timeout. Invalid counters or
+an elapsed timeout fail the channel, regardless of the Boolean wait result.
 
 A failed wait latches the channel failed without issuing further operations.
 Neither failure nor Drop stops hardware. Keep all host-visible allocations,
@@ -381,9 +382,9 @@ the caller has stopped every external GDI/CPU user. Surface disable performs
 no hardware command. PDev destruction refuses an attached surface and keeps
 its ownership/list node; teardown ordering must be resolved before DLL unload.
 
-The native attachment functions are not yet DDI entry wrappers. Mode assertion,
-rendering, compression and the complete DDI table remain required before
-registering these callbacks. Linking does not qualify native execution.
+The display DLL registers native lifecycle, mode-assertion, rendering and
+pointer entry points. Keep the advertised hooks consistent with its DDI table.
+Linking does not qualify native execution; retain separate guest test results.
 
 ## Primary raster access
 
@@ -406,11 +407,72 @@ inspection. Null masks remain valid for GDI's implicit brush-mask path. The
 native raster path currently supports standard bitmaps and owned primaries;
 secondary/foreign opaque surfaces are rejected, not reinterpreted. CPU writes
 rely on Firecracker capturing the shared primary framebuffer directly. Final
-callback registration and native guest qualification are still required.
+callback registration is in `driver/display.rs`; native qualification must
+identify the exact binaries and each tested operation.
 
-Text, path, stretching and alpha callbacks forward GDI-owned font/path/brush,
-colour-adjustment, transform, line-attribute and blend records without reading
-or retaining their opaque contents. They use the same scoped views and final
-destination update as copying. GDI must supply every required record and native
-rectangle/format contract for the corresponding engine operation. Kernel export
-checks establish import availability only, not operation or callback correctness.
+Accelerated text and path callbacks enumerate documented GDI raster glyphs and
+cosmetic path records into owned, initialised allocations before publication.
+Brush realisation must finish before the hardware lease: it can re-enter GDI.
+The host retains each captured resource until its release record returns.
+Unsupported cases forward the retained GDI records synchronously through scoped
+CPU bitmap views and publish the destination update even after partial failure.
+No opaque record is retained after its callback. Kernel export checks establish
+import availability only, not operation or callback correctness.
+
+The display does not advertise `GCAPS_ASYNCMOVE`: pointer and raster callbacks
+share the hardware lease. GDI must serialise pointer movement with drawing;
+the driver does not claim concurrent cursor submission while that lease is held.
+
+## Compiler memory operations
+
+The display memory helpers must not call themselves through compiler-generated
+copy or fill intrinsics. Aligned word accesses and byte tails use volatile
+operations for this reason. Copying uses `MaybeUninit` to preserve padding
+without requiring it to contain an initialised integer. Comparison requires
+initialised input bytes. The caller retains both complete ranges; only memmove
+permits overlap. These helpers use integer operations only.
+
+## Retained image cache
+
+The native cache metadata is a GDI allocation, separate from shared image
+payloads. Initialise all typed entries before creating slices; retain the
+allocation and mapping lifetime through every cache operation. Hash buckets,
+free-list links and LRU links are private to the hardware lease. Cache references
+and published-output references release independently through the same pool.
+Clear the cache on stop/reset before testing whether the pool can be unmapped.
+A cache hit must validate pool identity and the current slot generation, then
+compare all defined pixel bytes before reuse. No host command may modify an
+image payload.
+
+## Indexed image and palette ownership
+
+Capture XLATEOBJ vectors before the hardware lease, since GDI can initialise
+its translation table. Retain the complete GDI record while reading its count
+and vector; reject device colour transforms, CMYK and out-of-range counts. Copy
+the entries into owned memory and retain no GDI table pointer after the callback.
+
+An indexed image owns its bitmap and a typed Palette reference. Palette matching
+compares colour values, not only a GDI identity. Validate every used pixel index
+against the palette count. A published drawable retains both resources. Retain
+or attachment failure cancels the entire unpublished drawable. Paired release
+validates both pool owners before changing either reference count. Palette and
+bitmap cache eviction can occur before completion, but final freeing requires
+the host's release of every resource reference.
+
+QUIC uses bounded caller-owned pixel, model, correlation and stream buffers.
+The native compression path allocates these through GDI at PASSIVE_LEVEL and
+initialises each aligned model before it creates typed references. The output
+budget is smaller than the raw image; a full budget or allocation failure uses
+the raw path. One retained display resource owns the compressed descriptor,
+chunk and stream through host release. Host ROM validation precedes the
+volatile compression-setting read.
+
+Secondary metadata stays in its stable PDev across primary detach and mode
+changes. Hardware entry excludes every registry/session borrow and GDI
+re-entry. CPU views drop before the lease; duplicates use one view per native
+handle. Bitmap deletion searches retained context handles without dereferencing
+an untrusted DHSURF. Failed queue operations return their owners; all published
+commands, including compensating destruction, receive notification. Only a
+completed hardware stop/reset permits old video ownership to detach. Registry
+destruction requires all GDI bitmap deletions to have completed. Direct discard
+checks pool ownership before it drops GDI views and then releases arena memory.
