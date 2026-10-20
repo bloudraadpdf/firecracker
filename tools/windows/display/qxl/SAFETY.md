@@ -125,3 +125,18 @@ Windows x64 preserves SSE state for kernel callbacks; its standard target needs
 no such attribute. Neither target enables AVX. These constraints follow
 [Microsoft's kernel floating-point rules](https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/using-floating-point-or-mmx-in-a-wdm-driver)
 and the [LLVM attribute definition](https://llvm.org/docs/LangRef.html#function-attributes).
+
+## Display arena
+
+The arena constructor requires one exclusively managed, live BAR range.
+Allocator metadata occupies free blocks; guest and host payload access must
+never reach those blocks. Allocation tokens are not copyable and retain their
+mapping identity and complete reserved extent, including small tails. Release
+consumes a token, or returns it unchanged for a different arena. Free-list
+splitting and coalescing preserve alignment and bounds.
+
+Raw payload pointers do not extend mapping lifetimes or prove host completion.
+End all host and guest payload access before releasing its token. Stop all
+users and release all tokens before reset or unmap; do not construct another
+arena over memory with live tokens. Calls require external serialisation with
+the display allocation semaphore. There is no implicit token deallocation.
