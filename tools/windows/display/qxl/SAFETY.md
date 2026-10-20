@@ -274,3 +274,20 @@ late completion from the previous channel. Successful destroy completion only
 releases the affected host use, not unrelated outstanding commands. The unsafe
 issue contract requires live surface IDs, bounded rectangles, the adapter's
 video BAR for slot registration and a live monitor-config allocation.
+
+## Cursor resources
+
+`Bitmap` accepts an immutable byte slice with checked logical row bounds and
+signed stride. Native callers must first obtain a valid CPU-readable bitmap;
+do not borrow device memory or uninitialised GDI padding as an ordinary slice.
+Shape conversion copies only the defined row bytes into a fresh sole-reference
+resource before any output can reference it. Immutable shape APIs then prevent
+guest writes while the host reads the payload.
+
+A shape-set output retains its own resource reference. Releasing a cache entry
+does not end that reference, and failed publication cancels only the output.
+The shared submit helper accepts a fresh builder from its own pool; surface and
+cursor callers supply its first resource. Host release must follow all reads
+of the shape, including its chunk, before that reference is reclaimed. Keep
+pool mappings live through all releases. Nonzero cursor IDs must identify the
+same shape bytes for their entire host-cache lifetime.

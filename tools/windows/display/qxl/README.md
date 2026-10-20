@@ -81,7 +81,7 @@ The port covers the full XP/7 driver package. The remaining source mapping is:
 | `display/res.c` | Slot conversion, rings and output/resource ownership ported; caches and drawing payloads remain. |
 | `display/surface.c` | Surface allocation and create/destroy ownership ported; GDI bitmap binding, synchronisation and RAM migration remain. |
 | `display/rop.c` | ROP2/ROP3 selection ported in `src/rop.rs`; drawing submission remains. |
-| `display/brush.c`, `text.c`, `pointer.c` | Brush realisation, text and cursor operations remain. |
+| `display/brush.c`, `text.c`, `pointer.c` | Cursor shapes and commands ported; native pointer callbacks, brush realisation and text remain. |
 | `display/quic*.c` | Compression remains. |
 | `display/mspace.c` | Fixed-region allocation and release replaced by `src/arena.rs`; display resource integration remains. |
 | `include/murmur_hash2a.h` | Ported in `src/hash.rs`, including the Jump3 pixel variant. |
@@ -351,7 +351,7 @@ the complete video BAR. Once an address is returned, its guard pairs the map
 with an unmap request on failure or teardown. Native PDev code must retain it
 through all GDI, pool and host access, and stop those users before destruction.
 Validation checks reported geometry; it cannot prove that a kernel address is
-mapped. Five focused tests cover the geometry and rejection paths; native
+mapped. Focused tests cover the geometry and rejection paths; native
 mapping and teardown still require Windows qualification.
 
 ## Hardware control commands
@@ -372,3 +372,18 @@ It uses a raw Windows kernel import, with no SDK library or new dependency.
 Failure does not prove the host has stopped: retain all command resources and
 mappings until explicit hardware quiescence. Native PDev integration and
 qualification remain part of the unfinished display DLL.
+
+## Cursor shapes and commands
+
+`src/cursor.rs` ports the cursor payloads from `pointer.c` and `res.c`: alpha,
+monochrome, indexed and direct-colour shapes, transparent shapes, position,
+visibility and trails. Bitmap views check row bounds, retain signed strides
+and omit GDI row padding. Colour shapes include the palette and AND mask in
+protocol order. Each shape uses one checked, contiguous QXL data chunk.
+
+Shapes own a pool resource. A cursor-set output retains a separate reference
+until host release; cache eviction or a failed submission cannot free that
+reference. Failed publication cancels only its unpublished output. Explicit
+shape release ends the cache reference. This component does not register native
+callbacks; PDev integration, cache lookup and native bitmap readback remain
+part of the full display-driver port.
