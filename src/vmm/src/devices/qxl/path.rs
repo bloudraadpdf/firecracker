@@ -147,10 +147,6 @@ impl Path {
         Ok(Self { figures, style })
     }
 
-    pub fn is_styled(&self) -> bool {
-        self.style.is_some()
-    }
-
     pub fn pixels(&self, width: u32, height: u32) -> Result<Vec<Pixel>, DecodeError> {
         if width > 4096 || height > 4096 {
             return Err(DecodeError::Parameter);

@@ -171,7 +171,28 @@ fn cosmetic_strokes_share_clip_union_and_signed_surface_rows() {
 }
 
 #[test]
-fn styled_strokes_paint_background_and_accept_destination_only_operations() {
+fn native_styled_strokes_do_not_paint_the_off_dash_pixels() {
+    for layout in [Layout::Modern, Layout::Compat] {
+        for (flags, expected) in [(8, [1, 7, 1, 7]), (12, [7, 1, 7, 1])] {
+            let fixture = Fixture::new(20);
+            fixture.background(7);
+            fixture.store(STRING, &path(&[(3, &[[0, 0], [64, 0]])]));
+            let lengths: Vec<_> = [16i32; 8].into_iter().flat_map(i32::to_le_bytes).collect();
+            fixture.store(IMAGE, &lengths);
+            let mut data = stroke_payload(8);
+            data[8] = flags;
+            data[11] = 8;
+            data[20..28].copy_from_slice(&(SLOT | IMAGE as u64).to_le_bytes());
+            data[50..52].copy_from_slice(&8u16.to_le_bytes());
+            fixture.store(DRAW, &command(layout, 10, [0, 0, 4, 1], &data));
+            fixture.draw(layout);
+            assert_eq!(&fixture.surface().frame().unwrap().pixels[..4], &expected);
+        }
+    }
+}
+
+#[test]
+fn styled_strokes_ignore_background_rop_and_accept_destination_only_operations() {
     let fixture = Fixture::new(20);
     fixture.background(7);
     fixture.store(STRING, &path(&[(3, &[[0, 0], [64, 0]])]));
@@ -191,12 +212,12 @@ fn styled_strokes_paint_background_and_accept_destination_only_operations() {
     fixture.background(7);
     data[28..48].copy_from_slice(&fill(1, 8)[..20]);
     data[48..50].copy_from_slice(&8u16.to_le_bytes());
-    data[50..52].copy_from_slice(&512u16.to_le_bytes());
+    data[50..52].fill(0xa5);
     fixture.store(DRAW, &command(Layout::Compat, 10, [0, 0, 4, 1], &data));
     fixture.draw(Layout::Compat);
     assert_eq!(
         &fixture.surface().frame().unwrap().pixels[..4],
-        &[1, 0xfffff8, 1, 0xfffff8]
+        &[1, 7, 1, 7]
     );
 }
 
