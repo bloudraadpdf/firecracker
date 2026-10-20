@@ -70,7 +70,7 @@ The port covers the full XP/7 driver package. The remaining source mapping is:
 
 | Upstream source | Rust replacement |
 | --- | --- |
-| `miniport/qxl.c` | Mode state and slot encoding ported; discovery, mappings, events, interrupts, power and IOCTL entry points remain. |
+| `miniport/qxl.c` | Mode state, slot encoding, discovery, mappings and event ownership ported; interrupts, power and IOCTL entry points remain. |
 | `display/driver.c` | Cosmetic styles and slot encoding ported; GDI device lifecycle, escapes and path submission remain. |
 | `display/res.c` | Slot conversion and ring endpoints ported; resource ownership, caches and command payloads remain. |
 | `display/surface.c` | Surface allocation, upload, synchronisation and destruction remain. |
@@ -96,3 +96,16 @@ and [request packets](https://learn.microsoft.com/en-us/windows-hardware/drivers
 The configuration declaration contains only the stable prefix the driver reads.
 ABI declarations and compile checks do not prove that a driver loads or runs.
 The [safety contract](SAFETY.md) defines the ABI, mapping and pointer obligations.
+
+`src/resources.rs` ports PCI discovery and the mapping/event setup from
+`miniport/qxl.c`. Successful VideoPort allocations have owners that release
+them if a later setup step fails. A short mapping is rejected and unmapped.
+The initialisation path checks PCI identity, revision, interrupt configuration,
+memory and I/O range types, ROM/RAM signatures, and mode-table bounds.
+
+`src/memory.rs` validates the immutable ROM prefix before RAM access. It checks
+page arithmetic, slot IDs, the primary allocation and the complete shared RAM
+header. The resource layer reads device bytes with volatile access; it does not
+create ordinary Rust slices over mutable device memory. These paths compile
+for both Windows targets; native failure cleanup and driver lifecycle tests
+remain pending until the entry points are connected.
