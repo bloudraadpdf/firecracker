@@ -427,8 +427,8 @@ stored value stays at that address until destruction. Handle transfer and
 recovery have one owner. Driver initialisation creates one shared GDI semaphore
 for all PDevs; driver shutdown requires every PDev to have been destroyed.
 
-These callbacks are not registered yet. Hardware/surface attachment, rendering
-state, compression and the remaining callbacks must be complete before the full
+These callbacks are not registered yet. Mode assertion, rendering state,
+compression and the remaining callbacks must be complete before the full
 DDI table is published. The PDev setup callbacks do not activate hardware.
 
 ## Native bitmap migration
@@ -449,3 +449,17 @@ failed GDI switch leaves the RAM bitmap intact and retires the new host surface;
 if retirement cannot be queued, the error retains that candidate explicitly.
 GDI-owned device handles are not deleted a second time by their driver callback.
 Full PDev callback attachment and native migration qualification remain required.
+
+Primary attachment retains the miniport handle in the PDev, then owns its stable
+mapped-device allocation and hardware session together. It creates the GDI
+bitmap before activating hardware. A failed activation retains the session;
+it does not unmap device memory. The driver-wide GDI lock also rejects recursive
+hardware entry. One PDev at a time can own a session for each miniport handle.
+
+Hardware shutdown releases an empty, stopped session while retaining its GDI
+bitmap. A replacement PDev can then own the adapter before the old bitmap is
+deleted. Resume queries a fresh generation and retains it before activation.
+Surface disable releases an attachment only after hardware shutdown and pool
+cleanup. The primary handle is deleted before any retained session and mapping. Mode
+assertion, rendering hooks and the final DDI table are still required before
+these native attachment functions can be published as a display driver.

@@ -361,6 +361,26 @@ The shared GDI semaphore serialises instance creation/destruction across PDevs
 and remains live through their final callbacks. Its guard stays on its acquiring
 thread. GDI semaphore acquisition can be recursive: it must not by itself
 justify aliased mutable Rust references during reentrant GDI calls. Mutable
-hardware attachment still needs its explicit borrow/lifecycle discipline.
-The current setup callbacks remain unregistered until surface, rendering and
-compression state and the complete DDI table are ready.
+hardware attachment uses a driver-wide atomic lease inside the GDI semaphore.
+Recursive hardware entry fails before borrowing any attachment. All session,
+mode and power users must enter through this lease; the GDI semaphore alone
+does not justify mutable references.
+
+PDevs form an intrusive list under the driver lock. Nodes are stable heap
+values and are unlinked before destruction. Adapter ownership is checked by
+miniport handle before mapping or changing its mode. A stopped, empty session
+is destroyed before another PDev can take ownership. Its primary GDI bitmap
+can remain live until later surface disable; it has no pixel mapping borrow.
+
+Each session owns its mapped device in a separate stable `Object` allocation.
+Its private Hardware borrow has an erased lifetime and must never escape the
+session. Field order destroys hardware before the mapping. The PDev retains
+the entire session before activation; activation failures cannot drop mappings.
+Shutdown or explicit reset can remove it only after `can_unmap` succeeds and
+the caller has stopped every external GDI/CPU user. Surface disable performs
+no hardware command. PDev destruction refuses an attached surface and keeps
+its ownership/list node; teardown ordering must be resolved before DLL unload.
+
+The native attachment functions are not yet DDI entry wrappers. Mode assertion,
+rendering, compression and the complete DDI table remain required before
+registering these callbacks. Linking does not qualify native execution.
