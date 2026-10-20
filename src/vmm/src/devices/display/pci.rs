@@ -236,7 +236,7 @@ impl VgaPci {
 }
 
 #[cfg(target_arch = "x86_64")]
-fn pio_port(base: u64, offset: u64, command: u32) -> Option<u16> {
+pub(crate) fn pio_port(base: u64, offset: u64, command: u32) -> Option<u16> {
     if command & 1 == 0 || !matches!(base, 0x3b0 | 0x1ce) {
         return None;
     }
