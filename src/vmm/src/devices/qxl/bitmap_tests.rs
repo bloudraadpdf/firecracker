@@ -56,6 +56,20 @@ fn interpolation_keeps_one_pixel_and_extreme_target_coordinates_bounded() {
     Bitmap::from_pixels(2, 2, vec![0]).unwrap_err();
 }
 
+#[test]
+fn interpolation_keeps_wide_atlases_bounded_with_extreme_target_coordinates() {
+    let bitmap = Bitmap::from_pixels(65536, 1, vec![0x8040_2010; 65536]).unwrap();
+    let sampler = ScaledBitmap::with_mode(
+        &bitmap,
+        Rect::new(0, 0, 65536, 1).unwrap(),
+        Rect::new(i32::MIN, 0, i32::MAX, 1).unwrap(),
+        ScaleMode::Interpolate,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(sampler.sample(0, 0), 0x8040_2010);
+}
+
 fn image(memory: &Memory, format: u8, flags: u8, width: u32, height: u32, stride: u32) {
     let mut header = [0; 48];
     header[10..14].copy_from_slice(&width.to_le_bytes());
