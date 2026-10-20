@@ -440,11 +440,11 @@ cargo build --locked --target x86_64-unknown-linux-musl --features windows \
 For the recorded source, the three test selectors run 18, 5 and 18 tests. Reject
 zero selected tests. An all-features release build enables fuzzing and is not
 the Windows release recipe. The
-[XP display driver and mode probe](../tools/windows/display/README.md) include
-their source, build inputs and a guest acceptance procedure. Their host unit
+[native QXL mode probe](../tools/windows/display/README.md) includes
+its source, build inputs and a guest acceptance procedure. Its host unit
 tests use the normal standalone-tool gate. The existing console screenshot
 command and the probe's shared RGB model provide the full-frame comparison.
-Retain all sixteen captures, stopped case files and the full probe log for a
+Retain all eighteen captures, stopped case files and the full probe log for a
 fresh guest run. Host unit and console bridge tests do not replace that check.
 
 ### Guest egress and restore
