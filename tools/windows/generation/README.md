@@ -175,6 +175,43 @@ The reviewed XP driver is version 6.3.9600.17831 and requests KMDF 1.9; finding
 framework files on disk does not establish registered/running framework services
 or trust.
 
+If KMDF is absent, use Microsoft's original x86 KMDF 1.9 coinstaller from the
+[pinned WDK 7.1](../legacy-vsock/README.md#pinned-inputs). Its embedded XP
+standalone installer installs the framework without adding another device.
+Microsoft describes the [KMDF 1.9 update and supported systems](https://support.microsoft.com/en-au/topic/kernel-mode-driver-framework-version-1-9-update-for-windows-2000-for-windows-xp-for-windows-server-2003-for-windows-vista-and-for-windows-server-2008-5391698f-ad53-d2d9-51ed-aca341794c4f).
+On the Linux controller, use 7-Zip (`7zz`), substituting the actual coinstaller
+path:
+
+```sh
+kmdf_coinstaller=/srv/drivers/x86/WdfCoInstaller01009.dll
+kmdf_installer='Microsoft Kernel-Mode Driver Framework Install-v1.9-Win2k-WinXP-Win2k3.exe'
+mkdir -p build/windows/generation/framework
+7zz e -obuild/windows/generation/framework "$kmdf_coinstaller" "$kmdf_installer"
+sha256sum "$kmdf_coinstaller" "build/windows/generation/framework/$kmdf_installer"
+```
+
+Require coinstaller SHA-256
+`7a6bf1f950684381205c717a51af2d9c81b203cb1f3db0006a4602e2df675c77`
+and extracted installer SHA-256
+`48ed38a345a9e27376c62704d84020610b8b287487c11c9f34b992713225801e`.
+Preserve Microsoft's redistribution terms. Put the unmodified extracted
+installer on the driver ISO as `kmdf19.exe`. In an XP Administrator command
+prompt, using the actual optical drive letter and Windows directory:
+
+```bat
+start /wait "" D:\kmdf19.exe /quiet /norestart
+echo %ERRORLEVEL%
+sc query Wdf01000
+wmic datafile where "name='C:\\WINDOWS\\system32\\drivers\\Wdf01000.sys'" get Version /format:list
+```
+
+Accept only zero or 3010. A 3010 result requires a normal restart before driver
+installation. Require framework version 1.9.7600.16385 and a registered
+`Wdf01000` service. The service can be stopped until a framework driver loads.
+Install the unchanged generation-counter INF/SYS/CAT through normal Device
+Manager installation for `ACPI\VMGENCTR`, whose compatible ID is
+`VM_Gen_Counter`.
+
 Use `xp-x86.exe` for this guest. Use normal Windows driver installation,
 preserve its actual error/restart result and signature warnings, and complete a
 normal restart before checking the selected signed package, device Code 0 and

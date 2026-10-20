@@ -198,8 +198,11 @@ restore. The USB clock correction also passes cold boot and pointer input. See t
 The AMD64 `"display": "qxl"` candidate exposes one revision-two QXL PCI
 adapter for the existing Windows XP and Windows 7 XDDM drivers. Its boot VGA
 and native driver share the framebuffer; there is no second display device.
-Use a VGA option ROM with the BIOS firmware profile. Native QXL frames and
-cursor updates use the same console socket as VNC and the native viewer.
+Build the [QXL SeaVGABIOS profile](../resources/firmware/seabios-console/README.md#build-on-amd64-linux)
+using `qxl-vgabios.config`, and select its ROM with the BIOS firmware profile.
+Native QXL frames and cursor updates use the same console socket as VNC and the
+native viewer. For XP and Windows 7, set `machine-config.vmclock` to `false` and
+install the matching [generation-counter prerequisites](../tools/windows/generation/README.md).
 The adapter advertises modes from 640x480 through 2560x1440 at 32 bits per pixel.
 Change modes through the guest driver. The host `/display` update API remains
 specific to virtio GPU.
@@ -209,9 +212,10 @@ snapshot restore have native KVM component coverage. Native XP/7 vendor-driver
 loading and eighteen-mode pixel/input checks pass through the real RFB bridge.
 See the [guest validation records](windows-validation.md#windows-xp-native-qxl-checks)
 for signing conditions, cold boot, stopped-file evidence and full/differential
-restore results. A Windows 7 post-restore navigation issue, native viewer and
-complete device inventory checks remain open; these results do not establish
-complete Windows support.
+restore results. Both current legacy references report no device errors after
+generation-counter servicing. A Windows 7 post-restore navigation issue and
+native viewer checks remain open; these results do not establish complete
+Windows support.
 
 For an installed Windows 10 guest, attach the pinned virtio driver ISO and run
 this in an elevated command prompt, using its actual drive letter:
