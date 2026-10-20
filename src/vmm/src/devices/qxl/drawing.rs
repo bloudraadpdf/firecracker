@@ -157,9 +157,7 @@ struct Background {
 #[derive(Debug)]
 struct Stroke {
     path: Path,
-    brush: Brush,
-    foreground: Option<RasterOp>,
-    background: Option<RasterOp>,
+    paint: Option<Paint>,
 }
 
 impl Stroke {
@@ -174,44 +172,22 @@ impl Stroke {
             u64::from_le_bytes(bytes(data, 0)?),
             &data[8..28],
         )?;
-        let operation = |offset| -> Result<Option<RasterOp>, DecodeError> {
-            match u16::from_le_bytes(bytes(data, offset)?) {
-                0 => Ok(None),
-                descriptor => RasterOp::decode(descriptor, Operand::Brush).map(Some),
-            }
-        };
-        let foreground = operation(48)?;
-        let background = if path.is_styled() {
-            operation(50)?
-        } else {
-            None
-        };
-        let brush = if [foreground, background]
-            .into_iter()
-            .flatten()
-            .any(RasterOp::uses_operand)
-        {
-            Brush::decode(memory, addresses, &data[28..48])?
-        } else {
-            Brush::Solid(0)
-        };
-        Ok(Self {
-            path,
-            brush,
-            foreground,
-            background,
-        })
+        // QXL backends use on/off dashes. Windows emits background spans as
+        // a separate stroke; back_mode does not paint the gaps.
+        let descriptor = u16::from_le_bytes(bytes(data, 48)?);
+        let paint = (descriptor != 0)
+            .then(|| Paint::decode(memory, addresses, &data[28..48], descriptor))
+            .transpose()?;
+        Ok(Self { path, paint })
     }
 
     fn apply(&self, foreground: bool, x: u32, y: u32, destination: u32) -> u32 {
-        let op = if foreground {
-            self.foreground
-        } else {
-            self.background
-        };
-        op.map_or(destination, |op| {
-            op.apply(0, self.brush.sample(x, y), destination)
-        })
+        if !foreground {
+            return destination;
+        }
+        self.paint
+            .as_ref()
+            .map_or(destination, |paint| paint.apply(x, y, destination))
     }
 }
 

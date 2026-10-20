@@ -60,16 +60,21 @@ and capture procedure are in [the QXL test data](../tests/data/qxl/README.md).
 Stroke commands now decode continued and closed cosmetic paths in both drawing
 layouts. Styles support fixed-point dash lengths, odd-length cycles, initial
 gaps, explicit style resets and phase progression through clipped pixels.
-Foreground and background raster operations share the brush; a zero descriptor
-leaves the destination unchanged. Unused solid-line style and background fields
-are not read. Prepared stroke pixels use the common clip union and retain
+Stroke rendering uses on/off dashes, as in the
+[QXL backend](https://github.com/freedesktop-unofficial-mirror/spice__spice-common/blob/c6e6dacb30b8130a069d522054718d757eefa0db/common/canvas_base.c#L2924).
+Only foreground spans paint; gaps remain unchanged and `back_mode` is unused.
+Native Windows drivers emit a separate complementary stroke with its own brush
+for an opaque background. A zero foreground descriptor leaves the destination
+unchanged. Unused style and background fields are not read. Prepared stroke
+pixels use the common clip union and retain
 operation order at crossings. Limits are 1 MiB of packed path data, 65,536
 points, 100 style entries, 16,777,216 raster steps and 1,048,576 prepared pixels.
 Checks cover continuation, closure, clipping, reversed dash progression, chunk
 boundaries, malformed records and rejection before writes. The existing Windows
 driver does not advertise hardware Bezier or geometric-wide-line support; GDI
 decomposes those requests before submission. Such packed path commands remain
-unsupported. Native XP/7 stroke and dash rendering still needs validation.
+unsupported. The native stroke comparison below retains an unresolved driver
+style-density mismatch.
 Image commands can reference primary surface 0. They capture its pixels before
 destination writes, so overlapping and scaled source reads use the original
 frame. Surface descriptors use their 22-byte layout and can have zero dimension
@@ -268,6 +273,28 @@ VMM exit zero, read-only NTFS inspection confirms the saved file contains exactl
 is retained; this result does not establish its cause or resolve the snapshot
 navigation issue. Native Windows and Wayland frontends, fullscreen and other
 keyboard layouts remain outside these Mac checks.
+
+## Native QXL stroke comparison
+
+The [drawing probe](../tools/windows/display/README.md#native-stroke-and-dash-check)
+compares forty paths with an independent software DIB: five pen styles, two
+background modes and four raster operations, including fractional endpoints,
+closure and clipping. The original native XP and Windows 7 runs each differ at
+2,240 of 122,880 BGR pixels. Their software references and actual captures match
+each other exactly. Solid paths pass; styled paths incorrectly appear solid.
+Captured commands show that Windows supplies complementary foreground and
+background strokes. Painting their gaps again caused the host-side error.
+
+After the on/off-dash correction, XP has 1,552 differing pixels. The gaps are
+present, but the native style elements are one third of the reference length.
+Both pinned display DLLs declare GDI style steps `1,1,3`; the installed XP DLL
+matches its pinned package. The captured style lengths omit that density
+conversion. Microsoft's [GDIINFO contract](https://learn.microsoft.com/en-us/windows/win32/api/winddi/ns-winddi-gdiinfo)
+explains the three-pixel software result. The host retains QXL pixel units;
+it does not multiply every guest's styles to hide this driver discrepancy.
+The original failures and corrected XP result are retained. This is an open
+native drawing qualification, despite successful helper exits and normal
+shutdowns. No changed driver or signing-policy bypass has been tested.
 
 ## Windows 11 native GPU checks
 
