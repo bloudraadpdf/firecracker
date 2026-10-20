@@ -6,12 +6,28 @@
 
 use core::mem::size_of;
 use core::ptr::NonNull;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::pdev_config::{DeviceInfo, GdiInfo};
 
 struct Buffers {
     caps: NonNull<u8>,
     info: NonNull<u8>,
+}
+
+#[derive(Debug)]
+struct HardwareBorrow<'a>(&'a AtomicBool);
+
+impl<'a> HardwareBorrow<'a> {
+    fn acquire(flag: &'a AtomicBool) -> Option<Self> {
+        (!flag.swap(true, Ordering::Acquire)).then(|| Self(flag))
+    }
+}
+
+impl Drop for HardwareBorrow<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 impl Buffers {
@@ -47,29 +63,39 @@ impl Buffers {
 #[cfg(all(windows, any(target_arch = "x86", target_arch = "x86_64")))]
 mod native {
     use super::*;
+    use crate::display_device::MappedDevice;
     use crate::display_modes::DEVMODE_BYTES;
     use crate::engine::{
         EngAcquireSemaphore, EngCreateSemaphore, EngDeleteSemaphore, EngReleaseSemaphore,
         allocate_object,
     };
+    use crate::hardware::{self, Hardware};
     use crate::kernel_object::Object;
+    use crate::native_bitmap::PrimaryBitmap;
     use crate::pdev_config::PreparedDevice;
+    use core::cell::UnsafeCell;
     use core::ffi::c_void;
     use core::ptr::null_mut;
-    use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering, fence};
+    use core::sync::atomic::{AtomicPtr, AtomicUsize, fence};
 
     static SERIALIZER: AtomicPtr<c_void> = AtomicPtr::new(null_mut());
     static DEVICES: AtomicUsize = AtomicUsize::new(0);
+    static FIRST: AtomicPtr<Device> = AtomicPtr::new(null_mut());
+    static HARDWARE_BORROWED: AtomicBool = AtomicBool::new(false);
 
     #[derive(Debug)]
-    struct Guard(NonNull<c_void>);
+    struct Guard {
+        semaphore: NonNull<c_void>,
+        hardware: Option<HardwareBorrow<'static>>,
+    }
 
     impl Drop for Guard {
         fn drop(&mut self) {
+            drop(self.hardware.take());
             fence(Ordering::Release);
             // SAFETY: this non-Send guard retains the acquired driver semaphore;
             // driver shutdown waits for all callbacks and device instances to stop.
-            unsafe { EngReleaseSemaphore(self.0.as_ptr()) };
+            unsafe { EngReleaseSemaphore(self.semaphore.as_ptr()) };
         }
     }
 
@@ -79,7 +105,17 @@ mod native {
         // live; its shutdown cannot destroy the semaphore until callbacks stop.
         unsafe { EngAcquireSemaphore(handle.as_ptr()) };
         fence(Ordering::Acquire);
-        Some(Guard(handle))
+        Some(Guard {
+            semaphore: handle,
+            hardware: None,
+        })
+    }
+
+    unsafe fn lock_hardware() -> Option<Guard> {
+        // SAFETY: hardware callbacks run within the live GDI driver context.
+        let mut guard = unsafe { lock_driver() }?;
+        guard.hardware = Some(HardwareBorrow::acquire(&HARDWARE_BORROWED)?);
+        Some(guard)
     }
 
     /// Initialise the shared lock before registering any PDev callbacks.
@@ -144,7 +180,221 @@ mod native {
     struct Device {
         prepared: PreparedDevice,
         engine: AtomicPtr<c_void>,
+        driver: NonNull<c_void>,
+        attachment: UnsafeCell<Option<Attachment>>,
+        next: AtomicPtr<Device>,
         _instance: Instance,
+    }
+
+    #[derive(Debug)]
+    struct Attachment {
+        _primary: PrimaryBitmap,
+        session: Option<Session>,
+    }
+
+    #[derive(Debug)]
+    struct Session {
+        hardware: Hardware<'static>,
+        // The stable allocation outlives its private, lifetime-erased borrower.
+        _mapping: Object<MappedDevice>,
+    }
+
+    impl Session {
+        unsafe fn prepare(device: &Device) -> Result<Self, SurfaceError> {
+            let mode = device.prepared.configuration();
+            // SAFETY: no PDev owns this adapter's rings or mappings; the driver lock
+            // also serialises mode selection against the other native callbacks.
+            let mapping =
+                unsafe { MappedDevice::new(device.driver, mode) }.map_err(SurfaceError::Mapping)?;
+            // SAFETY: the passive-level heap owner pins the mapping until teardown.
+            let mapping = unsafe { allocate_object(mapping) }.map_err(SurfaceError::Memory)?;
+            // SAFETY: Object never moves its value. The erased borrow stays private
+            // in Session and is destroyed before its mapping owner on every path.
+            let mapped = unsafe { &*core::ptr::from_ref(mapping.get()) };
+            // SAFETY: this is the adapter's sole generation; no prior token survives.
+            let hardware = unsafe { Hardware::prepare(mapped, mode.layout) }
+                .map_err(SurfaceError::Hardware)?;
+            Ok(Self {
+                hardware,
+                _mapping: mapping,
+            })
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SurfaceError {
+        Busy,
+        InvalidState,
+        Memory(u32),
+        Mapping(crate::display_device::Error),
+        Bitmap(crate::native_bitmap::Error),
+        Hardware(hardware::Error),
+    }
+
+    unsafe fn adapter_attached(driver: NonNull<c_void>) -> bool {
+        let mut current = FIRST.load(Ordering::Relaxed);
+        while let Some(pointer) = NonNull::new(current) {
+            // SAFETY: the driver lock retains all list nodes; exclusive hardware
+            // entry excludes mutable attachment borrows, including GDI reentry.
+            let device = unsafe { pointer.as_ref() };
+            // SAFETY: the hardware lease excludes every attachment mutation.
+            let attachment = unsafe { &*device.attachment.get() };
+            if device.driver == driver
+                && attachment
+                    .as_ref()
+                    .is_some_and(|value| value.session.is_some())
+            {
+                return true;
+            }
+            current = device.next.load(Ordering::Relaxed);
+        }
+        false
+    }
+
+    /// Attach the primary with the hooks supplied by the complete DDI table.
+    /// # Safety
+    /// Supply this driver's retained PDev at PASSIVE_LEVEL after complete_pdev.
+    /// Every supplied hook must be registered and implemented. Keep the PDev
+    /// live through all GDI/CPU users; mode/power operations use this same lock.
+    /// A failure can retain hardware state: stop it before disabling the surface.
+    pub unsafe fn enable_surface(
+        handle: NonNull<c_void>,
+        hooks: u32,
+    ) -> Result<NonNull<c_void>, SurfaceError> {
+        // SAFETY: the caller retains the live driver and passive GDI context.
+        let _guard = unsafe { lock_hardware() }.ok_or(SurfaceError::Busy)?;
+        // SAFETY: the caller retains this exact typed PDev through the call.
+        let device = unsafe { Object::<Device>::borrow_handle(handle) };
+        // SAFETY: this lease excludes all attachment mutations and reentry.
+        if unsafe { &*device.attachment.get() }.is_some() {
+            return Err(SurfaceError::InvalidState);
+        }
+        // SAFETY: the acquired hardware lease excludes all attachment users.
+        if unsafe { adapter_attached(device.driver) } {
+            return Err(SurfaceError::Busy);
+        }
+        let engine = NonNull::new(device.engine.load(Ordering::Acquire))
+            .ok_or(SurfaceError::InvalidState)?;
+        let mode = device.prepared.configuration();
+        // SAFETY: no PDev owns an active generation of this adapter.
+        let session = unsafe { Session::prepare(device) }?;
+        // SAFETY: handle/device remain stable and hooks are supplied by the DDI
+        // caller; hardware has not started and no GDI user sees this bitmap yet.
+        let primary = unsafe { PrimaryBitmap::new(engine, handle, mode.layout, hooks) }
+            .map_err(SurfaceError::Bitmap)?;
+        let surface = primary.handle();
+        // SAFETY: the exclusive hardware lease excludes recursive attachment
+        // access. Retain all owners in the PDev before any host publication.
+        let attachment = unsafe { &mut *device.attachment.get() };
+        *attachment = Some(Attachment {
+            _primary: primary,
+            session: Some(session),
+        });
+        let session = attachment
+            .as_mut()
+            .and_then(|value| value.session.as_mut())
+            .ok_or(SurfaceError::InvalidState)?;
+        // SAFETY: PDev retains all mappings and the unique adapter session.
+        unsafe { session.hardware.activate() }.map_err(SurfaceError::Hardware)?;
+        Ok(surface)
+    }
+
+    /// Stop this PDev's hardware in the mode-assertion path.
+    /// # Safety
+    /// Supply the retained typed PDev at PASSIVE_LEVEL. Hide the cursor and stop
+    /// GDI/CPU submissions first. Preserve all secondary pixels in RAM and stop
+    /// their users before calling. Failure retains all owners for recovery.
+    pub unsafe fn stop_surface(handle: NonNull<c_void>) -> Result<(), SurfaceError> {
+        // SAFETY: the caller supplies the normal shutdown contract.
+        unsafe { end_session(handle, false) }
+    }
+
+    /// Recreate a stopped generation while retaining the original GDI bitmap.
+    /// # Safety
+    /// Supply the live PDev at PASSIVE_LEVEL with GDI/CPU users stopped, after
+    /// old session/token cleanup. Restore secondary surfaces separately before
+    /// drawing resumes. Failed activation retains the new generation for recovery.
+    pub unsafe fn resume_surface(handle: NonNull<c_void>) -> Result<(), SurfaceError> {
+        // SAFETY: the caller supplies the live passive GDI driver context.
+        let _guard = unsafe { lock_hardware() }.ok_or(SurfaceError::Busy)?;
+        // SAFETY: this exact typed PDev remains live through the callback.
+        let device = unsafe { Object::<Device>::borrow_handle(handle) };
+        // SAFETY: the hardware lease excludes all attachment access and reentry.
+        if unsafe { adapter_attached(device.driver) } {
+            return Err(SurfaceError::Busy);
+        }
+        // SAFETY: exclusive entry excludes attachment borrows, including reentry.
+        let attachment = unsafe { &mut *device.attachment.get() };
+        let attachment = attachment.as_mut().ok_or(SurfaceError::InvalidState)?;
+        // SAFETY: no PDev owns an active generation or live token on this adapter.
+        attachment.session = Some(unsafe { Session::prepare(device) }?);
+        let session = attachment
+            .session
+            .as_mut()
+            .ok_or(SurfaceError::InvalidState)?;
+        // SAFETY: the complete generation is retained before host publication.
+        unsafe { session.hardware.activate() }.map_err(SurfaceError::Hardware)?;
+        Ok(())
+    }
+
+    /// Explicitly reset a retained failed session; never a timeout fallback.
+    /// # Safety
+    /// Supply this driver's live PDev at PASSIVE_LEVEL with all adapter, power,
+    /// GDI and CPU users stopped. Preserve required pixels first. The miniport's
+    /// completed reset must stop host accesses and delayed completion writes.
+    pub unsafe fn reset_surface(handle: NonNull<c_void>) -> Result<(), SurfaceError> {
+        // SAFETY: the caller supplies the explicit reset/quiescence contract.
+        unsafe { end_session(handle, true) }
+    }
+
+    unsafe fn end_session(handle: NonNull<c_void>, reset: bool) -> Result<(), SurfaceError> {
+        // SAFETY: callers supply the live passive GDI driver context.
+        let _guard = unsafe { lock_hardware() }.ok_or(SurfaceError::Busy)?;
+        // SAFETY: the exact PDev stays live; the lease excludes recursive users.
+        let device = unsafe { Object::<Device>::borrow_handle(handle) };
+        // SAFETY: the hardware lease excludes every other attachment borrow.
+        let attachment = unsafe { &mut *device.attachment.get() };
+        let attachment = attachment.as_mut().ok_or(SurfaceError::InvalidState)?;
+        let session = attachment
+            .session
+            .as_mut()
+            .ok_or(SurfaceError::InvalidState)?;
+        // SAFETY: each entry point requires stopped external users and preserved
+        // pixels; reset additionally requires the miniport's quiescence guarantee.
+        unsafe {
+            if reset {
+                session.hardware.reset()
+            } else {
+                session.hardware.stop()
+            }
+        }
+        .map_err(SurfaceError::Hardware)?;
+        if session.hardware.can_unmap() {
+            drop(attachment.session.take());
+        }
+        Ok(())
+    }
+
+    /// Delete the primary and unmap only an already quiescent attachment.
+    /// # Safety
+    /// Supply the retained typed PDev at PASSIVE_LEVEL after mode shutdown,
+    /// final pool-token cleanup and cessation of every GDI/CPU surface user.
+    pub unsafe fn disable_surface(handle: NonNull<c_void>) -> Result<(), SurfaceError> {
+        // SAFETY: the caller supplies the live passive GDI driver context.
+        let _guard = unsafe { lock_hardware() }.ok_or(SurfaceError::Busy)?;
+        // SAFETY: the caller retains the exact PDev and this lease excludes reentry.
+        let device = unsafe { Object::<Device>::borrow_handle(handle) };
+        // SAFETY: exclusive hardware entry owns this attachment's mutable state.
+        let attachment = unsafe { &mut *device.attachment.get() };
+        if attachment
+            .as_ref()
+            .and_then(|value| value.session.as_ref())
+            .is_some_and(|value| !value.hardware.can_unmap())
+        {
+            return Err(SurfaceError::InvalidState);
+        }
+        drop(attachment.take());
+        Ok(())
     }
 
     unsafe fn create(
@@ -166,6 +416,9 @@ mod native {
         let device = Device {
             prepared,
             engine: AtomicPtr::new(null_mut()),
+            driver,
+            attachment: UnsafeCell::new(None),
+            next: AtomicPtr::new(null_mut()),
             _instance: Instance::new(guard)?,
         };
         // SAFETY: the stable PDev and its destructor remain in this driver's GDI
@@ -179,6 +432,12 @@ mod native {
                 &object.get().prepared.device_info(),
             )
         }?;
+        let pointer = core::ptr::from_ref(object.get()).cast_mut();
+        object
+            .get()
+            .next
+            .store(FIRST.load(Ordering::Relaxed), Ordering::Relaxed);
+        FIRST.store(pointer, Ordering::Relaxed);
         Some(object.into_handle())
     }
 
@@ -240,9 +499,30 @@ mod native {
         };
         // SAFETY: the driver's lifetime covers this final callback; the guard
         // serialises instance removal with construction and driver teardown.
-        let Some(_guard) = (unsafe { lock_driver() }) else {
+        let Some(_guard) = (unsafe { lock_hardware() }) else {
             return;
         };
+        // SAFETY: the framework retains this exact typed PDev until recovery;
+        // the hardware lease excludes attachment borrows and recursive teardown.
+        let value = unsafe { Object::<Device>::borrow_handle(device) };
+        // SAFETY: this hardware lease excludes mutable attachment access.
+        if unsafe { &*value.attachment.get() }.is_some() {
+            return;
+        }
+        let pointer = core::ptr::from_ref(value).cast_mut();
+        let mut link = &FIRST;
+        while let Some(current) = NonNull::new(link.load(Ordering::Relaxed)) {
+            // SAFETY: the driver lock keeps every intrusive-list node live.
+            let current_value = unsafe { current.as_ref() };
+            if current.as_ptr() == pointer {
+                link.store(
+                    current_value.next.load(Ordering::Relaxed),
+                    Ordering::Relaxed,
+                );
+                break;
+            }
+            link = &current_value.next;
+        }
         // SAFETY: GDI stopped all users and transfers its sole opaque ownership
         // back once. Object drops the complete value before the original heap block.
         drop(unsafe { Object::<Device>::from_handle(device) });
@@ -250,11 +530,36 @@ mod native {
 }
 
 #[cfg(all(windows, any(target_arch = "x86", target_arch = "x86_64")))]
-pub use native::{complete_pdev, disable_pdev, enable_pdev, initialise_driver, shutdown_driver};
+pub use native::{
+    SurfaceError, complete_pdev, disable_pdev, disable_surface, enable_pdev, enable_surface,
+    initialise_driver, reset_surface, resume_surface, shutdown_driver, stop_surface,
+};
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
     use super::*;
+
+    #[test]
+    fn hardware_lease_rejects_reentry_and_other_threads_until_owner_drops() {
+        let flag = AtomicBool::new(false);
+        let owner = HardwareBorrow::acquire(&flag).unwrap();
+        assert!(HardwareBorrow::acquire(&flag).is_none());
+        // A rejected entry must not release the existing owner's lease.
+        assert!(HardwareBorrow::acquire(&flag).is_none());
+        let blocked = std::thread::scope(|scope| {
+            scope
+                .spawn(|| HardwareBorrow::acquire(&flag).is_none())
+                .join()
+                .unwrap()
+        });
+        assert!(blocked);
+        drop(owner);
+        let next = HardwareBorrow::acquire(&flag).unwrap();
+        assert!(HardwareBorrow::acquire(&flag).is_none());
+        drop(next);
+        assert!(!flag.load(Ordering::Acquire));
+    }
 
     #[test]
     fn capability_outputs_keep_native_handles_and_preserve_extra_bytes() {
