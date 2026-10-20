@@ -95,3 +95,36 @@ cargo clippy --locked --all-targets --manifest-path tools/windows/display/Cargo.
 
 These commands run the twenty probe unit cases. Guest executable builds retain
 the separate compatibility-library procedure above.
+
+## Native stroke and dash check
+
+The [drawing probe](probe/drawing.rs) leaves the current display mode unchanged.
+It draws forty cosmetic paths: five pen styles, opaque and transparent gaps,
+and copy, XOR, inverted XOR and inverted-copy ROP2 operations. Paths have
+fractional endpoints, two connected segments, closure and per-cell clipping.
+The same GDI calls draw into a software DIB and directly into a visible window.
+The reference therefore comes from the tested Windows version, not from the
+Firecracker rasteriser.
+
+Select the existing XP x86 or Windows 7 x64 compatibility profile, then build:
+
+```bash
+rustc --edition 2024 -D warnings "${windows_rustflags[@]}" \
+  tools/windows/display/probe/drawing.rs -o build/windows/display-probe/drawing.exe
+```
+
+Run the executable from a new, writable guest directory and retain its standard
+output. It writes `gdi-oracle.bgra` exclusively, flushes and closes it, then
+reports `GDI READY`. The reference is a top-down 320-by-384 32bpp DIB. Following
+[Microsoft's DIB synchronisation requirement](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/nf-wingdi-createdibsection),
+the probe flushes GDI before reading the bitmap.
+
+Within ninety seconds, capture the actual console frame. Keep the pointer
+outside the test window and crop pixels `[64,384)` horizontally and `[64,448)`
+vertically. Press F1 only after retaining that capture; Escape aborts. Require
+`GDI FINISHED status=0` and process exit zero, then shut down Windows normally.
+Collect the reference from the stopped disk using the existing read-only
+inspection procedure. Compare all 122,880 BGR pixels with the captured region;
+ignore the unused fourth byte. A screenshot without this comparison does not
+establish a pass. Preserve failures without an automatic retry. This focused
+check does not replace the mode, input, cursor or restore checks above.
