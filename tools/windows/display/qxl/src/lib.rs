@@ -3,6 +3,7 @@
 
 #![no_std]
 
+pub mod arena;
 pub mod cosmetic;
 pub mod driver_info;
 pub mod hash;

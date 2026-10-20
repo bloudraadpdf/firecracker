@@ -82,7 +82,7 @@ The port covers the full XP/7 driver package. The remaining source mapping is:
 | `display/surface.c` | Surface allocation, upload, synchronisation and destruction remain. |
 | `display/rop.c`, `brush.c`, `text.c`, `pointer.c` | Raster operations, brush realisation, text and cursor operations remain. |
 | `display/quic*.c` | Compression remains. |
-| `display/mspace.c` | Shared-memory allocator remains. |
+| `display/mspace.c` | Fixed-region allocation and release replaced by `src/arena.rs`; display resource integration remains. |
 | `include/murmur_hash2a.h` | Ported in `src/hash.rs`, including the Jump3 pixel variant. |
 | `miniport/minimal_snprintf.c` | Replace diagnostic formatting with `core::fmt`. |
 | `miniport/wdmhelper.c` | Contains only Windows 2000 compatibility code; XP/7 use VideoPort event APIs. |
@@ -175,3 +175,18 @@ OS floor, relocations and PE checksum. They import only `videoprt.sys` and
 Windows 7 guest copies of that module. These are unsigned development images;
 they have not been installed or executed. The Rust display DLL, package,
 signing procedure and native qualification remain incomplete.
+
+## Display memory
+
+`src/arena.rs` replaces the fixed-region allocation used by `display/res.c`.
+It manages the supplied BAR range without an OS heap or global allocator.
+Eight-byte-aligned blocks use first fit; release coalesces both adjacent free
+blocks. Free-list headers occupy free memory only. Live allocation tokens
+retain the allocated extent and cannot be copied. A release to another arena
+returns the token without changing either arena.
+
+Keep the display allocation semaphore held for allocation and release. A token
+must remain live until all guest and host users have finished; dropping it does
+not free device memory. Mapping reset and destruction require the release of
+all outstanding resources. The original driver uses only fixed-region malloc
+and free; unused general-purpose dlmalloc APIs are not imported or reproduced.
