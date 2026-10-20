@@ -8,6 +8,7 @@ use core::ffi::c_void;
 use core::ptr::{NonNull, null_mut, read_unaligned};
 
 use crate::display_modes::{self, DEVMODE_BYTES};
+use crate::gdi::{Size, SurfaceObject};
 use crate::ioctl::{QUERY_AVAILABLE_MODES, QUERY_MODE_COUNT};
 use crate::modes::VideoModeInformation;
 
@@ -29,6 +30,23 @@ const ALLOCATION_TAG: u32 = u32::from_le_bytes(*b"qxld");
     link(name = "win32k.sys", kind = "raw-dylib", modifiers = "+verbatim")
 )]
 unsafe extern "system" {
+    pub(crate) fn EngCreateBitmap(
+        size: Size,
+        stride: i32,
+        format: u32,
+        flags: u32,
+        pixels: *mut c_void,
+    ) -> *mut c_void;
+    pub(crate) fn EngCreateDeviceBitmap(
+        context: *mut c_void,
+        size: Size,
+        format: u32,
+    ) -> *mut c_void;
+    pub(crate) fn EngAssociateSurface(surface: *mut c_void, device: *mut c_void, hooks: u32)
+    -> i32;
+    pub(crate) fn EngLockSurface(surface: *mut c_void) -> *mut SurfaceObject;
+    pub(crate) fn EngUnlockSurface(object: *mut SurfaceObject);
+    pub(crate) fn EngDeleteSurface(surface: *mut c_void) -> i32;
     fn EngAllocMem(flags: u32, bytes: u32, tag: u32) -> *mut c_void;
     fn EngFreeMem(memory: *mut c_void);
     fn EngDeviceIoControl(
