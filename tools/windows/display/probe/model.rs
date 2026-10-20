@@ -3,14 +3,15 @@
 
 use core::cell::RefCell;
 
-pub const CASES: usize = 16;
-pub const MAX_PIXELS: usize = 1920 * 1200;
+pub const CASES: usize = 18;
+pub const MAX_PIXELS: usize = 2560 * 1440;
 pub const TEXT_BYTES: usize = 95;
 const WIDTHS: [u16; CASES] = [
     640, 800, 1024, 1280, 1600, 1152, 1280, 1280, 1280, 1440, 1400, 1680, 1920, 1280, 1920, 1600,
+    1366, 2560,
 ];
 const HEIGHTS: [u16; CASES] = [
-    480, 600, 768, 1024, 1200, 864, 768, 800, 960, 900, 1050, 1050, 1200, 720, 1080, 900,
+    480, 600, 768, 1024, 1200, 864, 768, 800, 960, 900, 1050, 1050, 1200, 720, 1080, 900, 768, 1440,
 ];
 
 pub fn case_name(case: u8) -> Option<[u16; 12]> {
@@ -555,7 +556,7 @@ mod tests {
         assert_eq!(e.view().phase, Phase::Text);
     }
     #[test]
-    fn case_files_are_sixteen_distinct_fixed_relative_labels() {
+    fn case_files_are_distinct_fixed_relative_labels() {
         for case in 0..u8::try_from(CASES).unwrap() {
             let name = case_name(case).unwrap();
             assert_eq!(name[11], 0);
@@ -570,12 +571,12 @@ mod tests {
     }
     #[test]
     fn modes_and_storage_have_exact_limits() {
-        assert_eq!(MAX_PIXELS * 4, 9_216_000);
+        assert_eq!(MAX_PIXELS * 4, 14_745_600);
         let mut largest = 0;
         for i in 0..CASES {
             let m = Mode::at(i).unwrap();
             largest = largest.max(m.pixels().unwrap());
-            assert!(m.width <= 1920 && m.height <= 1200);
+            assert!(m.width <= 2560 && m.height <= 1440);
         }
         assert_eq!(largest, MAX_PIXELS);
         assert_eq!(Mode::at(CASES), None);
