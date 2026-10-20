@@ -80,7 +80,8 @@ The port covers the full XP/7 driver package. The remaining source mapping is:
 | `display/driver.c` | Cosmetic styles and slot encoding ported; GDI device lifecycle, escapes and path submission remain. |
 | `display/res.c` | Slot conversion and ring endpoints ported; resource ownership, caches and command payloads remain. |
 | `display/surface.c` | Surface allocation, upload, synchronisation and destruction remain. |
-| `display/rop.c`, `brush.c`, `text.c`, `pointer.c` | Raster operations, brush realisation, text and cursor operations remain. |
+| `display/rop.c` | ROP2/ROP3 selection ported in `src/rop.rs`; drawing submission remains. |
+| `display/brush.c`, `text.c`, `pointer.c` | Brush realisation, text and cursor operations remain. |
 | `display/quic*.c` | Compression remains. |
 | `display/mspace.c` | Fixed-region allocation and release replaced by `src/arena.rs`; display resource integration remains. |
 | `include/murmur_hash2a.h` | Ported in `src/hash.rs`, including the Jump3 pixel variant. |
@@ -190,3 +191,19 @@ must remain live until all guest and host users have finished; dropping it does
 not free device memory. Mapping reset and destruction require the release of
 all outstanding resources. The original driver uses only fixed-region malloc
 and free; unused general-purpose dlmalloc APIs are not imported or reproduced.
+
+## Raster operations
+
+`src/rop.rs` selects QXL methods for all 256 ROP3 truth tables and the 16 GDI
+ROP2 operation numbers. It derives required operands from the truth table,
+then chooses the original specialised command or a ternary command. It does
+not maintain a second 256-entry classification table. Tests evaluate every
+input combination independently of the selector.
+
+Duplicate-command hints must preserve the pixel result. The original ROP3
+table incorrectly marks destination inversion as idempotent; the Rust selector
+marks it as reverting on repetition. ROP2 negated-AND cases use the conservative
+blend hint, matching the original ROP3 table, rather than its unsafe binary
+blackness hint. Tests check these hints against repeated application for every
+input. Masked commands use the blend effect. GDI callbacks and command
+submission are still required before these operations run in Windows.

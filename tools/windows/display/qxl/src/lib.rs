@@ -10,6 +10,7 @@ pub mod hash;
 pub mod memory;
 pub mod modes;
 pub mod ring;
+pub mod rop;
 pub mod slots;
 
 #[cfg(all(windows, any(target_arch = "x86", target_arch = "x86_64")))]
