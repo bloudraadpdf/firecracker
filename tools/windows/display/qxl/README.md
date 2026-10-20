@@ -463,3 +463,23 @@ Surface disable releases an attachment only after hardware shutdown and pool
 cleanup. The primary handle is deleted before any retained session and mapping. Mode
 assertion, rendering hooks and the final DDI table are still required before
 these native attachment functions can be published as a display driver.
+
+## Native raster callbacks
+
+`src/render.rs` implements the primary-surface software paths for `DrvCopyBits`
+and `DrvBitBlt`, using kernel GDI's
+[standard-bitmap operations](https://learn.microsoft.com/en-us/windows/win32/api/winddi/nf-winddi-engbitblt).
+The PDev hardware lease covers synchronisation, temporary CPU views, drawing
+and update publication. Repeated references to one primary use the same GDI
+view, including overlapping source/destination copies. Source and mask views
+remain read-only; the destination is updated even if GDI reports partial failure.
+
+Standard GDI bitmaps pass through without conversion. Opaque surfaces must
+match a retained primary handle before any driver context is accessed. Secondary
+device-bitmap rendering and the remaining raster callbacks are still required;
+these callbacks are not yet registered in a complete display DLL.
+
+This CPU destination path uses Firecracker's shared primary framebuffer: frame
+capture reads its guest-memory pixels directly. It is not a generic replacement
+for QXL hosts that retain a separate rendered surface. Native Windows execution
+and the accelerated command paths remain unfinished.

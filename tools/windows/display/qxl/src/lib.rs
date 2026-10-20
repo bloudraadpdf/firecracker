@@ -30,6 +30,8 @@ pub mod pdev_config;
 
 #[cfg(any(test, all(windows, any(target_arch = "x86", target_arch = "x86_64"))))]
 pub mod pdev;
+#[cfg(any(test, all(windows, any(target_arch = "x86", target_arch = "x86_64"))))]
+pub mod render;
 pub mod ring;
 pub mod rop;
 pub mod slots;

@@ -61,6 +61,27 @@ unsafe extern "system" {
     pub(crate) fn EngLockSurface(surface: *mut c_void) -> *mut SurfaceObject;
     pub(crate) fn EngUnlockSurface(object: *mut SurfaceObject);
     pub(crate) fn EngDeleteSurface(surface: *mut c_void) -> i32;
+    pub(crate) fn EngCopyBits(
+        destination: *mut SurfaceObject,
+        source: *mut SurfaceObject,
+        clip: *mut c_void,
+        translation: *mut c_void,
+        destination_rect: *mut crate::gdi::Rect,
+        source_origin: *mut crate::gdi::Point,
+    ) -> i32;
+    pub(crate) fn EngBitBlt(
+        destination: *mut SurfaceObject,
+        source: *mut SurfaceObject,
+        mask: *mut SurfaceObject,
+        clip: *mut c_void,
+        translation: *mut c_void,
+        destination_rect: *mut crate::gdi::Rect,
+        source_origin: *mut crate::gdi::Point,
+        mask_origin: *mut crate::gdi::Point,
+        brush: *mut c_void,
+        brush_origin: *mut crate::gdi::Point,
+        rop: u32,
+    ) -> i32;
     pub(crate) fn EngModifySurface(
         surface: *mut c_void,
         device: *mut c_void,

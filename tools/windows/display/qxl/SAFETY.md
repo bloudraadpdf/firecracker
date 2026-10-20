@@ -384,3 +384,26 @@ its ownership/list node; teardown ordering must be resolved before DLL unload.
 The native attachment functions are not yet DDI entry wrappers. Mode assertion,
 rendering, compression and the complete DDI table remain required before
 registering these callbacks. Linking does not qualify native execution.
+
+## Primary raster access
+
+Raster ownership lookup uses retained primary HSURF handles. It never casts a
+foreign DHSURF. Read only the initialised kind and handle fields of input
+SURFOBJs; opaque device surfaces need not expose bitmap pixel fields. Complete
+all lookups before borrowing sessions. Duplicate handles share one locked CPU
+view, preserving same-surface overlap handling and avoiding mutable aliases.
+
+The hardware lease retains each distinct PDev, mapping and primary through its
+CPU view. Synchronise host writes before creating the view. Derive its hardware
+borrow through the same retained raw pointer used after view deletion. No
+closure may retain a surface pointer. Delete every draw area before using its
+hardware again. Update dirty destinations even if GDI returns failure; a failed
+operation can already have changed pixels. Source-only views do not publish a
+destination update. Any failed hardware update retains the existing session.
+
+ROP4 operand selection excludes unused source and mask pointers before surface
+inspection. Null masks remain valid for GDI's implicit brush-mask path. The
+native raster path currently supports standard bitmaps and owned primaries;
+secondary/foreign opaque surfaces are rejected, not reinterpreted. CPU writes
+rely on Firecracker capturing the shared primary framebuffer directly. Final
+callback registration and native guest qualification are still required.

@@ -229,6 +229,137 @@ mod native {
         Mapping(crate::display_device::Error),
         Bitmap(crate::native_bitmap::Error),
         Hardware(hardware::Error),
+        UnsupportedSurface,
+    }
+
+    unsafe fn primary_owner(surface: *mut c_void, _guard: &Guard) -> Option<NonNull<Device>> {
+        let mut current = FIRST.load(Ordering::Relaxed);
+        while let Some(pointer) = NonNull::new(current) {
+            // SAFETY: the hardware lease keeps list nodes live and excludes all
+            // attachment borrows. Lookup completes before CPU views are borrowed.
+            let device = unsafe { pointer.as_ref() };
+            // SAFETY: no hardware mutation or other attachment borrow is active.
+            let attachment = unsafe { &*device.attachment.get() };
+            if attachment
+                .as_ref()
+                .is_some_and(|value| value._primary.handle().as_ptr() == surface)
+            {
+                return Some(pointer);
+            }
+            current = device.next.load(Ordering::Relaxed);
+        }
+        None
+    }
+
+    struct CpuView<'a> {
+        area: Option<crate::gdi::DrawArea<'a>>,
+        hardware: NonNull<Hardware<'static>>,
+        extent: [i32; 4],
+        dirty: bool,
+    }
+
+    impl<'a> CpuView<'a> {
+        unsafe fn new(pointer: NonNull<Device>, _guard: &'a Guard) -> Result<Self, SurfaceError> {
+            // SAFETY: the list owner retains this PDev throughout the hardware
+            // lease. The caller creates only one view for each distinct primary.
+            let device = unsafe { pointer.as_ref() };
+            let engine = NonNull::new(device.engine.load(Ordering::Acquire))
+                .ok_or(SurfaceError::InvalidState)?;
+            let layout = device.prepared.configuration().layout;
+            // SAFETY: lookup ended before view creation. Each view uses a distinct
+            // PDev and hardware entry/reentry is excluded by the retained guard.
+            let attachment = unsafe { &mut *device.attachment.get() };
+            let session = attachment
+                .as_mut()
+                .and_then(|value| value.session.as_mut())
+                .ok_or(SurfaceError::InvalidState)?;
+            let mut hardware = NonNull::from(&mut session.hardware);
+            // SAFETY: the lease retains this unique active session through view
+            // deletion; update synchronises all prior host writes before CPU use.
+            let area = unsafe { hardware.as_mut().primary_draw_area(engine) }
+                .map_err(SurfaceError::Hardware)?;
+            Ok(Self {
+                area: Some(area),
+                hardware,
+                extent: [0, 0, layout.height() as i32, layout.width() as i32],
+                dirty: false,
+            })
+        }
+
+        unsafe fn finish(mut self) -> Result<(), SurfaceError> {
+            // End the exclusive pixel borrow before using its hardware again.
+            drop(self.area.take());
+            if self.dirty {
+                // SAFETY: the CPU view was unlocked/deleted, all GDI writes ended,
+                // and the guard still excludes every other adapter user.
+                unsafe { self.hardware.as_mut().update(0, self.extent) }
+                    .map_err(SurfaceError::Hardware)?;
+            }
+            Ok(())
+        }
+    }
+
+    /// Run one GDI raster operation with synchronised primary CPU views.
+    /// # Safety
+    /// Supply live GDI SURFOBJs at PASSIVE_LEVEL; only source/mask may be null.
+    /// The closure must not retain pointers, change ownership or draw outside
+    /// the destination. Keep all referenced surfaces and callback data live.
+    pub(crate) unsafe fn with_cpu_surfaces(
+        mut surfaces: [*mut crate::gdi::SurfaceObject; 3],
+        draw: impl FnOnce([*mut crate::gdi::SurfaceObject; 3]) -> bool,
+    ) -> Result<bool, SurfaceError> {
+        // SAFETY: the raster callback retains the live passive GDI context.
+        let guard = unsafe { lock_hardware() }.ok_or(SurfaceError::Busy)?;
+        if surfaces[0].is_null() {
+            return Err(SurfaceError::InvalidState);
+        }
+        let mut owners = [None; 3];
+        let mut handles = [null_mut(); 3];
+        // Resolve ownership before creating mutable session/pixel borrows.
+        for (index, surface) in surfaces.iter().copied().enumerate() {
+            if surface.is_null() {
+                continue;
+            }
+            // SAFETY: GDI supplies the initialised surface kind; do not copy
+            // unrelated SURFOBJ fields that an opaque surface need not expose.
+            let kind = unsafe { core::ptr::addr_of!((*surface).kind).read() };
+            if kind == 0 {
+                // STYPE_BITMAP
+                continue;
+            }
+            // SAFETY: GDI retains this surface's initialised native HSURF field.
+            let handle = unsafe { core::ptr::addr_of!((*surface).surface).read() };
+            handles[index] = handle;
+            // SAFETY: the lease retains the list; no CPU views exist yet.
+            owners[index] = Some(
+                unsafe { primary_owner(handle, &guard) }.ok_or(SurfaceError::UnsupportedSurface)?,
+            );
+        }
+        let mut views: [Option<CpuView<'_>>; 3] = [None, None, None];
+        for index in 0..surfaces.len() {
+            let Some(owner) = owners[index] else { continue };
+            if let Some(previous) = (0..index).find(|&previous| handles[previous] == handles[index])
+            {
+                surfaces[index] = surfaces[previous];
+                continue;
+            }
+            // SAFETY: each distinct primary is resolved once before view creation;
+            // the lease excludes all competing and recursive adapter access.
+            let mut view = unsafe { CpuView::new(owner, &guard) }?;
+            let area = view.area.as_ref().ok_or(SurfaceError::InvalidState)?;
+            surfaces[index] = area.as_ptr();
+            view.dirty = index == 0;
+            views[index] = Some(view);
+        }
+        let result = draw(surfaces);
+        let mut failure = None;
+        for view in views.into_iter().flatten() {
+            // SAFETY: the closure ended all pixel use; the guard remains live.
+            if let Err(error) = unsafe { view.finish() } {
+                failure.get_or_insert(error);
+            }
+        }
+        failure.map_or(Ok(result), Err)
     }
 
     unsafe fn adapter_attached(driver: NonNull<c_void>) -> bool {
@@ -534,6 +665,9 @@ pub use native::{
     SurfaceError, complete_pdev, disable_pdev, disable_surface, enable_pdev, enable_surface,
     initialise_driver, reset_surface, resume_surface, shutdown_driver, stop_surface,
 };
+
+#[cfg(all(windows, any(target_arch = "x86", target_arch = "x86_64")))]
+pub(crate) use native::with_cpu_surfaces;
 
 #[cfg(test)]
 mod tests {
