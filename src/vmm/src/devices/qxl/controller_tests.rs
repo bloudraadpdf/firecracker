@@ -209,9 +209,9 @@ fn checkpoint_rejects_invalid_host_metadata_without_modifying_boot_memory() {
     state.queues.releases.push(state.queues.releases[0].clone());
     restore(&state).unwrap_err();
     state.queues.releases.clear();
-    state.memory.rom[52] = 2;
+    state.memory.rom[52] ^= 1;
     restore(&state).unwrap_err();
-    state.memory.rom[52] = 1;
+    state.memory.rom[52] ^= 1;
     state.memory.rom[20..24].copy_from_slice(&999u32.to_le_bytes());
     restore(&state).unwrap_err();
     state.memory.rom[20..24].copy_from_slice(&u32::MAX.to_le_bytes());
@@ -355,7 +355,7 @@ fn primary_transitions_preserve_padding_and_invalidate_stale_slots() {
         .memory()
         .store(UPDATE_SURFACE, 1)
         .unwrap();
-    fixture.controller.io_write(14, 0, 0).unwrap_err();
+    fixture.controller.io_write(14, 1, 0).unwrap_err();
     assert!(fixture.controller.frame(0).unwrap().is_some());
     fixture
         .controller
@@ -429,4 +429,218 @@ fn cursor_commands_show_hide_move_and_expire_sampled_trails_without_burning_pixe
         &fixture.controller.frame(1).unwrap().unwrap().pixels[..4],
         &[0, 0, 0xffffff, 0]
     );
+}
+
+fn surface_command(id: u32, address: u64, stride: i32, keep: bool) -> Vec<u8> {
+    let mut data = vec![0; 41];
+    for (offset, value) in [(8, id), (13, u32::from(keep)), (17, 32), (21, 4), (25, 2)] {
+        data[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    data[29..33].copy_from_slice(&stride.to_le_bytes());
+    data[33..41].copy_from_slice(&address.to_le_bytes());
+    data
+}
+
+fn surface_image(fixture: &Fixture, id: u32) {
+    let mut data = [0; 22];
+    data[8] = 104;
+    data[10..14].copy_from_slice(&4u32.to_le_bytes());
+    data[14..18].copy_from_slice(&2u32.to_le_bytes());
+    data[18..22].copy_from_slice(&id.to_le_bytes());
+    fixture.store(2048, &data);
+}
+
+fn surface_copy(
+    fixture: &mut Fixture,
+    source: u32,
+    destination: u32,
+) -> Result<bool, TransportError> {
+    surface_image(fixture, source);
+    let mut payload = [0; 44];
+    payload[..8].copy_from_slice(&(SLOT | 2048).to_le_bytes());
+    payload[8..24].copy_from_slice(&rect([0, 0, 4, 2]));
+    payload[24..26].copy_from_slice(&8u16.to_le_bytes());
+    payload[26] = 1;
+    fixture.submit(
+        1,
+        &drawable(Layout::Modern, 3, [0, 0, 4, 2], &payload, destination),
+    );
+    fixture.controller.poll(1)
+}
+
+#[test]
+fn offscreen_draw_copy_pattern_and_readback_use_selected_surfaces() {
+    let mut fixture = Fixture::new();
+    fixture.store(1024, &[0xa5; 40]);
+    fixture.submit(5, &surface_command(1, SLOT | 1024, -20, false));
+    fixture.submit(
+        1,
+        &drawable(Layout::Modern, 1, [0, 0, 4, 2], &fill(0x123456, 8), 1),
+    );
+    fixture.store(UPDATE_SURFACE, &1u32.to_le_bytes());
+    fixture.store(UPDATE_AREA, &rect([0, 0, 4, 2]));
+    fixture.controller.io_write(2, 0, 1).unwrap();
+    assert_eq!(fixture.word(Region::Ram, 1024), 0x123456);
+    assert_eq!(fixture.word(Region::Ram, 1040), 0xa5a5a5a5);
+    assert_eq!(fixture.controller.frame(1).unwrap().unwrap().pixels, [0; 8]);
+    surface_copy(&mut fixture, 1, 0).unwrap();
+    assert_eq!(
+        fixture.controller.frame(1).unwrap().unwrap().pixels,
+        [0x123456; 8]
+    );
+    fixture.draw(7);
+    fixture.controller.poll(1).unwrap();
+    surface_copy(&mut fixture, 0, 1).unwrap();
+    assert_eq!(fixture.word(Region::Ram, 1024), 7);
+    // Pattern images use the same source-surface resolver as copy operations.
+    surface_image(&fixture, 1);
+    let mut pattern = fill(0, 8);
+    pattern[..4].copy_from_slice(&2u32.to_le_bytes());
+    pattern[4..12].copy_from_slice(&(SLOT | 2048).to_le_bytes());
+    fixture.submit(1, &drawable(Layout::Modern, 1, [0, 0, 4, 2], &pattern, 0));
+    fixture.controller.poll(2).unwrap();
+    assert_eq!(fixture.controller.frame(2).unwrap().unwrap().pixels, [7; 8]);
+    let mut update = vec![0; 32];
+    update[8..24].copy_from_slice(&rect([0, 0, 4, 2]));
+    update[24..28].copy_from_slice(&99u32.to_le_bytes());
+    update[28..32].copy_from_slice(&1u32.to_le_bytes());
+    fixture.submit(2, &update);
+    fixture.controller.poll(3).unwrap();
+    assert_eq!(fixture.word(Region::Rom, 8), 99);
+}
+
+#[test]
+fn offscreen_checkpoint_preserves_descriptors_pixels_and_pending_destroy() {
+    let mut fixture = Fixture::new();
+    fixture.store(1024, &[0x33; 40]);
+    fixture.submit(
+        5,
+        &surface_command(super::protocol::MAX_SURFACES - 1, SLOT | 1024, 20, true),
+    );
+    fixture.controller.poll(0).unwrap();
+    let state = fixture.controller.save().unwrap();
+    assert_eq!(state.surfaces.len(), 1);
+    let encoded = bitcode::serialize(&state).unwrap();
+    let state = bitcode::deserialize(&encoded).unwrap();
+    fixture.controller =
+        Controller::restore(fixture.boot_copy(), &state, RAM, RAM + (32 << 20)).unwrap();
+    surface_copy(&mut fixture, super::protocol::MAX_SURFACES - 1, 0).unwrap();
+    assert_eq!(
+        fixture.controller.frame(1).unwrap().unwrap().pixels,
+        [0x333333; 8]
+    );
+    let mut destroy = surface_command(super::protocol::MAX_SURFACES - 1, 0, 0, false);
+    destroy[12] = 1;
+    fixture.submit(5, &destroy[..17]);
+    let state = fixture.controller.save().unwrap();
+    fixture.controller =
+        Controller::restore(fixture.boot_copy(), &state, RAM, RAM + (32 << 20)).unwrap();
+    fixture.controller.poll(2).unwrap();
+    assert!(fixture.controller.save().unwrap().surfaces.is_empty());
+    assert_eq!(fixture.word(Region::Ram, 1024), 0x33333333);
+}
+
+#[test]
+fn offscreen_invalid_creates_do_not_change_live_pixels_or_descriptors() {
+    for (id, address, stride, flags) in [
+        (0, SLOT | 1024, 20, 0u32),
+        (super::protocol::MAX_SURFACES, SLOT | 1024, 20, 0),
+        (1, SLOT | 1024, 15, 0),
+        (1, SLOT | (RAM_HEADER as u64 - 8), 20, 0),
+        (1, SLOT | 1024, 20, 2),
+    ] {
+        let mut fixture = Fixture::new();
+        fixture.store(1024, &[0xa5; 40]);
+        let mut command = surface_command(id, address, stride, false);
+        command[13..17].copy_from_slice(&flags.to_le_bytes());
+        fixture.submit(5, &command);
+        fixture.controller.poll(0).unwrap_err();
+        assert!(fixture.controller.save().unwrap().surfaces.is_empty());
+        assert_eq!(fixture.word(Region::Ram, 1024), 0xa5a5a5a5);
+    }
+    let mut fixture = Fixture::new();
+    fixture.submit(5, &surface_command(1, SLOT | 1024, 20, true));
+    fixture.controller.poll(0).unwrap();
+    fixture.store(1024, &[0xa5; 40]);
+    fixture.submit(5, &surface_command(1, SLOT | 1024, 20, false));
+    fixture.controller.poll(0).unwrap_err();
+    assert_eq!(fixture.word(Region::Ram, 1024), 0xa5a5a5a5);
+}
+
+#[test]
+fn offscreen_restore_rejects_duplicate_invalid_and_unmapped_descriptors() {
+    let mut fixture = Fixture::new();
+    fixture.submit(5, &surface_command(1, SLOT | 1024, 20, true));
+    fixture.controller.poll(0).unwrap();
+    let original = fixture.controller.save().unwrap();
+    for variant in 0..6 {
+        let mut state = original.clone();
+        match variant {
+            0 => state.surfaces.push(state.surfaces[0].clone()),
+            1 => state.surfaces[0].0 = 0,
+            2 => state.surfaces[0].0 = super::protocol::MAX_SURFACES,
+            3 => {
+                state.surfaces[0].1.pop();
+            }
+            4 => state.surfaces[0].1[32..40].fill(0xff),
+            _ => {
+                state.surfaces =
+                    vec![state.surfaces[0].clone(); super::protocol::MAX_SURFACES as usize]
+            }
+        }
+        Controller::restore(fixture.boot_copy(), &state, RAM, RAM + (32 << 20)).unwrap_err();
+    }
+}
+
+#[test]
+fn offscreen_lifetime_tracks_destroy_all_reset_and_slot_removal() {
+    for port in [5, 9, 13, 14, 15] {
+        let mut fixture = Fixture::new();
+        fixture.submit(5, &surface_command(1, SLOT | 1024, 20, true));
+        fixture.controller.poll(0).unwrap();
+        fixture.store(UPDATE_SURFACE, &1u32.to_le_bytes());
+        fixture
+            .controller
+            .io_write(port, u32::from(port == 9 || port == 14), 1)
+            .unwrap();
+        let state = fixture.controller.save().unwrap();
+        assert_eq!(state.surfaces.len(), usize::from(port == 13));
+        assert_eq!(state.primary.is_some(), port == 14);
+    }
+}
+
+#[test]
+fn surface_sources_are_captured_before_aliasing_destination_writes() {
+    let mut fixture = Fixture::new();
+    // Distinct IDs deliberately alias overlapping rows of the same backing.
+    fixture.submit(5, &surface_command(1, SLOT | 1024, 20, true));
+    fixture.submit(5, &surface_command(2, SLOT | 1044, 20, true));
+    fixture.controller.poll(0).unwrap();
+    for (offset, value) in [(1024, 1u32), (1044, 2), (1064, 3)] {
+        fixture.store(offset, &value.to_le_bytes());
+    }
+    surface_copy(&mut fixture, 1, 2).unwrap();
+    assert_eq!(fixture.word(Region::Ram, 1044), 1);
+    assert_eq!(fixture.word(Region::Ram, 1064), 2);
+    // A missing source cannot partially overwrite a valid destination.
+    surface_copy(&mut fixture, 99, 2).unwrap_err();
+    assert_eq!(fixture.word(Region::Ram, 1044), 1);
+    assert_eq!(fixture.word(Region::Ram, 1064), 2);
+}
+
+#[test]
+fn destroy_surface_io_uses_full_value_not_update_surface_selector() {
+    let mut fixture = Fixture::new();
+    let id = super::protocol::MAX_SURFACES - 1;
+    fixture.submit(5, &surface_command(id, SLOT | 1024, 20, true));
+    fixture.controller.poll(0).unwrap();
+    fixture.store(UPDATE_SURFACE, &1u32.to_le_bytes());
+    fixture.controller.io_write(14, id, 1).unwrap();
+    assert!(fixture.controller.save().unwrap().surfaces.is_empty());
+    assert!(fixture.controller.frame(1).unwrap().is_some());
+    fixture
+        .controller
+        .io_write(14, super::protocol::MAX_SURFACES, 2)
+        .unwrap_err();
+    assert!(fixture.controller.frame(2).unwrap().is_some());
 }

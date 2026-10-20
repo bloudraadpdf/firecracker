@@ -119,7 +119,14 @@ reports `GDI READY`. The reference is a top-down 320-by-384 32bpp DIB. Following
 [Microsoft's DIB synchronisation requirement](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/nf-wingdi-createdibsection),
 the probe flushes GDI before reading the bitmap.
 
-Within ninety seconds, capture the actual console frame. Keep the pointer
+The probe also retains a 32-by-24 device-compatible bitmap until F1. To check
+secondary-surface persistence, pause at `GDI READY`, create a full snapshot,
+stop the paused VMM, and load the snapshot with the matching binary and disk.
+Capture the restored frame before pressing F1. Require
+`GDI RETAINED bitmap pixels=768 status=0`; this compares the retained bitmap
+with its independent software DIB reference after restore.
+
+Within ninety seconds of guest runtime, capture the actual console frame. Keep the pointer
 outside the test window and crop pixels `[64,384)` horizontally and `[64,448)`
 vertically. Press F1 only after retaining that capture; Escape aborts. Require
 `GDI FINISHED status=0` and process exit zero, then shut down Windows normally.

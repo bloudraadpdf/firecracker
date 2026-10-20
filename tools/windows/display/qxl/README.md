@@ -126,12 +126,13 @@ VC-LTL and YY-Thunks are not kernel-driver dependencies.
 
 ## Rendering and host contract
 
-The current Firecracker QXL device advertises one surface, 32-bit primary modes
-and compression level zero. The driver respects those capabilities. It declines
-secondary video allocation, so GDI retains normal system-memory bitmaps. QUIC
-is selected only when the host enables it and the compressed image fits a
-smaller allocation than the raw image. Otherwise the raw path remains available.
-Do not advertise compression or additional surfaces without endpoint support.
+The Firecracker QXL device advertises 1,024 surfaces, 32-bit primary modes and
+QUIC compression. The package enables secondary video allocation through its
+`SurfacesEnabled` INF setting. Surfaces use the existing bounded RAM/VRAM banks;
+IDs 1 through 1,023 are available for offscreen bitmaps. QUIC is selected only
+when the compressed image fits a smaller allocation than the raw image.
+Otherwise the raw path remains available. The host decoder is independent
+Apache-2.0 Rust code; it does not link or import the GPL guest codec.
 
 Primary drawing submits supported QXL commands. Other cases use synchronised
 kernel-GDI bitmap views. Repeated references to one handle use one view, which
@@ -229,7 +230,9 @@ The host matches XP. The
 does not specify intermediate byte rounding. Do not introduce a general pixel
 tolerance or select host arithmetic from the guest OS.
 
-Native tests on a single-surface, compression-disabled host do not qualify
-secondary video allocation/migration or compressed transmission. Failure and
-power paths also require their own targeted evidence; normal shutdown does not
-qualify them. Keep these limits explicit in review and release notes.
+The [format42 native checks](../../../../docs/windows-validation.md#rust-qxl-compression-and-secondary-surfaces)
+exercise compressed transmission and secondary video allocation on XP and
+Windows 7. A retained device bitmap survives full snapshot and restore with
+all 768 pixels exact. Earlier single-surface, compression-disabled runs remain
+separate evidence. Failure and power paths require targeted checks; normal
+shutdown does not qualify them.

@@ -59,6 +59,7 @@ HKR,,DefaultSettings.BitsPerPel,0x00010001,32
 HKR,,DefaultSettings.XResolution,0x00010001,800
 HKR,,DefaultSettings.YResolution,0x00010001,600
 HKR,,Acceleration.Level,0x00010001,0
+HKR,,SurfacesEnabled,0x00010001,1
 
 [Qxl.Services]
 AddService = qxl,0x00000002,Service

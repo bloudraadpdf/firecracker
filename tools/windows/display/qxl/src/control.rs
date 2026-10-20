@@ -164,7 +164,7 @@ impl Operation {
         }
     }
 
-    fn prepare(self, info: &DriverInfo, transport: &mut impl Transport) -> u8 {
+    fn prepare(self, info: &DriverInfo, transport: &mut impl Transport) -> u32 {
         match self {
             Self::Update { surface, area } => {
                 for (index, value) in area.into_iter().enumerate() {
@@ -178,16 +178,14 @@ impl Operation {
             Self::AddSlot { slot, start, end } => {
                 transport.write(info.ram_slot_start.cast(), &start.to_le_bytes());
                 transport.write(info.ram_slot_end.cast(), &end.to_le_bytes());
-                return slot;
+                return u32::from(slot);
             }
-            Self::DeleteSlot(slot) => return slot,
+            Self::DeleteSlot(slot) => return u32::from(slot),
             Self::CreatePrimary { layout, physical } => transport.write(
                 info.primary_surface_create.cast(),
                 &layout.primary(physical),
             ),
-            Self::DestroySurface(surface) => {
-                transport.write(info.update_surface.cast(), &surface.to_le_bytes())
-            }
+            Self::DestroySurface(surface) => return surface,
             Self::Monitors(physical) => {
                 transport.write(info.monitors_config.cast(), &physical.to_le_bytes())
             }
@@ -200,7 +198,7 @@ impl Operation {
 trait Transport {
     fn clear(&mut self, event: *mut core::ffi::c_void);
     fn write(&mut self, pointer: *mut u8, bytes: &[u8]);
-    fn issue(&mut self, port: u16, value: u8);
+    fn issue(&mut self, port: u16, value: u32);
     fn wait(&mut self, event: *mut core::ffi::c_void, timeout: i64) -> i32;
 }
 
@@ -264,11 +262,11 @@ mod native {
                 unsafe { pointer.add(index).write_volatile(byte) };
             }
         }
-        fn issue(&mut self, port: u16, value: u8) {
+        fn issue(&mut self, port: u16, value: u32) {
             // SAFETY: validated ports belong to the mapped QXL adapter. This
             // kernel callback has I/O privilege and exclusive adapter control.
             unsafe {
-                core::arch::asm!("out dx, al", in("dx") port, in("al") value,
+                core::arch::asm!("out dx, eax", in("dx") port, in("eax") value,
                 options(nostack, preserves_flags))
             };
         }
@@ -353,7 +351,7 @@ mod tests {
     enum Action {
         Clear(usize),
         Write(usize, Vec<u8>),
-        Issue(u16, u8),
+        Issue(u16, u32),
         Wait(usize, i64),
     }
 
@@ -371,7 +369,7 @@ mod tests {
             self.actions
                 .push(Action::Write(pointer.addr(), bytes.into()));
         }
-        fn issue(&mut self, port: u16, value: u8) {
+        fn issue(&mut self, port: u16, value: u32) {
             self.actions.push(Action::Issue(port, value));
         }
         fn wait(&mut self, event: *mut core::ffi::c_void, timeout: i64) -> i32 {
@@ -667,6 +665,33 @@ mod tests {
         assert_eq!(Operation::DeleteSlot(2).port(&info(2)), Ok((0xc009, false)));
         assert_eq!(Operation::DeleteSlot(2).port(&info(3)), Ok((0xc009, false)));
         assert_eq!(Operation::FlushRelease.port(&info(3)), Ok((0xc017, false)));
+    }
+
+    #[test]
+    fn destroy_surface_passes_full_id_without_overwriting_update_selector() {
+        for (revision, port) in [(2, 0xc00e), (3, 0xc014)] {
+            let mut info = info(revision);
+            info.surface_count = 1024;
+            let mut channel = Channel {
+                info: &info,
+                failed: false,
+            };
+            let mut fake = Fake::default();
+            channel
+                .issue(Operation::DestroySurface(1023), &mut fake)
+                .unwrap();
+            let expected = if revision == 2 {
+                std::vec![Action::Issue(port, 1023)]
+            } else {
+                std::vec![
+                    Action::Clear(0x30000000),
+                    Action::Issue(port, 1023),
+                    Action::Wait(0x30000000, TIMEOUT_100NS)
+                ]
+            };
+            // No shared-memory Write: UPDATE_SURFACE belongs only to Update.
+            assert_eq!(fake.actions, expected);
+        }
     }
 
     #[test]

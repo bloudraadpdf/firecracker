@@ -25,7 +25,11 @@ fn rom_describes_the_actual_banks_and_complete_bounded_mode_table() {
     assert_eq!(word(&memory, Region::Rom, 40), 16 << 20);
     assert_eq!(word(&memory, Region::Rom, 44), (32 << 20) - 8192);
     assert_eq!(word(&memory, Region::Rom, 28), 4094);
-    assert_eq!(word(&memory, Region::Rom, 52), 1);
+    assert_eq!(word(&memory, Region::Rom, 12), 1);
+    assert_eq!(
+        word(&memory, Region::Rom, 52),
+        super::protocol::MAX_SURFACES
+    );
     let mut slots = [0; 6];
     memory.read(Region::Rom, 64, &mut slots).unwrap();
     assert_eq!(slots, [1, 3, 8, 8, 0, 1]);

@@ -579,8 +579,9 @@ full installed-reference matrix covers the legacy VGA profile.
 AMD64 console snapshots contain display memory and registers, keyboard/mouse
 queues, held input, pending releases, keyboard LEDs and pending lock updates,
 USB controller/HID state, PCI state, optical transfer state and media identity.
-The current snapshot format is 41.0.0. Basic VGA state adds about 16 MiB; QXL
-also saves 48 MiB of private RAM/VRAM and its protocol ROM and control state. The
+The current snapshot format is 42.0.0. Basic VGA state adds about 16 MiB; QXL
+also saves 48 MiB of private RAM/VRAM, its protocol ROM, control state and
+validated secondary-surface descriptors. The
 bounded snapshot reader accepts at most 128 MiB, including GPU state. The guest
 disk remains a separate artifact, as with ordinary Firecracker snapshots.
 
@@ -590,8 +591,8 @@ does not save a second held-key or LED state. Pending frames, partial-frame
 cursor, position, held releases and guest/pending lock LEDs travel with Input.
 Missing, stray or mismatched console/input topology is rejected before backend
 attachment. Format29 through format39 snapshots require their matching older
-binaries; format41 has no decoder for them. Format40 also requires its matching
-binary. Snapshots do not move between AMD64 and ARM64.
+binaries; format42 has no decoder for them. Formats40 and41 also require their
+matching binaries. Snapshots do not move between AMD64 and ARM64.
 
 The historical format31 Windows 11 test edition was IoT Enterprise LTSC 2024. It
 passed Setup's hardware check without registry bypasses. The optional

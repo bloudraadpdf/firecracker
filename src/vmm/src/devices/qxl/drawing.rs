@@ -42,16 +42,41 @@ enum Brush {
     Pattern { bitmap: Bitmap, origin: (i32, i32) },
 }
 
+type SurfaceResolver<'a> = Option<&'a dyn Fn(u32) -> Result<Bitmap, TransportError>>;
+
+fn source_bitmap(
+    memory: &Memory,
+    addresses: &AddressSpace,
+    address: u64,
+    surfaces: SurfaceResolver<'_>,
+) -> Result<Bitmap, TransportError> {
+    let header = read::<18>(memory, addresses, address, 0)?;
+    if header[8] != 104 {
+        return Bitmap::decode(memory, addresses, address);
+    }
+    if header[9] & !3 != 0 {
+        return Err(DecodeError::Parameter.into());
+    }
+    let id = u32::from_le_bytes(read::<4>(memory, addresses, address, 18)?);
+    surfaces.ok_or(DecodeError::Parameter)?(id)
+}
+
 impl Brush {
     fn decode(
         memory: &Memory,
         addresses: &AddressSpace,
         data: &[u8],
+        surfaces: SurfaceResolver<'_>,
     ) -> Result<Self, TransportError> {
         match u32::from_le_bytes(bytes(data, 0)?) {
             1 => Ok(Self::Solid(u32::from_le_bytes(bytes(data, 4)?))),
             2 => Ok(Self::Pattern {
-                bitmap: Bitmap::decode(memory, addresses, u64::from_le_bytes(bytes(data, 4)?))?,
+                bitmap: source_bitmap(
+                    memory,
+                    addresses,
+                    u64::from_le_bytes(bytes(data, 4)?),
+                    surfaces,
+                )?,
                 origin: point(data, 12)?,
             }),
             _ => Err(DecodeError::Parameter.into()),
@@ -132,11 +157,12 @@ impl Paint {
         memory: &Memory,
         addresses: &AddressSpace,
         data: &[u8],
+        surfaces: SurfaceResolver<'_>,
         descriptor: u16,
     ) -> Result<Self, TransportError> {
         let op = RasterOp::decode(descriptor, Operand::Brush)?;
         let brush = if op.uses_operand() {
-            Brush::decode(memory, addresses, data)?
+            Brush::decode(memory, addresses, data, surfaces)?
         } else {
             Brush::Solid(0)
         };
@@ -165,6 +191,7 @@ impl Stroke {
         memory: &Memory,
         addresses: &AddressSpace,
         data: &[u8],
+        surfaces: SurfaceResolver<'_>,
     ) -> Result<Self, TransportError> {
         let path = Path::decode(
             memory,
@@ -176,7 +203,7 @@ impl Stroke {
         // a separate stroke; back_mode does not paint the gaps.
         let descriptor = u16::from_le_bytes(bytes(data, 48)?);
         let paint = (descriptor != 0)
-            .then(|| Paint::decode(memory, addresses, &data[28..48], descriptor))
+            .then(|| Paint::decode(memory, addresses, &data[28..48], surfaces, descriptor))
             .transpose()?;
         Ok(Self { path, paint })
     }
@@ -284,7 +311,7 @@ enum Operation {
 
 impl Operation {
     fn image(
-        memory: &Memory,
+        context: (&Memory, SurfaceResolver<'_>),
         addresses: &AddressSpace,
         data: &[u8],
         mut action: ImageAction,
@@ -292,16 +319,23 @@ impl Operation {
         mask: Option<&[u8]>,
         bounds: Rect,
     ) -> Result<Self, TransportError> {
+        let (memory, surfaces) = context;
         let (source, mode) = if action.uses_source() {
             let address = u64::from_le_bytes(bytes(data, 0)?);
             let header = read::<18>(memory, addresses, address, 0)?;
             let area = Rect::decode(&data[8..24])?;
             let pixels = if header[8] == 104 {
                 let id = u32::from_le_bytes(read::<4>(memory, addresses, address, 18)?);
-                if id != 0 || header[9] & !3 != 0 {
+                if (surfaces.is_none() && id != 0) || header[9] & !3 != 0 {
                     return Err(DecodeError::Parameter.into());
                 }
-                ImagePixels::PrimarySurface
+                if let Some(resolve) = surfaces {
+                    let bitmap = resolve(id)?;
+                    bitmap.validate_rect(area)?;
+                    ImagePixels::Bitmap(bitmap)
+                } else {
+                    ImagePixels::PrimarySurface
+                }
             } else {
                 let bitmap = Bitmap::decode(memory, addresses, address)?;
                 bitmap.validate_rect(area)?;
@@ -339,11 +373,22 @@ pub struct Drawable {
 }
 
 impl Drawable {
+    #[cfg(test)]
     pub fn decode(
         memory: &Memory,
         addresses: &AddressSpace,
         address: u64,
         layout: Layout,
+    ) -> Result<Self, TransportError> {
+        Self::decode_with_surfaces(memory, addresses, address, layout, None)
+    }
+
+    pub fn decode_with_surfaces(
+        memory: &Memory,
+        addresses: &AddressSpace,
+        address: u64,
+        layout: Layout,
+        surfaces: SurfaceResolver<'_>,
     ) -> Result<Self, TransportError> {
         let (surface_id, bounds, clip, payload, opcode) = match layout {
             Layout::Modern => {
@@ -407,6 +452,7 @@ impl Drawable {
                         memory,
                         addresses,
                         &data[..20],
+                        surfaces,
                         u16::from_le_bytes(bytes(&data, 20)?),
                     )?,
                     mask: Mask::decode(memory, addresses, &data[22..], bounds)?,
@@ -416,12 +462,12 @@ impl Drawable {
                 let data = read::<64>(memory, addresses, address, payload)?;
                 let op = RasterOp::decode(u16::from_le_bytes(bytes(&data, 44)?), Operand::Source)?;
                 let brush = if op.uses_destination() {
-                    Brush::decode(memory, addresses, &data[24..44])?
+                    Brush::decode(memory, addresses, &data[24..44], surfaces)?
                 } else {
                     Brush::Solid(0)
                 };
                 Operation::image(
-                    memory,
+                    (memory, surfaces),
                     addresses,
                     &data,
                     ImageAction::Opaque { brush, op },
@@ -434,7 +480,7 @@ impl Drawable {
                 let data = read::<44>(memory, addresses, address, payload)?;
                 let op = RasterOp::decode(u16::from_le_bytes(bytes(&data, 24)?), Operand::Source)?;
                 Operation::image(
-                    memory,
+                    (memory, surfaces),
                     addresses,
                     &data,
                     ImageAction::Raster(op),
@@ -458,12 +504,12 @@ impl Drawable {
                 let data = read::<63>(memory, addresses, address, payload)?;
                 let opcode = data[44];
                 let brush = if (opcode ^ (opcode >> 4)) & 15 != 0 {
-                    Brush::decode(memory, addresses, &data[24..44])?
+                    Brush::decode(memory, addresses, &data[24..44], surfaces)?
                 } else {
                     Brush::Solid(0)
                 };
                 Operation::image(
-                    memory,
+                    (memory, surfaces),
                     addresses,
                     &data,
                     ImageAction::Ternary { brush, opcode },
@@ -476,6 +522,7 @@ impl Drawable {
                 memory,
                 addresses,
                 &read::<52>(memory, addresses, address, payload)?,
+                surfaces,
             )?),
             11 => {
                 let data = read::<68>(memory, addresses, address, payload)?;
@@ -488,6 +535,7 @@ impl Drawable {
                         memory,
                         addresses,
                         &data[24..44],
+                        surfaces,
                         u16::from_le_bytes(bytes(&data, 64)?),
                     )?)
                 };
@@ -502,6 +550,7 @@ impl Drawable {
                             memory,
                             addresses,
                             &data[44..64],
+                            surfaces,
                             u16::from_le_bytes(bytes(&data, 66)?),
                         )?,
                     })
@@ -515,7 +564,7 @@ impl Drawable {
             12 => {
                 let data = read::<32>(memory, addresses, address, payload)?;
                 Operation::image(
-                    memory,
+                    (memory, surfaces),
                     addresses,
                     &data,
                     ImageAction::Transparent(u32::from_le_bytes(bytes(&data, 28)?)),
@@ -543,7 +592,7 @@ impl Drawable {
                     return Err(DecodeError::Parameter.into());
                 }
                 Operation::image(
-                    memory,
+                    (memory, surfaces),
                     addresses,
                     &data,
                     ImageAction::Alpha {

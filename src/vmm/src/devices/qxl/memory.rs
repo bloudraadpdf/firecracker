@@ -240,6 +240,7 @@ impl Memory {
         rom[..4].copy_from_slice(b"QXRO");
         for (offset, value) in [
             (20, u32::MAX),
+            (12, 1),
             (24, u32::try_from(MODES_OFFSET).unwrap()),
             (
                 28,
@@ -249,7 +250,7 @@ impl Memory {
             (36, 0),
             (40, u32::try_from(SURFACE_BYTES).unwrap()),
             (44, u32::try_from(RAM_HEADER).unwrap()),
-            (52, 1),
+            (52, super::protocol::MAX_SURFACES),
             (MODES_OFFSET, u32::try_from(MODES.len()).unwrap()),
         ] {
             rom[offset..offset + 4].copy_from_slice(&value.to_le_bytes());

@@ -7,6 +7,9 @@ use std::ops::Range;
 
 const ADDRESS_MASK: u64 = (1 << 48) - 1;
 const MAX_SLOT_BYTES: u64 = 64 << 20;
+/// Bounded surface namespace, including primary surface zero.
+pub const MAX_SURFACES: u32 = 1024;
+
 const MAX_SURFACE_BYTES: u64 = 32 << 20;
 const MAX_DIMENSION: u32 = 4096;
 

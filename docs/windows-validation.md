@@ -138,6 +138,38 @@ It exposes one revision-two QXL PCI device. Component checks do not establish gu
 driver loading or rendering. Graphics qualification across all agreed guests
 must finish before work returns to unrelated platform features.
 
+## Rust QXL compression and secondary surfaces
+
+The format42 host `cb05dd01` advertises QUIC and 1,024 surfaces. Separate
+unsigned XP x86 and Windows 7 x64 packages enable `SurfacesEnabled` through
+normal INF installation, followed by shutdown and cold boot. Windows 7 uses
+the one-boot F8 unsigned-driver option; no persistent signature-policy change
+or certificate is installed. Both installed driver pairs are read back from
+the stopped disks and match their frozen packages.
+
+| Native check | XP SP3 x86 | Windows 7 SP1 x64 |
+| --- | --- | --- |
+| Compressed image decoding | 67 measured host decoder calls | 45 measured host decoder calls |
+| Visible 122,880-pixel GDI comparison | All BGR pixels exact | Only the same five recorded constant-alpha rounding differences |
+| Full snapshot and restore while DDB is live | Restored canvas exact; all 768 retained bitmap pixels exact | Restored canvas exact; all 768 retained bitmap pixels exact |
+| Completion | Probe exit0; clean S5 and VMM exit0 | Probe exit0; clean S5 and VMM exit0 |
+
+The matching snapshot editor confirms live secondary descriptors, including
+the probe's 32-by-24 device bitmap. The drawing probe retains that bitmap
+through READY, full snapshot, VMM exit and restore before reading its pixels.
+The temporary host decoder probes are removed after measurement. This extends
+the earlier single-surface, raw-image evidence; it does not repeat or replace
+the mode, input or network matrices. A Windows 7 launch that could not write
+its root-directory log is retained as a failed test setup, not a feature pass.
+
+The host codec is independent Apache-2.0 Rust code with no new dependency.
+Tests compare all pixels in 25 external reference streams and reject malformed
+QUIC headers, symbols, runs and chunks. Surface tests cover source/destination
+aliasing, pattern sources, invalid creates, DWORD destroy ID1,023, reset, slot
+removal and malformed restored descriptors. Native tests and strict host and
+both-driver Clippy pass. Snapshot format42 requires matching binaries; it is
+not an upgrade decoder for format41.
+
 ## Windows XP native QXL checks
 
 Runtime source `9c581a595` passes an initial native AMD64 check with XP SP3 x86
@@ -469,9 +501,9 @@ source `95aaccfb` and using snapshot format 34. Its default counterpart is
 these binaries. The table records completed installed-reference checks on this
 runtime separately from unchanged component results and remaining edition gates.
 
-Current source uses snapshot format 41, adding QXL console state to the
-two-channel optical state and pending media-change notifications. The
-format-34 baseline below does not qualify the GPU or format-41 restore path.
+Current source uses snapshot format 42, adding secondary QXL surfaces to the
+console and two-channel optical state. The
+format-34 baseline below does not qualify the GPU or format-42 restore path.
 The GPU candidate above records actual format-37 restore evidence; it does not
 qualify the later optical state format.
 

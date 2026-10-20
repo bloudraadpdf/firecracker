@@ -820,6 +820,9 @@ fn run() -> Result {
     let mut memory = 0;
     let mut bitmap = 0;
     let mut old = 0;
+    let mut retained_dc = 0;
+    let mut retained_bitmap = 0;
+    let mut retained_old = 0;
     let name = b"QXL drawing\0".map(u16::from);
     // SAFETY: GUI objects belong to this thread. All pointer buffers outlive each call;
     // the DIB stays selected only until cleanup, after its final flushed read.
@@ -892,11 +895,47 @@ fn run() -> Result {
             draw(memory)?;
             save(bits)?;
             draw(screen)?;
+            retained_dc = CreateCompatibleDC(screen);
+            check(retained_dc != 0, "CreateCompatibleDC retained bitmap")?;
+            retained_bitmap = CreateCompatibleBitmap(screen, 32, 24);
+            check(retained_bitmap != 0, "CreateCompatibleBitmap retained")?;
+            retained_old = SelectObject(retained_dc, retained_bitmap);
+            check(
+                retained_old != 0 && retained_old != usize::MAX,
+                "SelectObject retained bitmap",
+            )?;
+            check(
+                BitBlt(retained_dc, 0, 0, 32, 24, screen, 8, 352, 0x00cc0020) != 0
+                    && GdiFlush() != 0,
+                "retain device bitmap",
+            )?;
+            let mut expected = [0u32; 32 * 24];
+            for (index, pixel) in expected.iter_mut().enumerate() {
+                *pixel = bits
+                    .cast::<u32>()
+                    .add((352 + index / 32) * WIDTH as usize + 8 + index % 32)
+                    .read()
+                    & 0x00ff_ffff;
+            }
             GetAsyncKeyState(0x70);
             output(b"GDI READY x=64 y=64 width=320 height=384; capture then F1\r\n")?;
             let start = GetTickCount();
             while GetTickCount().wrapping_sub(start) < 90000 {
                 if GetAsyncKeyState(0x70) & 1 != 0 {
+                    check(
+                        BitBlt(memory, 8, 352, 32, 24, retained_dc, 0, 0, 0x00cc0020) != 0
+                            && GdiFlush() != 0,
+                        "read retained device bitmap",
+                    )?;
+                    for (index, pixel) in expected.iter().enumerate() {
+                        let actual = bits
+                            .cast::<u32>()
+                            .add((352 + index / 32) * WIDTH as usize + 8 + index % 32)
+                            .read()
+                            & 0x00ff_ffff;
+                        check(actual == *pixel, "retained device bitmap pixels")?;
+                    }
+                    output(b"GDI RETAINED bitmap pixels=768 status=0\r\n")?;
                     return Ok(());
                 }
                 if GetAsyncKeyState(0x1b) < 0 {
@@ -915,6 +954,15 @@ fn run() -> Result {
             Err("capture timeout")
         })();
         let mut cleaned = true;
+        if retained_old != 0 && retained_old != usize::MAX {
+            cleaned &= SelectObject(retained_dc, retained_old) != 0;
+        }
+        if retained_bitmap != 0 {
+            cleaned &= DeleteObject(retained_bitmap) != 0;
+        }
+        if retained_dc != 0 {
+            cleaned &= DeleteDC(retained_dc) != 0;
+        }
         if old != 0 && old != usize::MAX {
             cleaned &= SelectObject(memory, old) != 0;
         }

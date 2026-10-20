@@ -81,6 +81,7 @@ pub struct ControllerState {
     pub(super) addresses: AddressSpaceState,
     pub(super) queues: QueueState,
     pub(super) primary: Option<Vec<u8>>,
+    pub(super) surfaces: Vec<(u32, Vec<u8>)>,
     pub(super) attached: bool,
     pub(super) pointer: PointerState,
 }

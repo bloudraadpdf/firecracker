@@ -162,17 +162,19 @@ impl QxlPci {
         Ok(())
     }
 
-    /// Dispatch a byte write to the revision-two synchronous I/O BAR.
+    /// Dispatch byte or DWORD operands to the revision-two synchronous I/O BAR.
     pub fn write_io(&mut self, offset: u64, bytes: &[u8], now: u64) -> io::Result<()> {
-        let [value] = bytes else {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "QXL I/O width"));
+        let value = match bytes {
+            [value] => u32::from(*value),
+            [a, b, c, d] => u32::from_le_bytes([*a, *b, *c, *d]),
+            _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "QXL I/O width")),
         };
         let port = u8::try_from(offset)
             .ok()
             .filter(|port| *port < 16)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "QXL I/O offset"))?;
         self.controller
-            .io_write(port, *value, now)
+            .io_write(port, value, now)
             .map_err(io::Error::other)
     }
 
@@ -319,6 +321,7 @@ mod tests {
         // Slot zero is invalid; the PCI layer must retain controller errors.
         pci.write_io(8, &[0], 0).unwrap_err();
         pci.write_io(5, &[0], 0).unwrap();
+        pci.write_io(5, &[0; 4], 0).unwrap();
     }
 
     #[test]
@@ -401,5 +404,55 @@ mod tests {
         for address in next {
             assert!(available(&vm, address));
         }
+    }
+
+    #[test]
+    fn dword_surface_destroy_preserves_the_full_id_through_pci_io() {
+        use super::super::memory::{COMMAND_RING, MEMORY_SLOT, UPDATE_SURFACE};
+        use super::super::protocol::MAX_SURFACES;
+
+        let vm = Arc::new(setup_vm_with_memory(0x10000));
+        let mapped = reserve(&vm);
+        let mut pci = QxlPci::new(&vm, Vga::default(), mapped).unwrap();
+        pci.set_decode(true).unwrap();
+        let memory = pci.controller().memory();
+        memory
+            .write(Region::Ram, MEMORY_SLOT, &mapped[0].to_le_bytes())
+            .unwrap();
+        memory
+            .write(
+                Region::Ram,
+                MEMORY_SLOT + 8,
+                &(mapped[0] + 4096).to_le_bytes(),
+            )
+            .unwrap();
+        pci.write_io(8, &[1], 0).unwrap();
+
+        let id = MAX_SURFACES - 1;
+        let mut create = [0; 41];
+        create[..8].copy_from_slice(&77u64.to_le_bytes());
+        for (offset, value) in [(8, id), (17, 32), (21, 4), (25, 2), (29, 16)] {
+            create[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        create[33..41].copy_from_slice(&0x0101_0000_0000_0400u64.to_le_bytes());
+        let memory = pci.controller().memory();
+        memory.write(Region::Ram, 128, &create).unwrap();
+        let mut command = [0; 16];
+        command[..8].copy_from_slice(&0x0101_0000_0000_0080u64.to_le_bytes());
+        command[8..12].copy_from_slice(&5u32.to_le_bytes());
+        memory
+            .write(Region::Ram, COMMAND_RING + 20, &command)
+            .unwrap();
+        memory.store(COMMAND_RING + 4, 1).unwrap();
+        pci.write_io(0, &[0], 0).unwrap();
+        assert_eq!(pci.controller().save().unwrap().surfaces[0].0, 1023);
+        pci.controller().memory().store(UPDATE_SURFACE, 1).unwrap();
+
+        // Invalid widths cannot consume even a valid low-byte ID.
+        pci.write_io(14, &[0xff, 3], 1).unwrap_err();
+        assert_eq!(pci.controller().save().unwrap().surfaces.len(), 1);
+        pci.write_io(14, &id.to_le_bytes(), 1).unwrap();
+        assert!(pci.controller().save().unwrap().surfaces.is_empty());
+        assert_eq!(pci.controller().memory().load(UPDATE_SURFACE).unwrap(), 1);
     }
 }
