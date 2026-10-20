@@ -225,8 +225,9 @@ and the separate [ARM64 validation](windows-arm64.md) for that architecture.
 
 ## Snapshots
 
-This branch uses snapshot format 34.0.0. VMClock presence is optional saved
-state; format33 files require their matching older binary. It saves the selected
+The [console state reference](windows-console.md#state-and-platform-limits)
+gives the current snapshot format and compatibility limits. VMClock presence is
+optional saved state. A snapshot saves the selected
 PCI transport, firmware profile and system UUID, CET/Hyper-V processor state,
 ACPI timer/power registers, CMOS/RTC state and optional console, TPM and
 authenticated-variable checkpoints. Restore recreates the saved PC timer group,
