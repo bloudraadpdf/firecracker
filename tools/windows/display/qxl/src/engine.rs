@@ -8,7 +8,7 @@ use core::ffi::c_void;
 use core::ptr::{NonNull, null_mut, read_unaligned};
 
 use crate::display_modes::{self, DEVMODE_BYTES};
-use crate::gdi::{Size, SurfaceObject};
+use crate::gdi::{Point, Rect, Size, SurfaceObject};
 use crate::ioctl::{QUERY_AVAILABLE_MODES, QUERY_MODE_COUNT};
 use crate::modes::VideoModeInformation;
 
@@ -61,6 +61,65 @@ unsafe extern "system" {
     pub(crate) fn EngLockSurface(surface: *mut c_void) -> *mut SurfaceObject;
     pub(crate) fn EngUnlockSurface(object: *mut SurfaceObject);
     pub(crate) fn EngDeleteSurface(surface: *mut c_void) -> i32;
+    pub(crate) fn EngTextOut(
+        destination: *mut SurfaceObject,
+        text: *mut c_void,
+        font: *mut c_void,
+        clip: *mut c_void,
+        extra: *mut Rect,
+        opaque_rect: *mut Rect,
+        foreground: *mut c_void,
+        background: *mut c_void,
+        brush_origin: *mut Point,
+        mix: u32,
+    ) -> i32;
+    pub(crate) fn EngStrokePath(
+        destination: *mut SurfaceObject,
+        path: *mut c_void,
+        clip: *mut c_void,
+        transform: *mut c_void,
+        brush: *mut c_void,
+        brush_origin: *mut Point,
+        attributes: *mut c_void,
+        mix: u32,
+    ) -> i32;
+    pub(crate) fn EngStretchBlt(
+        destination: *mut SurfaceObject,
+        source: *mut SurfaceObject,
+        mask: *mut SurfaceObject,
+        clip: *mut c_void,
+        translation: *mut c_void,
+        color_adjustment: *mut c_void,
+        halftone_origin: *mut Point,
+        destination_rect: *mut Rect,
+        source_rect: *mut Rect,
+        mask_origin: *mut Point,
+        mode: u32,
+    ) -> i32;
+    pub(crate) fn EngStretchBltROP(
+        destination: *mut SurfaceObject,
+        source: *mut SurfaceObject,
+        mask: *mut SurfaceObject,
+        clip: *mut c_void,
+        translation: *mut c_void,
+        color_adjustment: *mut c_void,
+        brush_origin: *mut Point,
+        destination_rect: *mut Rect,
+        source_rect: *mut Rect,
+        mask_origin: *mut Point,
+        mode: u32,
+        brush: *mut c_void,
+        rop: u32,
+    ) -> i32;
+    pub(crate) fn EngAlphaBlend(
+        destination: *mut SurfaceObject,
+        source: *mut SurfaceObject,
+        clip: *mut c_void,
+        translation: *mut c_void,
+        destination_rect: *mut Rect,
+        source_rect: *mut Rect,
+        blend: *mut c_void,
+    ) -> i32;
     pub(crate) fn EngCopyBits(
         destination: *mut SurfaceObject,
         source: *mut SurfaceObject,
