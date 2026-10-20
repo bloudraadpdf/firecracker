@@ -19,3 +19,9 @@ pub mod resources;
 
 #[cfg(all(windows, any(target_arch = "x86", target_arch = "x86_64")))]
 pub mod mode_pool;
+
+#[cfg(all(windows, any(target_arch = "x86", target_arch = "x86_64")))]
+pub mod adapter;
+
+#[cfg(all(windows, any(target_arch = "x86", target_arch = "x86_64")))]
+pub mod miniport;

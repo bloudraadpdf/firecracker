@@ -5,7 +5,7 @@
 //! Miniport PCI discovery and ownership of VideoPort mappings and events.
 
 use core::ffi::c_void;
-use core::ptr::{NonNull, null_mut, read_volatile};
+use core::ptr::{NonNull, null_mut, read_unaligned, read_volatile};
 
 use crate::memory::{ROM_PREFIX_BYTES, RomInfo};
 use crate::videoport::*;
@@ -13,6 +13,34 @@ use crate::videoport::*;
 const INVALID_PARAMETER: u32 = 87;
 const INVALID_DATA: u32 = 13;
 const NOT_ENOUGH_MEMORY: u32 = 8;
+
+#[derive(Debug)]
+struct ResourceClaim {
+    device: NonNull<c_void>,
+    committed: bool,
+}
+
+impl Drop for ResourceClaim {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        // SAFETY: an uncommitted claim is destroyed within HwVidFindAdapter,
+        // after its mappings/events. A zero range count relinquishes the claim.
+        unsafe {
+            VideoPortGetAccessRanges(
+                self.device.as_ptr(),
+                0,
+                null_mut(),
+                0,
+                null_mut(),
+                null_mut(),
+                null_mut(),
+                null_mut(),
+            )
+        };
+    }
+}
 
 #[derive(Debug)]
 pub struct Mapping {
@@ -53,6 +81,9 @@ impl Mapping {
             physical: range.start,
             length: range.length,
         };
+        if mapping.base.as_ptr().addr() & 3 != 0 {
+            return Err(INVALID_DATA);
+        }
         if length < range.length {
             return Err(NOT_ENOUGH_MEMORY);
         }
@@ -197,26 +228,41 @@ pub struct DeviceResources {
     pub vram: Mapping,
     pub rom: Mapping,
     pub io: IoMapping,
+    claim: ResourceClaim,
 }
 
 impl DeviceResources {
+    pub fn commit_discovery(&mut self) {
+        self.claim.committed = true;
+    }
     pub fn device(&self) -> NonNull<c_void> {
         self.ram.device
     }
 
     /// # Safety
-    /// `device` must be a live VideoPort device extension. Call at PASSIVE_LEVEL
-    /// with no concurrent driver access. Retain the extension until these
+    /// `device` must be a live VideoPort device extension and config must point
+    /// to the OS configuration record. Call only within HwVidFindAdapter at
+    /// PASSIVE_LEVEL, with no concurrent driver access. Retain the extension until these
     /// resources are dropped, also at PASSIVE_LEVEL. Stop interrupts, DPCs and
     /// all display-driver use of the mappings and events before dropping them.
+    /// Commit discovery immediately before returning success from FindAdapter;
+    /// otherwise destroy these resources within that callback to release claims.
     pub unsafe fn discover(
         device: NonNull<c_void>,
-        config: &ConfigInfoPrefix,
+        config: *const ConfigInfoPrefix,
     ) -> Result<Self, u32> {
-        if config.length < core::mem::size_of::<ConfigInfoPrefix>() as u32
-            || config.adapter_interface_type != 5
-            || config.bus_interrupt_level == 0 && config.bus_interrupt_vector == 0
-        {
+        if config.is_null() {
+            return Err(INVALID_PARAMETER);
+        }
+        // SAFETY: FindAdapter supplies the configuration record, including Length.
+        let length = unsafe { read_unaligned(config.cast::<u32>()) };
+        if length < core::mem::size_of::<ConfigInfoPrefix>() as u32 {
+            return Err(INVALID_PARAMETER);
+        }
+        // SAFETY: Length covers the stable prefix. Copy it; do not retain a Rust
+        // borrow across OS calls that can update the configuration record.
+        let prefix = unsafe { read_unaligned(config) };
+        if prefix.adapter_interface_type != 5 {
             return Err(INVALID_PARAMETER);
         }
         let mut pci = [0u8; 256];
@@ -247,6 +293,16 @@ impl DeviceResources {
         };
         if status != 0 {
             return Err(status);
+        }
+        let claim = ResourceClaim {
+            device,
+            committed: false,
+        };
+        // SAFETY: the same live configuration prefix is re-read after resource
+        // assignment, matching the original discovery/interrupt-check ordering.
+        let prefix = unsafe { read_unaligned(config) };
+        if prefix.bus_interrupt_level == 0 && prefix.bus_interrupt_vector == 0 {
+            return Err(INVALID_DATA);
         }
         // SAFETY: discovery owns the claimed ranges and the extension stays live.
         let io = unsafe { IoMapping::new(device, ranges[3], revision) }?;
@@ -287,6 +343,7 @@ impl DeviceResources {
             vram,
             rom,
             io,
+            claim,
         })
     }
 }

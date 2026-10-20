@@ -74,3 +74,32 @@ return values or iterators tied to the owner borrow. Destruction drops state
 before freeing the allocation. Construction errors retain the allocation guard
 until all temporary mode-table borrows have ended. All access and destruction
 require PASSIVE_LEVEL, and the device extension must remain live until then.
+
+Uncommitted resource claims must be destroyed within HwVidFindAdapter.
+`commit_discovery` is called only after every fallible setup operation succeeds,
+immediately before publishing the adapter. The claim guard is the final field
+to drop, so mappings and events are released before a failed claim is returned.
+Configuration data is copied from its raw OS pointer; no shared Rust borrow
+spans calls that can update that record.
+
+## Callback state
+
+The extension publishes its initialised Adapter through a release/acquire
+ready flag. ISR and DPC callbacks borrow the Adapter immutably and access only
+resident mappings and event handles. Paged mode storage sits in UnsafeCell and
+is accessed only under VideoPort's documented request serialisation. Callbacks
+must not retain their Rust references after return.
+
+Display requests may alias their input and output buffers. Dispatch copies all
+required input before constructing an output slice. The buffers must not alias
+the request record or adapter state. Interface records are encoded field by
+field, including explicit padding initialisation.
+
+The packed shared RAM slot and surface fields can be only four-byte aligned.
+Treat their raw u64 pointers as packed data; do not form aligned Rust u64
+references. Slot registration writes individual volatile bytes and publishes
+them before I/O. The shared interrupt fields are aligned u32 values.
+
+The SYS entry wrapper, framework teardown behaviour and native fault paths
+remain qualification work. Compile checks of callback source do not prove
+that Windows loads, unloads or correctly dispatches the Rust driver.
