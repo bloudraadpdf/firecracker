@@ -213,10 +213,10 @@ loading and eighteen-mode pixel/input checks pass through the real RFB bridge.
 See the [guest validation records](windows-validation.md#windows-xp-native-qxl-checks)
 for signing conditions, cold boot, stopped-file evidence and full/differential
 restore results. Both current legacy references report no device errors after
-generation-counter servicing. The Mac native viewer additionally passes XP
+generation-counter servicing. The Mac native viewer additionally passes XP/7
 text entry, guest window dragging and pointer targeting after host resize.
-Windows 7 viewer input and a post-restore navigation issue remain open; these
-results do not establish complete Windows support.
+A Windows 7 post-restore navigation issue remains open; these results do not
+establish complete Windows support.
 
 For an installed Windows 10 guest, attach the pinned virtio driver ISO and run
 this in an elevated command prompt, using its actual drive letter:
