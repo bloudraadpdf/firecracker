@@ -78,7 +78,7 @@ The port covers the full XP/7 driver package. The remaining source mapping is:
 | --- | --- |
 | `miniport/qxl.c` | Release-path callbacks and SYS builds ported; native load, lifecycle and request qualification remain. |
 | `display/driver.c` | Cosmetic styles, slot encoding and mode enumeration ported; GDI device lifecycle, escapes and path submission remain. |
-| `display/res.c` | Slot conversion and ring endpoints ported; resource ownership, caches and command payloads remain. |
+| `display/res.c` | Slot conversion, rings and output/resource ownership ported; caches and drawing payloads remain. |
 | `display/surface.c` | Surface allocation, upload, synchronisation and destruction remain. |
 | `display/rop.c` | ROP2/ROP3 selection ported in `src/rop.rs`; drawing submission remains. |
 | `display/brush.c`, `text.c`, `pointer.c` | Brush realisation, text and cursor operations remain. |
@@ -227,3 +227,37 @@ The engine imports kernel functions directly from `win32k.sys`, following
 and [EngDeviceIoControl](https://learn.microsoft.com/en-us/windows/win32/api/winddi/nf-winddi-engdeviceiocontrol).
 It does not use the user-mode `gdi32.dll` exports. Callback registration and
 native mode-enumeration qualification require the complete display DLL.
+
+## Output and resource ownership
+
+`src/display_resources.rs` connects the arenas, address conversion and real QXL
+rings. Main-memory resources store their header and payload in one allocation;
+video-memory resources retain a main-memory header and a video allocation.
+Explicit resource references let a cache and several commands share a payload.
+The final reference releases both allocations.
+
+An output owns up to six resource references, matching the original driver.
+Its builder can be filled, submitted, retried or cancelled. A failed submission
+returns the builder with its references intact. Successful publication consumes
+the builder and registers it as pending before advancing the command ring.
+The ring entry carries the encoded payload address, command type and zero flags.
+
+Release IDs are monotonic opaque integers. Host IDs are looked up among live
+pending outputs; they are never cast to guest pointers. The release consumer
+handles linked completions with a bounded work budget and retains unfinished
+chains for the next call. Unknown IDs, self-links, cycles and replayed old IDs
+cannot free a new allocation at a reused address. Cache references survive
+command completion until explicitly released.
+
+Tokens require explicit release or cancellation. Dropping a token does not
+free memory that the host might still use. Keep the allocation semaphore held
+for pool operations, and act on returned ring-notification flags. Pending
+outputs may be discarded only after the device has stopped all access; a
+timeout does not establish that condition. Normal teardown also releases
+builders and cache references, then requires `Pool::is_empty()` before unmap.
+
+Integration tests use the actual command and release rings to check publication,
+shared resource lifetimes, bounded release chains, cancellation, allocation
+failure, malformed completions and reuse of storage. These memory paths also
+pass Miri. Native PDev lifecycle and drawing callbacks still need to connect
+the pool to the Windows driver.

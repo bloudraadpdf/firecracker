@@ -6,6 +6,7 @@
 pub mod arena;
 pub mod cosmetic;
 pub mod display_modes;
+pub mod display_resources;
 pub mod driver_info;
 pub mod hash;
 pub mod ioctl;
