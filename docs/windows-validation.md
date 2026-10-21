@@ -569,11 +569,12 @@ change these binaries. The table records completed installed-reference checks on
 this runtime separately from unchanged component results and remaining edition
 gates.
 
-Current source uses snapshot format 43, adding a fixed ACPI power button to the
-secondary QXL surfaces, console and two-channel optical state. The format-34
-baseline below does not qualify the GPU or format-43 restore path. The GPU
-candidate above records actual format-37 restore evidence; it does not qualify
-the later optical state format.
+Current source uses snapshot format 44. It combines the format-43 Windows
+platform with the kernel prefault and inherited block-backing state from
+`patch/v1.17.0-dev`. The recorded Windows guest runs retain their original
+runtime hashes and formats. The format-34 baseline below does not qualify the
+GPU or format-43 restore path. The GPU candidate above records actual format-37
+restore evidence; it does not qualify the later optical state format.
 
 Reuse a recorded result when the inputs relevant to that check are unchanged.
 Retain the guest configuration, driver and firmware hashes, VMM capability and

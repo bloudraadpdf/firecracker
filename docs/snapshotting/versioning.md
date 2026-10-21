@@ -197,3 +197,11 @@ interface that enables creating from and saving to the microVM state.
 
 [1]: https://serde.rs
 [2]: https://github.com/SoftbearStudios/bitcode
+
+## Integrated Windows platform
+
+Snapshot format 44 combines the Windows platform with the kernel prefault
+ranges, inherited block-backing requirement and CET validation from
+`patch/v1.17.0-dev`. It accepts neither that branch's format15 files nor the
+Windows branch's earlier format43 files. Use each archive's matching binary;
+there is no implicit conversion.
