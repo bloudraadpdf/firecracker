@@ -92,10 +92,21 @@ impl AtapiState {
     }
 }
 
+/// Fixed IDE channel used for the optical drive identity.
+#[derive(Debug, Clone, Copy)]
+#[cfg(feature = "windows")]
+pub enum Channel {
+    /// Primary IDE channel.
+    Primary,
+    /// Secondary IDE channel.
+    Secondary,
+}
+
 /// One read-only optical master; the slave is absent. DMA is not advertised.
 #[derive(Debug)]
 #[cfg(feature = "windows")]
 pub struct Atapi {
+    channel: Channel,
     media: Option<File>,
     irq: EventFd,
     legacy_irq_enabled: bool,
@@ -105,9 +116,10 @@ pub struct Atapi {
 #[cfg(feature = "windows")]
 impl Atapi {
     /// Creates a drive with optional verified media and a closed tray.
-    pub fn new(media: Option<(File, String)>, irq: EventFd) -> io::Result<Self> {
+    pub fn new(media: Option<(File, String)>, irq: EventFd, channel: Channel) -> io::Result<Self> {
         let (media, media_state) = Self::validate_media(media)?;
         let mut device = Self {
+            channel,
             media,
             irq,
             legacy_irq_enabled: true,
@@ -234,8 +246,9 @@ impl Atapi {
         media: Option<(File, String)>,
         irq: EventFd,
         state: &AtapiState,
+        channel: Channel,
     ) -> io::Result<Self> {
-        let mut device = Self::new(media, irq)?;
+        let mut device = Self::new(media, irq, channel)?;
         let valid_transfer = match &state.transfer {
             Transfer::Idle => true,
             Transfer::Packet { position, .. } => *position < 12,
@@ -433,7 +446,14 @@ impl Atapi {
             bytes[word * 2..word * 2 + 2].copy_from_slice(&value.to_le_bytes());
         }
         for (word, text, length) in [
-            (10, "FC-CDROM", 20),
+            (
+                10,
+                match self.channel {
+                    Channel::Primary => "FC-CDROM",
+                    Channel::Secondary => "FC-CDROM1",
+                },
+                20,
+            ),
             (23, "1.0", 8),
             (27, "Firecracker read-only optical drive", 40),
         ] {
@@ -794,6 +814,7 @@ mod tests {
             Atapi::new(
                 Some((file, "verified-test-media".into())),
                 irq.try_clone().unwrap(),
+                Channel::Primary,
             )
             .unwrap(),
             irq,
@@ -839,7 +860,7 @@ mod tests {
     #[test]
     fn empty_drive_identifies_and_restores_without_inventing_media() {
         let irq = || EventFd::new(libc::EFD_NONBLOCK).unwrap();
-        let mut device = Atapi::new(None, irq()).unwrap();
+        let mut device = Atapi::new(None, irq(), Channel::Primary).unwrap();
         packet(&mut device, &[0x12, 0, 0, 0, 36], 2048);
         let inquiry = receive(&mut device);
         assert_eq!(&inquiry[8..16], b"FC      ");
@@ -853,7 +874,7 @@ mod tests {
         assert_eq!(receive(&mut device)[5], 0);
         let saved: AtapiState =
             bitcode::deserialize(&bitcode::serialize(&device.save()).unwrap()).unwrap();
-        let mut restored = Atapi::restore(None, irq(), &saved).unwrap();
+        let mut restored = Atapi::restore(None, irq(), &saved, Channel::Primary).unwrap();
         packet(&mut restored, &[0x25], 2048);
         assert_eq!(status(&mut restored), READY | ERROR);
         let (loaded, _, _) = fixture();
@@ -863,9 +884,10 @@ mod tests {
                 .map(|file| (file, "verified-test-media".into())),
             irq(),
             &saved,
+            Channel::Primary,
         )
         .unwrap_err();
-        Atapi::restore(None, irq(), &loaded.state).unwrap_err();
+        Atapi::restore(None, irq(), &loaded.state, Channel::Primary).unwrap_err();
     }
 
     #[test]
@@ -887,6 +909,44 @@ mod tests {
         irq.read().unwrap_err();
         device.set_legacy_irq_enabled(true);
         assert_eq!(irq.read().unwrap(), 1);
+    }
+
+    #[test]
+    fn optical_drives_have_distinct_serial_numbers() {
+        let identify = |device: &mut Atapi| {
+            device.write(7, &[0xa1]);
+            let mut bytes = vec![0; 512];
+            for word in bytes.as_chunks_mut::<2>().0 {
+                device.read(0, word);
+            }
+            bytes[20..40].to_vec()
+        };
+        let mut primary = Atapi::new(
+            None,
+            EventFd::new(libc::EFD_NONBLOCK).unwrap(),
+            Channel::Primary,
+        )
+        .unwrap();
+        let mut secondary = Atapi::new(
+            None,
+            EventFd::new(libc::EFD_NONBLOCK).unwrap(),
+            Channel::Secondary,
+        )
+        .unwrap();
+        let serial = identify(&mut secondary);
+        assert_ne!(identify(&mut primary), serial);
+        secondary.write_control(4);
+        secondary.write_control(0);
+        assert_eq!(identify(&mut secondary), serial);
+        let state = bitcode::deserialize(&bitcode::serialize(&secondary.save()).unwrap()).unwrap();
+        let mut restored = Atapi::restore(
+            None,
+            EventFd::new(libc::EFD_NONBLOCK).unwrap(),
+            &state,
+            Channel::Secondary,
+        )
+        .unwrap();
+        assert_eq!(identify(&mut restored), serial);
     }
 
     #[test]
@@ -968,6 +1028,7 @@ mod tests {
             )),
             make_irq(),
             &state,
+            Channel::Primary,
         )
         .unwrap_err();
         let mut restored = Atapi::restore(
@@ -977,6 +1038,7 @@ mod tests {
             )),
             make_irq(),
             &state,
+            Channel::Primary,
         )
         .unwrap();
         let mut tail = Vec::new();
@@ -999,6 +1061,7 @@ mod tests {
             )),
             make_irq(),
             &invalid,
+            Channel::Primary,
         )
         .unwrap_err();
     }
@@ -1117,6 +1180,7 @@ mod tests {
             Some((media, "replacement".into())),
             EventFd::new(libc::EFD_NONBLOCK).unwrap(),
             &saved,
+            Channel::Primary,
         )
         .unwrap();
         packet(&mut restored, &[0x12, 0, 0, 0, 36], 2048);

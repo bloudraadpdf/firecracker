@@ -26,7 +26,7 @@ use vmm_sys_util::eventfd::EventFd;
 use super::pci_mngr::PciDevices;
 use crate::devices::legacy::atapi::AtapiState;
 #[cfg(feature = "windows")]
-use crate::devices::legacy::atapi::{Atapi, COMMAND_PORT, CONTROL_PORT, IRQ};
+use crate::devices::legacy::atapi::{Atapi, COMMAND_PORT, CONTROL_PORT, Channel, IRQ};
 use crate::pci::PciSBDF;
 #[cfg(feature = "windows")]
 use crate::pci::configuration::PciConfiguration;
@@ -244,6 +244,11 @@ impl OpticalDevice {
         let mut cores = [None, None];
         let mut irqs = [None, None];
         for (channel, path) in paths.iter().enumerate() {
+            let identity = if channel == 0 {
+                Channel::Primary
+            } else {
+                Channel::Secondary
+            };
             let media = open_media(*path)?;
             let irq = EventFd::new(libc::EFD_NONBLOCK)?;
             cores[channel] = Some(match state {
@@ -251,8 +256,9 @@ impl OpticalDevice {
                     media,
                     irq.try_clone()?,
                     state.cores[channel].as_ref().unwrap(),
+                    identity,
                 )?,
-                None => Atapi::new(media, irq.try_clone()?)?,
+                None => Atapi::new(media, irq.try_clone()?, identity)?,
             });
             irqs[channel] = Some(irq);
         }

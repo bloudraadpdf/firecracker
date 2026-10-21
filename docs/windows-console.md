@@ -376,6 +376,11 @@ be unique, nonempty and contain only letters, digits or underscores. Omit `path_
 without a disc. An empty list attaches no controller. The earlier experimental
 `optical_image_path` field is rejected.
 
+The primary drive reports ATA serial `FC-CDROM`; the secondary reports
+`FC-CDROM1`. These identities follow the fixed channels across media changes,
+resets and snapshot restore. They must differ so Windows can enumerate both
+drives independently.
+
 Both channels start in PCI native mode. BAR0/BAR1 address the primary
 command/control registers and BAR2/BAR3 address the secondary. Native interrupts
 share PCI INTA on GSI16; acknowledging one drive does not clear the other's
