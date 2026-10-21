@@ -209,12 +209,14 @@ The Pro profile retains the existing trust policy and 2023 boot-file recipe.
 When an answer file is supplied, only this profile selects the original
 `DVD_EX/EFI/en-US/efisys_noprompt_EX.bin` from boot.wim index 1, copied to the
 existing `efi/microsoft/boot/efisys_ex.bin` catalogue target. The alternate
-loader's boot behaviour, current firmware and Setup acceptance still need
-qualification. Graphical Pro and the other five profiles retain their previous
-boot-image selection. Microsoft's reference script selects `efisys_EX.bin`, not
-the no-prompt alternative. Pro installation and current-format runtime checks
-remain unqualified. The source install.wim reference-count warning and
-boot-chain limits are recorded in the
+loader is accepted by the tested secure firmware, and Setup completes the
+[fresh Pro installation](../../docs/windows-validation.md#standard-windows-11-pro-installation).
+Graphical Pro and the other five profiles retain their previous boot-image
+selection. Microsoft's reference script selects `efisys_EX.bin`, not the
+no-prompt alternative. The Pro client answer file still shows the product-key
+page; select **I don't have a product key** to continue without activation. The
+source install.wim reference-count warning and boot-chain limits are recorded in
+the
 [secure media procedure](../../resources/firmware/cloudhv-secureboot/README.md#current-windows-installation-media).
 
 The client profile creates the local `Firecracker` account in Administrators.

@@ -133,12 +133,14 @@ is reached, or that the complete boot chain passes current firmware policy. Keep
 PK/KEK/db/dbx unchanged. The EX CD loader's certificate expired in May 2026;
 time-disabled chain checks do not qualify firmware or timestamp policy.
 
-Pro preparation and installation remain experimental. The original install.wim
-listing reported "Some files have incorrect reference count". Retained XML and
-small boot-file reads do not qualify install-image integrity or resolve that
-warning. A successful byte-exact media rebuild is not an installation result.
-Source-image integrity, fresh Secure Boot/TPM state, actual installed boot files
-and drivers, and current-format runtime checks remain separate acceptance gates.
+The pinned Pro image at index6 now completes a
+[fresh installation and cold boot](../../../docs/windows-validation.md#standard-windows-11-pro-installation)
+with fresh variable and TPM stores, Secure Boot enabled and installed signed
+drivers. No trust-policy or time-policy change was needed. The original
+install.wim listing reported "Some files have incorrect reference count";
+successful installation of index6 does not establish integrity of every image in
+that archive. Support remains experimental. Earlier isolated boot-file checks
+are not independent current-time or timestamp-policy qualification.
 
 The reference procedure is pinned to `scripts/windows/Make2023BootableMedia.ps1`
 at Microsoft secureboot_objects revision

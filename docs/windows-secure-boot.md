@@ -7,9 +7,13 @@ cold/full/differential restore and both egress paths on the recorded build. The
 separates those results from current qualification. Support is experimental. The
 prior IoT Enterprise LTSC result does not qualify these editions. Do not bypass
 Setup's hardware checks. Current Pro and Enterprise Evaluation observations use
-26300.9457/26H2 x64 installed references. Pro passes the current secure input and
-TAP/CONNECT runtime checks. Enterprise input and both secure routes also pass.
-Neither result is a new installation pass or a pass for every edition.
+26300.9457/26H2 x64 installed references. Pro passes the current secure input
+and TAP/CONNECT runtime checks. Enterprise input and both secure routes also
+pass. The separate
+[fresh Pro installation](windows-validation.md#standard-windows-11-pro-installation)
+also passes Setup, installed-driver persistence, Secure Boot and TPM checks on
+runtime source `3dbb23f2c`. Enterprise's fresh installation remains the recorded
+historical result. These checks do not cover every edition.
 
 The opt-in platform adds two separate services:
 
@@ -30,6 +34,11 @@ firmware. The helper processes are started by the launcher, before Firecracker
 connects. They receive no guest memory descriptor. Use a private directory and
 one helper instance per VM. There is no network listener and no host-device
 passthrough.
+
+For a minimal Windows guest that does not consume VMClock, set `vmclock` to
+`false` in the existing machine configuration. This removes that device while
+retaining VM Generation ID; see the
+[console guide](windows-console.md#state-and-platform-limits).
 
 ## Build capability
 
@@ -129,20 +138,20 @@ and both restore types. Its installation used Microsoft's CA2023 boot files with
 the recorded revocation database and a signed viostor driver, without
 hardware-check bypasses or forced unsigned drivers. Public TPM baselines also
 matched across the cold boot between TAP and CONNECT runs. These results do not
-qualify the [current snapshot format](windows-console.md#state-and-platform-limits).
+qualify the
+[current snapshot format](windows-console.md#state-and-platform-limits).
 
 Current Pro and Enterprise observations also retain Secure Boot and a ready
 owned TPM. Pro reached 100% encryption; Enterprise was recorded at 80%. Both
-volumes were unlocked with protection off. The clear-key read-only verifier
-does not qualify enabled BitLocker protection, TPM-sealed recovery or attestation.
+volumes were unlocked with protection off. The clear-key read-only verifier does
+not qualify enabled BitLocker protection, TPM-sealed recovery or attestation.
 
 In the historical run, BitLocker automatically encrypted the guest volume. The
 recorded volume is unlocked, protection is off and no key protectors are
-configured. Read-only
-validation uses its existing clear key and matching TPM state. This does not
-qualify TPM-sealed recovery or attestation. The desktop's evaluation status and
-legacy registry branding are recorded in the validation matrix; no licence or
-activation changes were made.
+configured. Read-only validation uses its existing clear key and matching TPM
+state. This does not qualify TPM-sealed recovery or attestation. The desktop's
+evaluation status and legacy registry branding are recorded in the validation
+matrix; no licence or activation changes were made.
 
 Host and firmware regressions cover real swtpm startup, PCR extension,
 export/import; bounded variable frames, deadlines and DMA; RESET isolation;

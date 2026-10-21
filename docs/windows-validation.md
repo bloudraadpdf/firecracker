@@ -5,6 +5,40 @@ tested guest, installed drivers, firmware, VMM and route. Use the
 [AMD64 guide](windows.md), [console guide](windows-console.md) and
 [secure platform guide](windows-secure-boot.md) to prepare a test.
 
+## Standard Windows 11 Pro installation
+
+On 21 October 2026, the pinned AMD64 Pro media completed a fresh installation
+with runtime source `3dbb23f2c` (snapshot format43). The tested VMM SHA-256 is
+`b0d090ccfb0ecc4eb37f993efe82509b6b1f4228f6ad6d3a3b234ab828968cd4`. The
+[media procedure](../resources/firmware/cloudhv-secureboot/README.md#current-windows-installation-media)
+identifies the original ISO and its Professional image at index6.
+
+The VM used two vCPUs, 4096 MiB, modern PCI transport, virtio GPU and the secure
+CloudHv firmware. Its 64 GiB sparse disk was initially empty; its variable store
+was newly provisioned at generation0 and its TPM directory was empty. Microsoft
+PK/KEK/db/dbx inputs and firmware time policy were unchanged. Setup accepted the
+hardware without a bypass. The generated client answer file required one
+selection of **I don't have a product key**. No activation was performed.
+
+Setup reset twice, each time returning exit3. Installation continued from the
+disk after the installation ISO was removed. The generated local account reached
+the desktop. Installing the pinned virtio-win 0.1.302 Windows11 AMD64 display
+package returned success and changed the display to 1024x768. Normal shutdown
+returned exit0; a cold boot retained the same disk, system UUID and security
+stores. That cold profile omitted VMClock with `vmclock: false`.
+
+The stopped guest's report identifies Professional build26300, Secure Boot
+enabled, and TPM present, ready, enabled, activated and owned. `viostor` and
+`VioGpuDod` are running; all 50 present PnP devices have problem code0.
+Installed viostor, NetKVM and viogpudo packages report version100.103.104.30200.
+Both the fallback and Microsoft EFI boot managers have SHA-256
+`25d8869e3c79083ae62c698a9db9030748e3267bd53593357447f3f72761d1f2`. The final
+normal shutdown returned exit0. Report extraction used a read-only partition
+loop, left disk metadata unchanged and detached the loop.
+
+Enterprise's earlier fresh installation and later runtime results remain
+separate evidence; this is not a new Enterprise installation result.
+
 ## XP and Windows 7 native graphics work
 
 The pinned virtio-win 0.1.302 ISO includes existing QXL packages for XP x86
@@ -17,65 +51,64 @@ Native XP/7 graphics through those existing packages is incomplete. The first
 Rust component decodes packed commands, primary surfaces, signed rectangles,
 ring counters and generation-tagged memory-slot pointers. Shared memory now
 provides a packed ROM with 18 bounded 32bpp modes, command/cursor/release rings,
-atomic control fields, and RAM that shares the existing boot framebuffer.
-The transport validates registered RAM/VRAM slots, rejects stale generations,
-and bounds each command/cursor dispatch to 32 entries. A full release ring
-stops execution before it can lose an acknowledgement. Commands are released
-only after their handler succeeds. Each dispatch publishes one linked release
-chain. If a later command fails, its successful prefix is still released and
-the failed command remains pending. Duplicate addresses cannot form a chain
-cycle. Boundary, reset and transport tests check
-those components. Primary-surface checks cover signed row strides, exact frame
-pixels, clipped fills, overlap-safe copies and untouched row padding. Raw bitmap
-decoding covers indexed bit/nibble order, RGB555, RGB24, RGB32, alpha, palettes
-and top-down/bottom-up rows. Direct and chained storage use checked memory-slot
-pointers, with a 32 MiB data limit and at most 4,096 chunks. Tests reject invalid
-dimensions, strides, palette indices, backlinks, truncated chains and cycles.
-Surface raster operations cover source/brush selection, input and result
-inversions, copy, OR, AND, XOR, blackness, whiteness and destination inversion.
-Bitmap copies support source crops, clipped destinations and nearest-neighbour
-scaling while preserving row padding. Tests cover descriptor validity and bit
-truth tables, signed destination strides and rejection before destination writes.
-Prepared modern and compatibility drawing commands render fills, patterned
-brushes, bitmap and screen copies, blackness, whiteness and inversion. Clip
-rectangles form a union; overlapping clips apply the operation once per pixel.
-One-bit masks support origins and inversion without a colour palette. Screen
-copies capture the source before writing, including alpha bits. Command-ring
-checks cover failure without writes or acknowledgement and successful retry.
-Image commands also cover opaque source/brush combinations, raster blending,
-all 256 ROP3 operations, true-colour transparency and premultiplied alpha with
-constant opacity. Alpha commands decode both layouts and honour destination
-alpha. Unused source and brush fields are not dereferenced. Scaling supports
-nearest pixels and bilinear interpolation with source-edge clamping.
-Text commands decode positioned A1, A4 and A8 glyphs, top-down and bottom-up
-rows, foreground raster operations and optional backgrounds. Overlapping glyphs
-form one coverage mask before clipping and painting. Counts, packed data and
-coverage allocations are bounded; malformed later glyphs cannot leave a partly
-painted background. The existing driver's A4 coverage uses 16-step A8 levels.
-The cosmetic-line rasteriser preserves Q28.4 endpoints, clips work to the
-surface dimensions and uses wide integer arithmetic for coordinate extremes.
-Its pixel output matches 778 captured native GDI cases, including fractional
-starts, short segments, reversed directions and endpoint ties. The reference
-and capture procedure are in [the QXL test data](../tests/data/qxl/README.md).
-Stroke commands now decode continued and closed cosmetic paths in both drawing
-layouts. Styles support fixed-point dash lengths, odd-length cycles, initial
-gaps, explicit style resets and phase progression through clipped pixels.
-Stroke rendering uses on/off dashes, as in the
+atomic control fields, and RAM that shares the existing boot framebuffer. The
+transport validates registered RAM/VRAM slots, rejects stale generations, and
+bounds each command/cursor dispatch to 32 entries. A full release ring stops
+execution before it can lose an acknowledgement. Commands are released only
+after their handler succeeds. Each dispatch publishes one linked release chain.
+If a later command fails, its successful prefix is still released and the failed
+command remains pending. Duplicate addresses cannot form a chain cycle.
+Boundary, reset and transport tests check those components. Primary-surface
+checks cover signed row strides, exact frame pixels, clipped fills, overlap-safe
+copies and untouched row padding. Raw bitmap decoding covers indexed bit/nibble
+order, RGB555, RGB24, RGB32, alpha, palettes and top-down/bottom-up rows. Direct
+and chained storage use checked memory-slot pointers, with a 32 MiB data limit
+and at most 4,096 chunks. Tests reject invalid dimensions, strides, palette
+indices, backlinks, truncated chains and cycles. Surface raster operations cover
+source/brush selection, input and result inversions, copy, OR, AND, XOR,
+blackness, whiteness and destination inversion. Bitmap copies support source
+crops, clipped destinations and nearest-neighbour scaling while preserving row
+padding. Tests cover descriptor validity and bit truth tables, signed
+destination strides and rejection before destination writes. Prepared modern and
+compatibility drawing commands render fills, patterned brushes, bitmap and
+screen copies, blackness, whiteness and inversion. Clip rectangles form a union;
+overlapping clips apply the operation once per pixel. One-bit masks support
+origins and inversion without a colour palette. Screen copies capture the source
+before writing, including alpha bits. Command-ring checks cover failure without
+writes or acknowledgement and successful retry. Image commands also cover opaque
+source/brush combinations, raster blending, all 256 ROP3 operations, true-colour
+transparency and premultiplied alpha with constant opacity. Alpha commands
+decode both layouts and honour destination alpha. Unused source and brush fields
+are not dereferenced. Scaling supports nearest pixels and bilinear interpolation
+with source-edge clamping. Text commands decode positioned A1, A4 and A8 glyphs,
+top-down and bottom-up rows, foreground raster operations and optional
+backgrounds. Overlapping glyphs form one coverage mask before clipping and
+painting. Counts, packed data and coverage allocations are bounded; malformed
+later glyphs cannot leave a partly painted background. The existing driver's A4
+coverage uses 16-step A8 levels. The cosmetic-line rasteriser preserves Q28.4
+endpoints, clips work to the surface dimensions and uses wide integer arithmetic
+for coordinate extremes. Its pixel output matches 778 captured native GDI cases,
+including fractional starts, short segments, reversed directions and endpoint
+ties. The reference and capture procedure are in
+[the QXL test data](../tests/data/qxl/README.md). Stroke commands now decode
+continued and closed cosmetic paths in both drawing layouts. Styles support
+fixed-point dash lengths, odd-length cycles, initial gaps, explicit style resets
+and phase progression through clipped pixels. Stroke rendering uses on/off
+dashes, as in the
 [QXL backend](https://github.com/freedesktop-unofficial-mirror/spice__spice-common/blob/c6e6dacb30b8130a069d522054718d757eefa0db/common/canvas_base.c#L2924).
 Only foreground spans paint; gaps remain unchanged and `back_mode` is unused.
 Native Windows drivers emit a separate complementary stroke with its own brush
 for an opaque background. A zero foreground descriptor leaves the destination
 unchanged. Unused style and background fields are not read. Prepared stroke
-pixels use the common clip union and retain
-operation order at crossings. Limits are 1 MiB of packed path data, 65,536
-points, 100 style entries, 16,777,216 raster steps and 1,048,576 prepared pixels.
-Checks cover continuation, closure, clipping, reversed dash progression, chunk
-boundaries, malformed records and rejection before writes. The existing Windows
-driver does not advertise hardware Bezier or geometric-wide-line support; GDI
-decomposes those requests before submission. Such packed path commands remain
-unsupported. The native stroke comparison below retains an unresolved driver
-style-density mismatch.
-Image commands can reference primary surface 0. They capture its pixels before
+pixels use the common clip union and retain operation order at crossings. Limits
+are 1 MiB of packed path data, 65,536 points, 100 style entries, 16,777,216
+raster steps and 1,048,576 prepared pixels. Checks cover continuation, closure,
+clipping, reversed dash progression, chunk boundaries, malformed records and
+rejection before writes. The existing Windows driver does not advertise hardware
+Bezier or geometric-wide-line support; GDI decomposes those requests before
+submission. Such packed path commands remain unsupported. The native stroke
+comparison below retains an unresolved driver style-density mismatch. Image
+commands can reference primary surface 0. They capture its pixels before
 destination writes, so overlapping and scaled source reads use the original
 frame. Surface descriptors use their 22-byte layout and can have zero dimension
 fields, as emitted by the Windows driver. Alpha commands use source-surface
@@ -84,40 +117,41 @@ surface IDs and source crops fail before destination writes. Offscreen surfaces,
 composite and self-bitmap commands remain unsupported.
 
 The integration targets revision 2 with one primary surface and compression
-disabled. The [pinned Windows driver source](https://github.com/freedesktop-unofficial-mirror/spice__win32__qxl/tree/24cbb39f18538672f0a6d6788d5643ad272ac13c/xddm/display)
-uses synchronous I/O for revision 2
-and raw bitmap fallback when the ROM's compression level is zero, including for
-alpha images. It initialises `self_bitmap` to zero and has no composite command
-producer. Native guest checks must verify those paths
-with the signed packages.
+disabled. The
+[pinned Windows driver source](https://github.com/freedesktop-unofficial-mirror/spice__win32__qxl/tree/24cbb39f18538672f0a6d6788d5643ad272ac13c/xddm/display)
+uses synchronous I/O for revision 2 and raw bitmap fallback when the ROM's
+compression level is zero, including for alpha images. It initialises
+`self_bitmap` to zero and has no composite command producer. Native guest checks
+must verify those paths with the signed packages.
 
 Cursor commands decode set, move, hide and trail parameters without reading
 unused union fields or guest scratch space. Shape decoding covers alpha,
-monochrome and 4/8/16/24/32-bit colour cursors, palettes and MSB-first masks.
-It reuses bitmap pixel decoding and premultiplied alpha blending. Cursor drawing
+monochrome and 4/8/16/24/32-bit colour cursors, palettes and MSB-first masks. It
+reuses bitmap pixel decoding and premultiplied alpha blending. Cursor drawing
 clips the hotspot at display edges and preserves monochrome inversion and the
 colour-mask rules. Shapes are limited to 256 by 256 pixels. The zero-sized
 transparent cursor does not read unused chunk links.
 
 The controller connects command execution, slot generation publication, primary
-surface creation/destruction, attachment and reset. It publishes update IDs,
-the millisecond clock and masked interrupt state. Polling reports pending work
-after a dispatch limit or release-ring backpressure. Each synchronous dispatch
+surface creation/destruction, attachment and reset. It publishes update IDs, the
+millisecond clock and masked interrupt state. Polling reports pending work after
+a dispatch limit or release-ring backpressure. Each synchronous dispatch
 captures its submission count and completes that work without waiting for later
-submissions. A full release ring does not prevent those commands from completing:
-their acknowledgements wait in a bounded queue until the guest consumes releases.
-At most 4,096 acknowledgements can wait there; reaching that limit stops further
-execution with `Busy`. Slot removal also waits until release links are published.
-The PCI timer polls pending acknowledgements even when command rings are empty.
+submissions. A full release ring does not prevent those commands from
+completing: their acknowledgements wait in a bounded queue until the guest
+consumes releases. At most 4,096 acknowledgements can wait there; reaching that
+limit stops further execution with `Busy`. Slot removal also waits until release
+links are published. The PCI timer polls pending acknowledgements even when
+command rings are empty.
 
 Cursor state applies set, move and hide commands, including implicit visibility
 on movement. Trails sample positions at millisecond intervals and expire while
 stationary. Repeated positions draw once, and cursor painting leaves guest
 display memory unchanged. Trails are bounded to 64 samples, with a minimum
 interval of one millisecond. Controller checks cover ordering, pressure and
-retry, slot invalidation, signed rows, padding, interrupt masks and cursor trails.
-PCI, console and snapshot integration is connected. Native guest validation
-remains incomplete.
+retry, slot invalidation, signed rows, padding, interrupt masks and cursor
+trails. PCI, console and snapshot integration is connected. Native guest
+validation remains incomplete.
 
 The PCI memory layer maps RAM, VRAM and the read-only protocol ROM through the
 existing KVM slot owner. Boot VGA and QXL share the first 16 MiB of RAM; they do
@@ -128,31 +162,31 @@ conflicting KVM mapping, cleanup after disable/drop, live relocation and failed
 relocation without partial metadata changes. A real vCPU can read the protected
 ROM, and a guest write exits as MMIO without changing its bytes. The VGA option
 ROM loader and BAR handling are shared with the existing display implementation.
-PCI identity, bus registration, I/O, shared INTx and event polling are connected.
-The `qxl` console profile routes native frames and cursor updates to the same
-socket used by VNC and the native viewer. Format41 saves and validates the
-adapter, shared boot VGA, private banks, queues, deferred releases and cursor.
-The layout follows
-the published [QXL device ABI](https://sources.debian.org/src/spice-protocol/0.12.14-1/spice/qxl_dev.h/).
-It exposes one revision-two QXL PCI device. Component checks do not establish guest
-driver loading or rendering. Graphics qualification across all agreed guests
-must finish before work returns to unrelated platform features.
+PCI identity, bus registration, I/O, shared INTx and event polling are
+connected. The `qxl` console profile routes native frames and cursor updates to
+the same socket used by VNC and the native viewer. Format41 saves and validates
+the adapter, shared boot VGA, private banks, queues, deferred releases and
+cursor. The layout follows the published
+[QXL device ABI](https://sources.debian.org/src/spice-protocol/0.12.14-1/spice/qxl_dev.h/).
+It exposes one revision-two QXL PCI device. Component checks do not establish
+guest driver loading or rendering. Graphics qualification across all agreed
+guests must finish before work returns to unrelated platform features.
 
 ## Native PC power and reset checks
 
 The format43 AMD64 Windows-feature binary `7522cc8d` passes the new
-`SendPowerButton` action on the existing XP SP3 x86, Windows 7 SP1 x64,
-Windows 10 LTSC x64 and Windows 11 IoT LTSC x64 references. Each request
-returns HTTP204, followed by guest ACPI S5 and actual process exit0. The
-request does not force an exit or depend on keyboard input.
+`SendPowerButton` action on the existing XP SP3 x86, Windows 7 SP1 x64, Windows
+10 LTSC x64 and Windows 11 IoT LTSC x64 references. Each request returns
+HTTP204, followed by guest ACPI S5 and actual process exit0. The request does
+not force an exit or depend on keyboard input.
 
-An XP `shutdown /r /t 0` issues ACPI and i8042 reset requests and returns
-actual process exit3. A subsequent cold start and power-button shutdown
-return0. Unit checks cover both reset paths, pending button restore, shared
-SCI resampling, acknowledgement, enable masking and FADT declaration. The
-API parser covers supported and unsupported builds and preboot rejection.
-Strict Windows-feature and default-build Clippy pass. The final x86_64
-binary is unchanged by narrowing the reset accessor to its AMD64 caller.
+An XP `shutdown /r /t 0` issues ACPI and i8042 reset requests and returns actual
+process exit3. A subsequent cold start and power-button shutdown return0. Unit
+checks cover both reset paths, pending button restore, shared SCI resampling,
+acknowledgement, enable masking and FADT declaration. The API parser covers
+supported and unsupported builds and preboot rejection. Strict Windows-feature
+and default-build Clippy pass. The final x86_64 binary is unchanged by narrowing
+the reset accessor to its AMD64 caller.
 
 No graphics or network matrix was repeated. These lifecycle results do not
 constitute Toets backend integration or installer acceptance. All test guests
@@ -163,50 +197,51 @@ are shut down; their disks are closed. See the
 
 The format42 host `cb05dd01` advertises QUIC and 1,024 surfaces. Separate
 unsigned XP x86 and Windows 7 x64 packages enable `SurfacesEnabled` through
-normal INF installation, followed by shutdown and cold boot. Windows 7 uses
-the one-boot F8 unsigned-driver option; no persistent signature-policy change
-or certificate is installed. Both installed driver pairs are read back from
-the stopped disks and match their frozen packages.
+normal INF installation, followed by shutdown and cold boot. Windows 7 uses the
+one-boot F8 unsigned-driver option; no persistent signature-policy change or
+certificate is installed. Both installed driver pairs are read back from the
+stopped disks and match their frozen packages.
 
-| Native check | XP SP3 x86 | Windows 7 SP1 x64 |
-| --- | --- | --- |
-| Compressed image decoding | 67 measured host decoder calls | 45 measured host decoder calls |
-| Visible 122,880-pixel GDI comparison | All BGR pixels exact | Only the same five recorded constant-alpha rounding differences |
-| Full snapshot and restore while DDB is live | Restored canvas exact; all 768 retained bitmap pixels exact | Restored canvas exact; all 768 retained bitmap pixels exact |
-| Completion | Probe exit0; clean S5 and VMM exit0 | Probe exit0; clean S5 and VMM exit0 |
+| Native check                                | XP SP3 x86                                                  | Windows 7 SP1 x64                                               |
+| ------------------------------------------- | ----------------------------------------------------------- | --------------------------------------------------------------- |
+| Compressed image decoding                   | 67 measured host decoder calls                              | 45 measured host decoder calls                                  |
+| Visible 122,880-pixel GDI comparison        | All BGR pixels exact                                        | Only the same five recorded constant-alpha rounding differences |
+| Full snapshot and restore while DDB is live | Restored canvas exact; all 768 retained bitmap pixels exact | Restored canvas exact; all 768 retained bitmap pixels exact     |
+| Completion                                  | Probe exit0; clean S5 and VMM exit0                         | Probe exit0; clean S5 and VMM exit0                             |
 
-The matching snapshot editor confirms live secondary descriptors, including
-the probe's 32-by-24 device bitmap. The drawing probe retains that bitmap
-through READY, full snapshot, VMM exit and restore before reading its pixels.
-The temporary host decoder probes are removed after measurement. This extends
-the earlier single-surface, raw-image evidence; it does not repeat or replace
-the mode, input or network matrices. A Windows 7 launch that could not write
-its root-directory log is retained as a failed test setup, not a feature pass.
+The matching snapshot editor confirms live secondary descriptors, including the
+probe's 32-by-24 device bitmap. The drawing probe retains that bitmap through
+READY, full snapshot, VMM exit and restore before reading its pixels. The
+temporary host decoder probes are removed after measurement. This extends the
+earlier single-surface, raw-image evidence; it does not repeat or replace the
+mode, input or network matrices. A Windows 7 launch that could not write its
+root-directory log is retained as a failed test setup, not a feature pass.
 
-The host codec is independent Apache-2.0 Rust code with no new dependency.
-Tests compare all pixels in 25 external reference streams and reject malformed
-QUIC headers, symbols, runs and chunks. Surface tests cover source/destination
+The host codec is independent Apache-2.0 Rust code with no new dependency. Tests
+compare all pixels in 25 external reference streams and reject malformed QUIC
+headers, symbols, runs and chunks. Surface tests cover source/destination
 aliasing, pattern sources, invalid creates, DWORD destroy ID1,023, reset, slot
 removal and malformed restored descriptors. Native tests and strict host and
-both-driver Clippy pass. Snapshot format42 requires matching binaries; it is
-not an upgrade decoder for format41.
+both-driver Clippy pass. Snapshot format42 requires matching binaries; it is not
+an upgrade decoder for format41.
 
 ## Windows XP native QXL checks
 
 Runtime source `9c581a595` passes an initial native AMD64 check with XP SP3 x86
 on a private disk copy. The original reference is unchanged. This GNU
 development run used `--no-seccomp`, the QXL SeaBIOS profile and the pinned
-virtio-win 0.1.302 ISO's `qxl/xp/x86` package. Normal Device Manager installation
-required consent to XP's Windows Logo warning; this does not establish WHQL
-trust. After cold boot, WMI reports Code 0, `qxldd.dll` and version 5.1.0.10018.
+virtio-win 0.1.302 ISO's `qxl/xp/x86` package. Normal Device Manager
+installation required consent to XP's Windows Logo warning; this does not
+establish WHQL trust. After cold boot, WMI reports Code 0, `qxldd.dll` and
+version 5.1.0.10018.
 
 Opening Display Properties first exposed a rejected 32 by 4256 pixel icon
 bitmap. The corrected decoder bounds bitmap storage independently of display
 dimensions. Regression checks cover that bitmap shape and wide-image
 interpolation arithmetic. In the guest, Display Properties then rendered,
 applied 2560 by 1440 at 32bpp, reverted on confirmation timeout and retained the
-mode after Keep. WMI and the console frame independently report that geometry.
-A pointer click reached the OK button at the expected position. Win+R and text
+mode after Keep. WMI and the console frame independently report that geometry. A
+pointer click reached the OK button at the expected position. Win+R and text
 input saved a Notepad marker whose bytes were read back through the serial port.
 These are direct console checks, not VNC or native viewer qualification.
 
@@ -214,27 +249,27 @@ The eighteen-mode probe from `d93046f00` subsequently passes on the same VMM
 through the real RFB bridge. The selected 2560 by 1440 mode survives cold boot.
 Every mode passes an exact full-frame RGB comparison, five ordered pointer
 targets and all 95 printable ASCII characters with Caps Lock enabled. The probe
-restores 2560 by 1440 with no cleanup error. After normal shutdown, read-only NTFS
-inspection confirms all eighteen saved files contain exactly bytes 32 through
-126. The inspection detaches its owned loop device and the disk-closed check
-passes. No failed case was rerun in this matrix.
+restores 2560 by 1440 with no cleanup error. After normal shutdown, read-only
+NTFS inspection confirms all eighteen saved files contain exactly bytes 32
+through 126. The inspection detaches its owned loop device and the disk-closed
+check passes. No failed case was rerun in this matrix.
 
-The same runtime passes full and differential snapshot restore with format 41
-at 2560 by 1440. Each load starts paused and preserves every framebuffer byte.
-The differential load also retains Caps Lock state. After each resume, pointer
-input focuses Notepad and keyboard input appends and saves a distinct line.
-After normal shutdown, read-only NTFS inspection confirms the exact 59-byte
-three-line file. The differential memory is rebased onto a copy of the full
-memory with the matching snapshot editor. Each snapshot has its own stopped
-disk copy; the full snapshot's memory, state and disk hashes remain unchanged.
-These runs use the default restore notification and clock policies.
+The same runtime passes full and differential snapshot restore with format 41 at
+2560 by 1440. Each load starts paused and preserves every framebuffer byte. The
+differential load also retains Caps Lock state. After each resume, pointer input
+focuses Notepad and keyboard input appends and saves a distinct line. After
+normal shutdown, read-only NTFS inspection confirms the exact 59-byte three-line
+file. The differential memory is rebased onto a copy of the full memory with the
+matching snapshot editor. Each snapshot has its own stopped disk copy; the full
+snapshot's memory, state and disk hashes remain unchanged. These runs use the
+default restore notification and clock policies.
 
 The macOS native viewer also exercises this QXL guest through the standard RFB
-bridge and an SSH loopback forward. At 2560 by 1440, Command+R opens Run;
-Home and Shift+End replace its command. Notepad receives printable keys,
-Shift punctuation and Enter. A guest window drag reaches its target. After a
-host window resize changes the letterbox, a double-click on the guest title
-bar maximises Notepad. Following normal Windows shutdown and VMM exit zero,
+bridge and an SSH loopback forward. At 2560 by 1440, Command+R opens Run; Home
+and Shift+End replace its command. Notepad receives printable keys, Shift
+punctuation and Enter. A guest window drag reaches its target. After a host
+window resize changes the letterbox, a double-click on the guest title bar
+maximises Notepad. Following normal Windows shutdown and VMM exit zero,
 read-only NTFS inspection confirms the saved file contains exactly
 `viewer xp\r\n!A`. This checks the Mac frontend at two window sizes; it does not
 qualify native Windows or Wayland frontends, fullscreen or other keyboard
@@ -245,14 +280,15 @@ device: `ACPI\VMGENCTR`, Code 28. The original Microsoft KMDF 1.9 standalone
 installer completes with exit zero and registers the framework. Normal driver
 installation then binds the original Microsoft x86 generation-counter package
 with exit zero. After shutdown and cold boot, the selected signed `oem2.inf`
-driver is version 6.3.9600.17831, `gencounter` and `Wdf01000` run, and the device
-inventory reports no errors. Two current Rust polling queries return the same
-nonzero ID and exit zero. Read-only stopped-disk collection confirms that the
-selected INF, installed SYS and staged INF/SYS/CAT match the original Microsoft
-package. The framework and loader files are version 1.9.7600.16385. This uses
-the [original framework installer](../tools/windows/generation/README.md#xp-driver-prerequisites)
-and no signing-policy change.
-These checks do not establish complete XP or Windows 7 graphics support.
+driver is version 6.3.9600.17831, `gencounter` and `Wdf01000` run, and the
+device inventory reports no errors. Two current Rust polling queries return the
+same nonzero ID and exit zero. Read-only stopped-disk collection confirms that
+the selected INF, installed SYS and staged INF/SYS/CAT match the original
+Microsoft package. The framework and loader files are version 1.9.7600.16385.
+This uses the
+[original framework installer](../tools/windows/generation/README.md#xp-driver-prerequisites)
+and no signing-policy change. These checks do not establish complete XP or
+Windows 7 graphics support.
 
 ## Windows 7 native QXL checks
 
@@ -263,24 +299,26 @@ normal UAC consent and no signature-policy change. A clean shutdown and cold
 boot follow installation. WMI then reports the Red Hat QXL GPU with Code 0.
 
 WMI leaves the active driver and geometry fields empty on this reference.
-Microsoft documents [inaccurate WMI properties for non-WDDM adapters](https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-videocontroller).
+Microsoft documents
+[inaccurate WMI properties for non-WDDM adapters](https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-videocontroller).
 Separate evidence confirms the native primary surface and processed draw/cursor
 queues. The Screen Resolution UI names the QXL adapter, accepts pointer dragging
-to 2560 by 1440 and retains that mode after Keep. The console frame independently
-reports 2560 by 1440. No QXL protocol error was logged during these checks.
+to 2560 by 1440 and retains that mode after Keep. The console frame
+independently reports 2560 by 1440. No QXL protocol error was logged during
+these checks.
 
 The same eighteen-mode probe subsequently passes in one run through the real RFB
-bridge. The selected 2560 by 1440 mode survives cold boot. Every mode's full-frame
-RGB bytes match both the oracle and the corresponding XP result. All 90 ordered
-pointer targets and 1,710 printable ASCII characters pass with Caps Lock enabled.
-The original 2560 by 1440 mode is restored with no cleanup error. After normal
-shutdown, read-only NTFS inspection confirms all eighteen saved files contain
-exactly bytes 32 through 126. Its owned loop device is detached and the
-disk-closed check passes.
+bridge. The selected 2560 by 1440 mode survives cold boot. Every mode's
+full-frame RGB bytes match both the oracle and the corresponding XP result. All
+90 ordered pointer targets and 1,710 printable ASCII characters pass with Caps
+Lock enabled. The original 2560 by 1440 mode is restored with no cleanup error.
+After normal shutdown, read-only NTFS inspection confirms all eighteen saved
+files contain exactly bytes 32 through 126. Its owned loop device is detached
+and the disk-closed check passes.
 
 Format 41 full and differential loads each preserve every paused framebuffer
-byte at 2560 by 1440. The differential load also retains Caps Lock state.
-The runs use paired stopped disk copies, the matching snapshot editor and the
+byte at 2560 by 1440. The differential load also retains Caps Lock state. The
+runs use paired stopped disk copies, the matching snapshot editor and the
 default restore notification and clock policies. After resume, pointer input
 focuses Notepad and text can be entered and saved. Following normal shutdown,
 read-only NTFS inspection confirms the exact 59 bytes displayed in the final
@@ -298,10 +336,11 @@ matches the original Microsoft package. No signing-policy change is used.
 
 WMI reports `IsSigned=False` for the inherited viostor 61.77.104.17200 package,
 and PnP Utility leaves its signer field blank. Native Windows
-`Get-AuthenticodeSignature` checks nevertheless report `Valid` for its catalogue,
-DriverStore SYS and installed SYS. The INF digest matches its catalogue member.
-SetupAPI identifies Red Hat as its Authenticode signer and returns `0xe0000242`,
-the [publisher trust category](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/signature-categories-and-driver-installation),
+`Get-AuthenticodeSignature` checks nevertheless report `Valid` for its
+catalogue, DriverStore SYS and installed SYS. The INF digest matches its
+catalogue member. SetupAPI identifies Red Hat as its Authenticode signer and
+returns `0xe0000242`, the
+[publisher trust category](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/signature-categories-and-driver-installation),
 rather than an absent signature. This is a vendor Authenticode package, not a
 WHQL result. A normal same-package PnP installation attempt returns 259 and
 installs nothing; the installed SYS hash is unchanged. No publisher certificate
@@ -310,26 +349,27 @@ entries. These native checks establish the recorded files' signature validity;
 the WMI flag does not replace that check or prove publisher enrolment.
 
 The first post-full-restore Ctrl+End sequence did not move the caret to the
-document end: the marker was inserted at the clicked position. That text and
-the capture are retained. A later separate Ctrl+End sequence moved the caret;
-an instrumented restore also observes Ctrl+End moving the caret to the end.
-The original cause remains unresolved, so these results do not establish a
-clean post-restore navigation pass.
+document end: the marker was inserted at the clicked position. That text and the
+capture are retained. A later separate Ctrl+End sequence moved the caret; an
+instrumented restore also observes Ctrl+End moving the caret to the end. The
+original cause remains unresolved, so these results do not establish a clean
+post-restore navigation pass.
 
 The macOS native viewer passes a separate cold-boot input check through the
 standard RFB bridge and SSH forwarding. The check observes Run's selected text
 and verifies the replacement command before Enter. Notepad receives printable
 keys, Shift punctuation and Enter. Guest window dragging and title-bar
 double-clicks after host resize reach their targets. After normal shutdown and
-VMM exit zero, read-only NTFS inspection confirms the saved file contains exactly
-`viewer win7\r\n!A`. The earlier automation attempt that ended before saving text
-is retained; this result does not establish its cause or resolve the snapshot
-navigation issue. Native Windows and Wayland frontends, fullscreen and other
-keyboard layouts remain outside these Mac checks.
+VMM exit zero, read-only NTFS inspection confirms the saved file contains
+exactly `viewer win7\r\n!A`. The earlier automation attempt that ended before
+saving text is retained; this result does not establish its cause or resolve the
+snapshot navigation issue. Native Windows and Wayland frontends, fullscreen and
+other keyboard layouts remain outside these Mac checks.
 
 ## Native QXL stroke comparison
 
-The [drawing probe](../tools/windows/display/README.md#native-stroke-and-dash-check)
+The
+[drawing probe](../tools/windows/display/README.md#native-stroke-and-dash-check)
 compares forty paths with an independent software DIB: five pen styles, two
 background modes and four raster operations, including fractional endpoints,
 closure and clipping. The original native XP and Windows 7 runs each differ at
@@ -342,12 +382,13 @@ After the on/off-dash correction, XP has 1,552 differing pixels. The gaps are
 present, but the native style elements are one third of the reference length.
 Both pinned display DLLs declare GDI style steps `1,1,3`; the installed XP DLL
 matches its pinned package. The captured style lengths omit that density
-conversion. Microsoft's [GDIINFO contract](https://learn.microsoft.com/en-us/windows/win32/api/winddi/ns-winddi-gdiinfo)
-explains the three-pixel software result. The host retains QXL pixel units;
-it does not multiply every guest's styles to hide this driver discrepancy.
-The original failures and corrected XP result are retained. This is an open
-native drawing qualification, despite successful helper exits and normal
-shutdowns. No changed driver or signing-policy bypass has been tested.
+conversion. Microsoft's
+[GDIINFO contract](https://learn.microsoft.com/en-us/windows/win32/api/winddi/ns-winddi-gdiinfo)
+explains the three-pixel software result. The host retains QXL pixel units; it
+does not multiply every guest's styles to hide this driver discrepancy. The
+original failures and corrected XP result are retained. This is an open native
+drawing qualification, despite successful helper exits and normal shutdowns. No
+changed driver or signing-policy bypass has been tested.
 
 ## Native QXL default seccomp checks
 
@@ -382,18 +423,18 @@ Both guests accepted the ISO's `viogpudo/w11/amd64` package through normal
 `pnputil` installation. The active `VioGpuDod` driver reports Code 0, version
 `100.103.104.30200` and a Microsoft Windows Hardware Compatibility Publisher
 signature. Its installed SYS matches SHA-256
-`adb624a34dc1b6519af0601268af7c1e3e8972c16c69467f6e3144e66b67f5e1`.
-Windows 11 installs this file in DriverStore; the service's `PathName` identifies
-the active file. Both resolution helpers have valid WHCP signatures.
+`adb624a34dc1b6519af0601268af7c1e3e8972c16c69467f6e3144e66b67f5e1`. Windows 11
+installs this file in DriverStore; the service's `PathName` identifies the
+active file. Both resolution helpers have valid WHCP signatures.
 
 Each guest changed actual scanout through 1024x768, 1280x720, 1366x768,
 1920x1080 and back to 1024x768. All 22,400 checked colour pixels match at each
 step. Windows repositions the test window during mode changes; the checks use
-its observed position. Both guests recorded five pointer clicks. Enterprise
-also recorded all five submitted text strings exactly. Pro's separate input
-check records both Control+A chords with Control held and shows the Windows
-Start menu after the Windows key. It does not establish the test TextBox's
-select-all behaviour.
+its observed position. Both guests recorded five pointer clicks. Enterprise also
+recorded all five submitted text strings exactly. Pro's separate input check
+records both Control+A chords with Control held and shows the Windows Start menu
+after the Windows key. It does not establish the test TextBox's select-all
+behaviour.
 
 After installing the complete Windows 11 vsock package, all 52 present devices
 report OK in both guests. Enterprise also reports Secure Boot enabled and TPM
@@ -402,10 +443,10 @@ present and ready. Both guests shut down through ACPI S5 with VMM exit code 0.
 Windows 11 IoT Enterprise LTSC build 26100 also passes these five modes, pixel
 checks, literal text submissions and pointer clicks on the same source. A fresh
 64 GiB disk completed graphical UEFI installation and two setup resets with the
-optimised GNU VMM. Its signed Windows 11 GPU package has the same version and SYS
-hash above. The complete vsock package installed with exit code 0. After omitting
-the unused VMClock device with `"vmclock": false`, all 48 present devices report
-OK. The guest completed ACPI S5 with VMM exit code 0.
+optimised GNU VMM. Its signed Windows 11 GPU package has the same version and
+SYS hash above. The complete vsock package installed with exit code 0. After
+omitting the unused VMClock device with `"vmclock": false`, all 48 present
+devices report OK. The guest completed ACPI S5 with VMM exit code 0.
 
 An earlier IoT installation failed applying `install.wim` with `0x80070570`
 after full snapshot restore from the debug VMM into the optimised VMM. The WIM
@@ -416,38 +457,42 @@ earlier installed-reference results below use the legacy display profile.
 
 ## Virtio GPU integration candidate
 
-Runtime source `67ac42dfc` adds the AMD64 `virtio-gpu` console profile. Windows 10
-Enterprise LTSC 2021 x64, build 19044, accepted the pinned virtio-win 0.1.302
+Runtime source `67ac42dfc` adds the AMD64 `virtio-gpu` console profile. Windows
+10 Enterprise LTSC 2021 x64, build 19044, accepted the pinned virtio-win 0.1.302
 viogpudo package through normal `pnputil` installation, with exit code 0. The
 active `VioGpuDod` service reports Code 0, version `100.103.104.30200` and a
 Microsoft Windows Hardware Compatibility Publisher signature. The installed SYS
-matches SHA-256 `97eb164029d8b14f9529d3b5e1313abf71dead7f3192fc7a2474e6e54dee41bd`.
+matches SHA-256
+`97eb164029d8b14f9529d3b5e1313abf71dead7f3192fc7a2474e6e54dee41bd`.
 
 The GNU development VMM `9a5950db` used the graphical CloudHv firmware
-`730de0fc`, one disposable reference-disk copy, one GPU and no option ROM. It ran
-with `--no-seccomp`; this is display evidence, not production sandbox evidence.
-The original reference disk was preserved.
+`730de0fc`, one disposable reference-disk copy, one GPU and no option ROM. It
+ran with `--no-seccomp`; this is display evidence, not production sandbox
+evidence. The original reference disk was preserved.
 
-Native frames pass at 1024x768, 1280x720 and 1920x1080. All 41,600 checked pixels
-inside a guest-drawn rectangle match RGB `0d4795`. A full format-37 snapshot
-restores the active 1920x1080 scanout; the resumed guest accepts keyboard input,
-changes mode to 1024x768 and opens Start and Recycle Bin through absolute pointer
-clicks. The resumed guest reports 59 healthy present devices and completes S5
-with VMM exit 0. The 4 GiB RAM artifact was retired after evidence capture.
+Native frames pass at 1024x768, 1280x720 and 1920x1080. All 41,600 checked
+pixels inside a guest-drawn rectangle match RGB `0d4795`. A full format-37
+snapshot restores the active 1920x1080 scanout; the resumed guest accepts
+keyboard input, changes mode to 1024x768 and opens Start and Recycle Bin through
+absolute pointer clicks. The resumed guest reports 59 healthy present devices
+and completes S5 with VMM exit 0. The 4 GiB RAM artifact was retired after
+evidence capture.
 
 Two subsequent unoptimised cold boots retain the healthy GPU but report Code 43
-on the USB controller. The unchanged optimised VMM `85a79d13` starts both devices
-and reports 59 healthy present devices. A regression test reproduces a stopped
-USB frame counter when timer dispatch is delayed. USB now samples monotonic time
-on guest I/O as well as timer events, with bounded catch-up and no advancement
-while the VM is paused. No snapshot field or format change is needed.
+on the USB controller. The unchanged optimised VMM `85a79d13` starts both
+devices and reports 59 healthy present devices. A regression test reproduces a
+stopped USB frame counter when timer dispatch is delayed. USB now samples
+monotonic time on guest I/O as well as timer events, with bounded catch-up and
+no advancement while the VM is paused. No snapshot field or format change is
+needed.
 
 The corrected unoptimised candidate `10415388` cold-boots both devices, reports
 59 healthy present devices, opens Start through the absolute pointer and accepts
 elevated keyboard commands. Both GPU and USB report Code 0, and the guest
-completes S5 with VMM exit 0. The six USB integration tests and strict VMM Clippy
-pass with and without Windows support. The clock regression fails on the old
-implementation and passes with the correction, including the paused-clock check.
+completes S5 with VMM exit 0. The six USB integration tests and strict VMM
+Clippy pass with and without Windows support. The clock regression fails on the
+old implementation and passes with the correction, including the paused-clock
+check.
 
 The result does not qualify Windows 11, fresh installation,
 browser/VNC/native-viewer interaction, host-requested resize, differential GPU
@@ -455,12 +500,13 @@ restore or the remaining Toets integration.
 
 ## Host-requested display modes
 
-Source `7d3bab807`, GNU development binary `527be718`, requests preferred display
-sizes through `PATCH /display`. One Windows 10 reference session uses the
-existing VioGpu helpers from pinned virtio-win 0.1.302. Both executables have valid
-Microsoft Windows Hardware Compatibility Publisher signatures and match the
-retained package hashes. The upstream `vgpusrv` service is running with automatic
-startup; its session helper `viogpuap` remains present in all 38 observations.
+Source `7d3bab807`, GNU development binary `527be718`, requests preferred
+display sizes through `PATCH /display`. One Windows 10 reference session uses
+the existing VioGpu helpers from pinned virtio-win 0.1.302. Both executables
+have valid Microsoft Windows Hardware Compatibility Publisher signatures and
+match the retained package hashes. The upstream `vgpusrv` service is running
+with automatic startup; its session helper `viogpuap` remains present in all 38
+observations.
 
 The actual guest dimensions and captured native console frames follow:
 
@@ -468,11 +514,11 @@ The actual guest dimensions and captured native console frames follow:
 1024x768 -> 1280x720 -> 1366x768 -> 1920x1080 -> 1024x768
 ```
 
-The 1366x768 request tests a custom width. An invalid 4096x4096 request returns 400
-without changing the 1024x768 scanout. Repeating 1024x768 returns 204 and preserves
-that scanout. All 60 present PnP devices report healthy; Windows completes S5 and
-Firecracker exits0. The stopped disk is collected read-only and the loop is
-detached. No new disk clone or snapshot RAM file is required.
+The 1366x768 request tests a custom width. An invalid 4096x4096 request returns
+400 without changing the 1024x768 scanout. Repeating 1024x768 returns 204 and
+preserves that scanout. All 60 present PnP devices report healthy; Windows
+completes S5 and Firecracker exits0. The stopped disk is collected read-only and
+the loop is detached. No new disk clone or snapshot RAM file is required.
 
 This run retains the earlier firmware and installed kernel drivers and uses
 `--no-seccomp`. It proves these host-requested changes with the external Windows
@@ -500,13 +546,13 @@ D: primary-a   E: secondary-b
 D: primary-a   E: finish
 ```
 
-All 57 observations have no read errors; each loaded disc has the expected label,
-sentinel and SHA-256. Seven runtime PUT updates succeed. A missing replacement
-ISO returns400 and leaves the reported secondary path unchanged. All 60 present
-PnP devices report healthy. The finish disc ends the monitor, Windows completes
-S5 and Firecracker exits0. Collection uses the stopped disk through a read-only
-loop and NTFS mount; both are detached afterwards. No new VM disk or snapshot
-RAM file is required.
+All 57 observations have no read errors; each loaded disc has the expected
+label, sentinel and SHA-256. Seven runtime PUT updates succeed. A missing
+replacement ISO returns400 and leaves the reported secondary path unchanged. All
+60 present PnP devices report healthy. The finish disc ends the monitor, Windows
+completes S5 and Firecracker exits0. Collection uses the stopped disk through a
+read-only loop and NTFS mount; both are detached afterwards. No new VM disk or
+snapshot RAM file is required.
 
 This run uses the retained graphical firmware and installed drivers, with
 `--no-seccomp`. It qualifies these Windows 10 media changes, not production
@@ -516,17 +562,18 @@ restore. The inherited guest clock offset is unchanged and unqualified.
 
 ## Latest qualified integration baseline
 
-The latest qualified AMD64 Windows-feature binary is `6f63cd8d`, built from runtime
-source `95aaccfb` and using snapshot format 34. Its default counterpart is
-`1c68a888`. Later documentation and secure-helper cleanup changes do not change
-these binaries. The table records completed installed-reference checks on this
-runtime separately from unchanged component results and remaining edition gates.
+The latest qualified AMD64 Windows-feature binary is `6f63cd8d`, built from
+runtime source `95aaccfb` and using snapshot format 34. Its default counterpart
+is `1c68a888`. Later documentation and secure-helper cleanup changes do not
+change these binaries. The table records completed installed-reference checks on
+this runtime separately from unchanged component results and remaining edition
+gates.
 
-Current source uses snapshot format 43, adding a fixed ACPI power button to
-the secondary QXL surfaces, console and two-channel optical state. The
-format-34 baseline below does not qualify the GPU or format-43 restore path.
-The GPU candidate above records actual format-37 restore evidence; it does not
-qualify the later optical state format.
+Current source uses snapshot format 43, adding a fixed ACPI power button to the
+secondary QXL surfaces, console and two-channel optical state. The format-34
+baseline below does not qualify the GPU or format-43 restore path. The GPU
+candidate above records actual format-37 restore evidence; it does not qualify
+the later optical state format.
 
 Reuse a recorded result when the inputs relevant to that check are unchanged.
 Retain the guest configuration, driver and firmware hashes, VMM capability and
@@ -542,7 +589,7 @@ failure, and retain the earlier failed record.
 | Windows 7 SP1 x64                          | Current `6f63cd8d`: Windows Run/absolute pointer/raw Caps Lock and saved `aAa`; both TAP and CONNECT pass cold/full/differential transfers, storage, public verification, format-34 headers and S5. TAP generation notifications also pass.                                                                                                                                                                                    | Held-key restore on this guest and fresh installation remain unqualified.                                                                |
 | Windows 10 Enterprise LTSC 2021 x64        | Current `6f63cd8d`, 19044.1288: signed driver setup, RTC-policy reboot, normal SYSTEM task, saved `aAa` input and both transport routes pass.                                                                                                                                                                                                                                                                                  | Held-key restore is separately tested on XP; fresh installation remains separate.                                                        |
 | Windows 11 IoT Enterprise LTSC x64         | Current `6f63cd8d`, 26100.1742: signed driver setup, RTC-policy reboot, normal SYSTEM task, saved `aAa` input and both transport routes pass.                                                                                                                                                                                                                                                                                  | Fresh installation, other editions and broader input paths remain separate.                                                              |
-| Windows 11 Pro x64                         | Current `6f63cd8d`, 26300.9457/26H2: input, Secure Boot/TPM, authenticated UEFI cold deletion and TAP/CONNECT cold/full/differential checks pass.                                                                                                                                                                                                                                                                              | Enabled BitLocker protection, TPM-sealed recovery, attestation and fresh installation are not qualified.                                 |
+| Windows 11 Pro x64                         | Current `6f63cd8d`, 26300.9457/26H2: input, Secure Boot/TPM, authenticated UEFI cold deletion and TAP/CONNECT cold/full/differential checks pass.                                                                                                                                                                                                                                                                              | Enabled BitLocker protection, TPM-sealed recovery and attestation are not qualified.                                                     |
 | Windows 11 Enterprise Evaluation x64       | Current `6f63cd8d`, 26300.9457/26H2: signed drivers, policy reboot/input/task, Secure Boot/TPM and both TAP/CONNECT cold/full/differential checks pass, including secure checks, public verifiers, two format-34 headers per route and S5.                                                                                                                                                                                     | Fresh installation and other editions remain separate.                                                                                   |
 | Windows Server 2025 Core x64               | Current `6f63cd8d`, ServerStandardEval 26100.32230: fresh installation and ISO-free boot, signed 2k25 drivers, RTC-policy cold boot, normal SAC input with exact stored `aAa` plus CRLF, 42 healthy present devices and normal SYSTEM task pass. TAP and CONNECT pass cold/full/differential checks, stored data, public verifiers, both format-34 headers per route and normal S5/VMM exit zero.                              | Graphical input and Secure Boot/TPM are not qualified by this ordinary firmware profile.                                                 |
 | Windows Server 2025 Desktop Experience x64 | Current `6f63cd8d`, ServerStandardEval 26100.32230: fresh installation and ISO-free boot, signed 2k25 drivers, RTC-policy cold boot, 48 healthy present devices, Windows Run/absolute pointer/raw Caps Lock with exact stored `aAa`, and normal SYSTEM task/TAP staging pass. TAP and CONNECT pass cold/full/differential checks, stored data, public verifiers, both format-34 headers per route and normal S5/VMM exit zero. | Secure Boot/TPM are not qualified by this ordinary firmware profile.                                                                     |
@@ -636,12 +683,12 @@ cargo build --locked --target x86_64-unknown-linux-musl --features windows \
 For the recorded source, the three test selectors run 18, 5 and 18 tests. Reject
 zero selected tests. An all-features release build enables fuzzing and is not
 the Windows release recipe. The
-[native QXL mode probe](../tools/windows/display/README.md) includes
-its source, build inputs and a guest acceptance procedure. Its host unit
-tests use the normal standalone-tool gate. The existing console screenshot
-command and the probe's shared RGB model provide the full-frame comparison.
-Retain all eighteen captures, stopped case files and the full probe log for a
-fresh guest run. Host unit and console bridge tests do not replace that check.
+[native QXL mode probe](../tools/windows/display/README.md) includes its source,
+build inputs and a guest acceptance procedure. Its host unit tests use the
+normal standalone-tool gate. The existing console screenshot command and the
+probe's shared RGB model provide the full-frame comparison. Retain all eighteen
+captures, stopped case files and the full probe log for a fresh guest run. Host
+unit and console bridge tests do not replace that check.
 
 ### Guest egress and restore
 
