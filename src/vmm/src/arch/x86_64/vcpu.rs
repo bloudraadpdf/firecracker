@@ -22,7 +22,7 @@ use crate::arch::x86_64::cet::{CetError, Features as CetFeatures};
 use crate::arch::x86_64::generated::msr_index::{MSR_IA32_TSC, MSR_IA32_TSC_DEADLINE};
 use crate::arch::x86_64::msr::{MsrError, create_boot_msr_entries};
 use crate::arch::x86_64::regs::{SetupFpuError, SetupRegistersError, SetupSpecialRegistersError};
-use crate::arch::x86_64::{cet, hyperv, interrupts};
+use crate::arch::x86_64::{hyperv, interrupts};
 use crate::cpu_config::x86_64::{CpuConfiguration, cpuid};
 use crate::logger::{IncMetric, METRICS, error, warn};
 use crate::vstate::bus::Bus;
@@ -986,6 +986,7 @@ mod tests {
 
     use super::*;
     use crate::arch::BootProtocol;
+    use crate::arch::x86_64::cet;
     use crate::arch::x86_64::cpu_model::CpuModel;
     use crate::cpu_config::templates::{
         CpuTemplateType, CustomCpuTemplate, GetCpuTemplate, StaticCpuTemplate,

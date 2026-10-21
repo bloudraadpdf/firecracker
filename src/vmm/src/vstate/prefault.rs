@@ -188,7 +188,7 @@ mod tests {
         let header = Elf64_Ehdr {
             e_ident: [0x7f, b'E', b'L', b'F', 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             e_phoff: size_of::<Elf64_Ehdr>() as u64,
-            e_phentsize: size_of::<Elf64_Phdr>() as u16,
+            e_phentsize: u16::try_from(size_of::<Elf64_Phdr>()).unwrap(),
             e_phnum: 6,
             ..Default::default()
         };
@@ -221,7 +221,7 @@ mod tests {
         file.write_all_at(header.as_slice(), 0).unwrap();
         file.write_all_at(&[1], 5).unwrap();
         file.set_len(8).unwrap();
-        assert!(kernel_prefault_ranges(&file).is_err());
+        kernel_prefault_ranges(&file).unwrap_err();
     }
 
     #[test]
@@ -274,7 +274,8 @@ mod tests {
         let mut vm = KvmVm::new(kvm).unwrap();
         vm.register_dram_memory_regions(regions).unwrap();
         let vcpu = vm.fd().create_vcpu(0).unwrap();
-        prepare(&vcpu, vm.guest_memory(), &[0..size as u64]).unwrap();
+        let range = 0..size as u64;
+        prepare(&vcpu, vm.guest_memory(), std::slice::from_ref(&range)).unwrap();
         assert_eq!(file.metadata().unwrap().blocks(), allocated);
         assert!(
             vm.fd()

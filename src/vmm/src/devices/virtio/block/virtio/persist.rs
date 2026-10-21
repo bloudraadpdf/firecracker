@@ -193,16 +193,16 @@ mod tests {
         drop(block);
         let bytes = bitcode::serialize(&state).unwrap();
         let state = bitcode::deserialize(&bytes).unwrap();
-        assert!(
+        assert!(matches!(
             VirtioBlock::restore(
                 BlockConstructorArgs {
                     mem: default_mem(),
                     backing: None,
                 },
                 &state
-            )
-            .is_err()
-        );
+            ),
+            Err(VirtioBlockError::Config)
+        ));
         let restored = VirtioBlock::restore(
             BlockConstructorArgs {
                 mem: default_mem(),

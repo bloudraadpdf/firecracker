@@ -1,4 +1,5 @@
 // Copyright 2026 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2026 Bloudraad.
 // SPDX-License-Identifier: Apache-2.0
 
 use kvm_bindings::{CpuId, KVM_REG_SIZE_U64, KVM_REG_X86, KVMIO, kvm_one_reg};
@@ -229,6 +230,19 @@ mod tests {
 
         let shstk = Features::from_cpuid(&cpuid(1 << 7, 0));
         assert_eq!(shstk.snapshot_msrs(&available).unwrap(), available);
+        let supervisor = [
+            MSR_IA32_TSC,
+            MSR_IA32_U_CET,
+            MSR_IA32_S_CET,
+            MSR_IA32_PL0_SSP,
+            MSR_IA32_PL1_SSP,
+            MSR_IA32_PL2_SSP,
+            MSR_IA32_PL3_SSP,
+            MSR_IA32_INT_SSP_TAB,
+        ];
+        assert_eq!(hidden.snapshot_msrs(&supervisor).unwrap(), [MSR_IA32_TSC]);
+        assert_eq!(ibt.snapshot_msrs(&supervisor).unwrap(), supervisor[..3]);
+        assert_eq!(shstk.snapshot_msrs(&supervisor).unwrap(), supervisor);
         assert_eq!(shstk.validate_ssp(true, Some(0x3000)), Ok(()));
         assert_eq!(
             shstk.validate_ssp(false, Some(0x3000)),
