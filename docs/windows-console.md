@@ -388,6 +388,11 @@ pending interrupt. In compatibility mode, the primary uses `0x1f0`/`0x3f6` and
 IRQ14, and the secondary uses `0x170`/`0x376` and IRQ15. Only attached drives
 reserve their legacy IRQs. The PCI I/O-enable bit gates all ports.
 
+The patched [SeaBIOS firmware](../resources/firmware/seabios/README.md) boots
+hard disks before optical media. A blank disk falls back to the installation
+CD. Keep the CD attached across Setup reboots; F8 then reaches the installed
+Windows boot manager without activating the CD's boot prompt.
+
 Each drive supports read-only PIO ATAPI, eject and reload of its current medium.
 DMA, audio and recording are not provided. The existing bridge eject command
 addresses the primary drive. Host media changes require an idle, unlocked drive.

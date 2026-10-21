@@ -12,10 +12,14 @@ SeaVGABIOS for graphics and input. See the
 [guest results](../../../docs/windows.md#legacy-windows).
 
 The source is SeaBIOS 1.17.0, commit `b52ca86e094d19b58e2304417787e96b940e39c6`.
-The patch writes ACKNOWLEDGE before DRIVER during virtio initialisation. The
+The ordered-status patch writes ACKNOWLEDGE before DRIVER during virtio
+initialisation. The disk-first patch boots an installed hard disk before optical
+media. A blank disk falls back to the installation CD. This lets Windows boot
+from its new disk after Setup restarts, with the CD still attached. F8 then
+reaches the Windows boot menu instead of restarting the CD installer. The
 configuration builds SeaBIOS as a coreboot payload. Firmware diagnostics use
 COM1 (`0x3f8`) at debug level 3; debug I/O-port output is disabled. Keep the
-configuration and patch with the firmware; an unpatched upstream build is not
+configuration and patches with the firmware; an unpatched upstream build is not
 the tested platform.
 
 ## Build on AMD64 Linux
@@ -34,6 +38,8 @@ test "$(git -C build/windows/seabios-pvh/source rev-parse HEAD)" = \
   b52ca86e094d19b58e2304417787e96b940e39c6
 git -C build/windows/seabios-pvh/source apply \
   "$PWD/resources/firmware/seabios/seabios-ordered-status.patch"
+git -C build/windows/seabios-pvh/source apply \
+  "$PWD/resources/firmware/seabios/seabios-disk-first.patch"
 cp resources/firmware/seabios/seabios.config build/windows/seabios-pvh/source/.config
 make -C build/windows/seabios-pvh/source -j4 PYTHON=python3
 cp resources/firmware/seabios/main.rs resources/firmware/seabios/link.ld \
@@ -67,6 +73,12 @@ cold boot, storage, HTTP/TCP egress, full and differential restore, and S5 with
 that build. Evidence is under `build/windows/seabios-pvh/run2`. These historical
 results do not qualify the current COM1-only diagnostic configuration. Record
 new firmware digests and build provenance, then validate the new firmware.
+
+A disk-first build from the pinned source, both patches and this configuration
+has SHA-256 `540f66160112e7db5d031df1fcb2f83f536fe3a5e111ba1afc1feefae992d7fb`.
+It booted an installed XP SP3 disk to its desktop with a bootable Windows 7 DVD
+still attached. This checks disk priority; it does not qualify a new Windows 7
+installation.
 
 SeaBIOS carries its upstream licences in `COPYING`, `COPYING.LESSER` and source
 headers. The combined firmware embeds SeaBIOS; retain those licences and its
