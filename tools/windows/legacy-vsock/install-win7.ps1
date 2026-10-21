@@ -12,7 +12,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Publisher certificate import failed' }
     & bcdedit.exe /set '{current}' testsigning on
     if ($LASTEXITCODE -ne 0) { throw 'Test-signing configuration failed' }
-    & C:\install-driver-x64.exe
+    & C:\install-driver-x64.exe 'PCI\VEN_1AF4&DEV_1053&SUBSYS_10531AF4&REV_01' 'C:\Drivers\VIOSock\viosock.inf'
     $result = $LASTEXITCODE
     "INSTALL_RESULT=$result"
     if ($result -ne 0 -and $result -ne 3010) { throw "Driver installation failed: $result" }

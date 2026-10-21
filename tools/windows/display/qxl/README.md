@@ -79,6 +79,26 @@ select `qxl.inf` with **Have Disk**. XP x86 and Windows 7 x64 use different
 binaries; keep each architecture in its own directory. The INF excludes later
 Windows versions, which do not support this XDDM driver.
 
+For automatic installation, build the [shared Rust installer](../../install-driver.rs)
+with the selected profile from the
+[compatibility-library procedure](../../README.md#windows-probe-linking):
+
+```sh
+rustc --edition 2024 "${windows_rustflags[@]}" -D warnings \
+  tools/windows/install-driver.rs -o build/windows/install-driver.exe
+```
+
+Put the executable in the matching QXL package. Run it as an administrator:
+
+```bat
+install-driver.exe "PCI\VEN_1B36&DEV_0100&SUBSYS_11001AF4" "C:\Drivers\qxl\qxl.inf"
+```
+
+The installer selects the specified package even when Windows ranks its signed
+generic VGA driver first. Accept the Windows driver warning. Require result 0
+or 3010, then device error code 0 after the required reboot. `pnputil -i -a`
+can retain generic VGA and return 259; importing the package does not select it.
+
 The package is unsigned. XP displays an unsigned-driver warning. Windows 7 x64
 requires a driver-signature-enforcement override to load an unsigned miniport.
 For a disposable test VM, select **Disable Driver Signature Enforcement** from

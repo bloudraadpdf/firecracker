@@ -118,13 +118,13 @@ output. Build the installer with the same selected profile:
 
 ```sh
 rustc --edition 2024 "${windows_rustflags[@]}" -D warnings \
-  tools/windows/legacy-vsock/install-driver.rs \
+  tools/windows/install-driver.rs \
   -o "build/windows/legacy-vsock/install-driver-$windows_arch.exe"
 ```
 
 The selected profile produces `install-driver-x86.exe` or
-`install-driver-x64.exe` for the existing guest scripts. The installer targets
-Firecracker's Viosock PCI ID `PCI\VEN_1AF4&DEV_1053&SUBSYS_10531AF4&REV_01`.
+`install-driver-x64.exe` for the existing guest scripts. The guest scripts pass
+Firecracker's Viosock PCI ID `PCI\VEN_1AF4&DEV_1053&SUBSYS_10531AF4&REV_01` and the INF path.
 
 Copy the complete package to `C:\Drivers\VIOSock`, the installer to `C:\`, and
 use `install-xp.cmd` or `install-win7.ps1` at guest startup. XP also needs the

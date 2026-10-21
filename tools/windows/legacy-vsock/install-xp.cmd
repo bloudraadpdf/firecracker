@@ -15,7 +15,7 @@ C:\CertMgr.exe -add -c C:\Drivers\VIOSock\test-signing.cer -s -r localMachine Ro
 if errorlevel 1 exit /b 1
 C:\CertMgr.exe -add -c C:\Drivers\VIOSock\test-signing.cer -s -r localMachine TrustedPublisher
 if errorlevel 1 exit /b 2
-C:\install-driver-x86.exe
+C:\install-driver-x86.exe "PCI\VEN_1AF4&DEV_1053&SUBSYS_10531AF4&REV_01" "C:\Drivers\VIOSock\viosock.inf"
 set DRIVER_RESULT=%ERRORLEVEL%
 echo INSTALL_RESULT=%DRIVER_RESULT%
 if "%DRIVER_RESULT%"=="0" goto device
