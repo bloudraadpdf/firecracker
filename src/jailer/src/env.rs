@@ -1637,7 +1637,25 @@ mod tests {
         let index_dest_path = dest_path.join("index0");
         fs::metadata(&index_dest_path).unwrap();
         let entries = fs::read_dir(&index_dest_path).unwrap();
-        assert_eq!(entries.enumerate().count(), 6);
+        let source = Path::new("/sys/devices/system/cpu/cpu0/cache/index0");
+        let mut expected = 0;
+        for field in [
+            "size",
+            "level",
+            "type",
+            "shared_cpu_map",
+            "coherency_line_size",
+            "number_of_sets",
+        ] {
+            let value = crate::readln_special(&source.join(field)).ok();
+            expected += usize::from(value.is_some());
+            assert_eq!(
+                crate::readln_special(&index_dest_path.join(field)).ok(),
+                value
+            );
+        }
+        assert!(expected > 0);
+        assert_eq!(entries.count(), expected);
     }
 
     #[test]

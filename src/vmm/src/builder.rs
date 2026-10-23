@@ -1321,6 +1321,7 @@ pub(crate) mod tests {
             shutdown_exit_code: None,
             vm: Vm::Kvm(vm),
             device_manager,
+            #[cfg(target_arch = "x86_64")]
             kernel_prefault_ranges: Vec::new(),
         }
     }
