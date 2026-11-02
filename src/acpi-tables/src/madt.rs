@@ -6,12 +6,37 @@
 use std::mem::size_of;
 
 use vm_memory::{Address, Bytes, GuestAddress, GuestMemory};
-use zerocopy::little_endian::U32;
+use zerocopy::little_endian::{U16, U32};
 use zerocopy::{Immutable, IntoBytes};
 
 use crate::{AcpiError, Result, Sdt, SdtHeader, checksum};
 
 const MADT_CPU_ENABLE_FLAG: u32 = 0;
+
+/// An ISA source routed to an active-low, level-triggered system interrupt.
+#[repr(C, packed)]
+#[derive(Debug, IntoBytes, Immutable)]
+pub struct InterruptSourceOverride {
+    kind: u8,
+    length: u8,
+    bus: u8,
+    source: u8,
+    gsi: U32,
+    flags: U16,
+}
+
+impl InterruptSourceOverride {
+    pub fn level_low(source: u8, gsi: u32) -> Self {
+        Self {
+            kind: 2,
+            length: 10,
+            bus: 0,
+            source,
+            gsi: U32::new(gsi),
+            flags: U16::new(0xf),
+        }
+    }
+}
 
 // clippy doesn't understand that we actually "use" the fields of this struct when we serialize
 // them as bytes in guest memory, so here we just ignore dead code to avoid having to name
@@ -96,6 +121,7 @@ impl Madt {
         oem_table_id: [u8; 8],
         oem_revision: u32,
         base_address: u32,
+        pcat_compat: bool,
         interrupt_controllers: Vec<u8>,
     ) -> Self {
         let length = size_of::<MadtHeader>() + interrupt_controllers.len();
@@ -113,7 +139,7 @@ impl Madt {
         let mut header = MadtHeader {
             sdt: sdt_header,
             base_address: U32::new(base_address),
-            flags: U32::ZERO,
+            flags: U32::new(u32::from(pcat_compat)),
         };
 
         header.sdt.checksum = checksum(&[header.as_bytes(), interrupt_controllers.as_bytes()]);

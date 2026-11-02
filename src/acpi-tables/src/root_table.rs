@@ -10,31 +10,39 @@ use zerocopy::IntoBytes;
 
 use crate::{AcpiError, Result, Sdt, SdtHeader, checksum};
 
-/// Extended System Description Table (XSDT)
-///
-/// This table provides 64bit addresses to the rest of the ACPI tables defined by the platform
-/// More information about this table can be found in the ACPI specification:
-/// https://uefi.org/specs/ACPI/6.5/05_ACPI_Software_Programming_Model.html#extended-system-description-table-xsdt
+/// Root System Description Table with 32-bit or 64-bit table addresses.
 #[derive(Clone, Default, Debug)]
-pub struct Xsdt {
+pub struct RootTable {
     header: SdtHeader,
     tables: Vec<u8>,
 }
 
-impl Xsdt {
+#[derive(Debug)]
+pub enum RootTableEntries {
+    Rsdt(Vec<u32>),
+    Xsdt(Vec<u64>),
+}
+
+impl RootTable {
     pub fn new(
         oem_id: [u8; 6],
         oem_table_id: [u8; 8],
         oem_revision: u32,
-        tables: Vec<u64>,
+        tables: RootTableEntries,
     ) -> Self {
-        let mut tables_bytes = Vec::with_capacity(8 * tables.len());
-        for addr in tables {
-            tables_bytes.extend(&addr.to_le_bytes());
-        }
+        let (signature, tables_bytes): (_, Vec<u8>) = match tables {
+            RootTableEntries::Rsdt(addresses) => (
+                *b"RSDT",
+                addresses.into_iter().flat_map(u32::to_le_bytes).collect(),
+            ),
+            RootTableEntries::Xsdt(addresses) => (
+                *b"XSDT",
+                addresses.into_iter().flat_map(u64::to_le_bytes).collect(),
+            ),
+        };
 
         let header = SdtHeader::new(
-            *b"XSDT",
+            signature,
             (std::mem::size_of::<SdtHeader>() + tables_bytes.len())
                 .try_into()
                 .unwrap(),
@@ -44,19 +52,18 @@ impl Xsdt {
             oem_revision,
         );
 
-        let mut xsdt = Xsdt {
+        let mut table = RootTable {
             header,
-
             tables: tables_bytes,
         };
 
-        xsdt.header.checksum = checksum(&[xsdt.header.as_bytes(), (xsdt.tables.as_slice())]);
+        table.header.checksum = checksum(&[table.header.as_bytes(), (table.tables.as_slice())]);
 
-        xsdt
+        table
     }
 }
 
-impl Sdt for Xsdt {
+impl Sdt for RootTable {
     fn len(&self) -> usize {
         std::mem::size_of::<SdtHeader>() + self.tables.len()
     }
