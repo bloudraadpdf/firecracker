@@ -20,9 +20,10 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::{io, panic};
 
-use api_server_adapter::ApiServerError;
+use api_server_adapter::{ApiServerError, ApiSocket};
 use event_manager::SubscriberOps;
 use seccomp::FilterError;
+use utils::api_listener::ApiListenerError;
 use utils::arg_parser::{ArgParser, Argument};
 use utils::validators::validate_instance_id;
 use vmm::arch::host_page_size;
@@ -66,6 +67,8 @@ enum MainError {
     RegisterSignalHandlers(#[source] vmm_sys_util::errno::Error),
     /// Arguments parsing error: {0} \n\nFor more information try --help.
     ParseArguments(#[from] utils::arg_parser::UtilsArgParserError),
+    /// Arguments parsing error: {0}
+    ApiSockFd(ApiListenerError),
     /// When printing Snapshot Data format: {0}
     PrintSnapshotDataFormat(#[from] SnapshotVersionError),
     /// Invalid value for logger level: {0}.Possible values: [Error, Warning, Info, Debug]
@@ -97,7 +100,7 @@ enum ResizeFdTableError {
 impl From<MainError> for FcExitCode {
     fn from(value: MainError) -> Self {
         match value {
-            MainError::ParseArguments(_) => FcExitCode::ArgParsing,
+            MainError::ParseArguments(_) | MainError::ApiSockFd(_) => FcExitCode::ArgParsing,
             MainError::InvalidLogLevel(_) => FcExitCode::BadConfiguration,
             MainError::RunWithApi(ApiServerError::MicroVMStoppedWithError(code)) => code,
             MainError::RunWithoutApiError(RunWithoutApiError::Shutdown(code)) => code,
@@ -168,6 +171,15 @@ fn main_exec() -> Result<(), MainError> {
                     .takes_value(true)
                     .default_value(DEFAULT_API_SOCK_PATH)
                     .help("Path to unix domain socket used by the API."),
+            )
+            .arg(
+                Argument::new("api-sock-fd")
+                    .takes_value(true)
+                    .forbids(vec!["api-sock", "no-api"])
+                    .help(
+                        "Inherited descriptor of a listening unix domain stream socket used by \
+                         the API.",
+                    ),
             )
             .arg(
                 Argument::new("id")
@@ -426,10 +438,15 @@ fn main_exec() -> Result<(), MainError> {
         .unwrap_or_else(|| api_payload_limit);
 
     if api_enabled {
-        let bind_path = arguments
-            .single_value("api-sock")
-            .map(PathBuf::from)
-            .expect("Missing argument: api-sock");
+        let api_socket = match arguments.single_value("api-sock-fd") {
+            Some(fd) => ApiSocket::Descriptor(fd.parse().map_err(MainError::ApiSockFd)?),
+            None => ApiSocket::Path(
+                arguments
+                    .single_value("api-sock")
+                    .map(PathBuf::from)
+                    .expect("Missing argument: api-sock"),
+            ),
+        };
 
         let start_time_us = arguments.single_value("start-time-us").map(|s| {
             s.parse::<u64>()
@@ -452,7 +469,7 @@ fn main_exec() -> Result<(), MainError> {
         api_server_adapter::run_with_api(
             &mut seccomp_filters,
             vmm_config_json,
-            bind_path,
+            api_socket,
             instance_info,
             process_time_reporter,
             boot_timer_enabled,
