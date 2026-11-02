@@ -273,14 +273,15 @@ pub(crate) const MAX_TAP_TX_FRAME_LEN: usize =
 pub(crate) fn inject_tap_tx_frame(net: &Net, len: usize) -> Vec<u8> {
     use std::os::unix::ffi::OsStrExt;
 
-    assert!(len >= vnet_hdr_len());
-    assert!(len <= MAX_TAP_TX_FRAME_LEN);
+    let header_len = super::device::VnetHeader::from_features(net.acked_features).len();
+    assert!(len >= header_len);
+    assert!(len <= super::generated::ETH_MAX_MTU as usize + header_len);
     let tap_traffic_simulator = TapTrafficSimulator::new(if_index(&net.tap));
-    let mut frame = vmm_sys_util::rand::rand_alphanumerics(len - vnet_hdr_len())
+    let mut frame = vmm_sys_util::rand::rand_alphanumerics(len - header_len)
         .as_bytes()
         .to_vec();
     tap_traffic_simulator.push_tx_packet(&frame);
-    frame.splice(0..0, vec![b'\0'; vnet_hdr_len()]);
+    frame.splice(0..0, vec![b'\0'; header_len]);
 
     frame
 }
@@ -353,6 +354,8 @@ pub mod test {
         pub fn get_default(mem: &'a GuestMemoryMmap) -> TestHelper<'a> {
             let mut event_manager = EventManager::new().unwrap();
             let mut net = default_net();
+            net.acked_features =
+                1 << crate::devices::virtio::generated::virtio_config::VIRTIO_F_VERSION_1;
 
             let rxq = VirtQueue::new(GuestAddress(0), mem, Self::QUEUE_SIZE);
             let txq = VirtQueue::new(

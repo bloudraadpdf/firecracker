@@ -47,8 +47,6 @@ pub enum NetQueue {
 pub enum NetError {
     /// Open tap device failed: {0}
     TapOpen(TapError),
-    /// Setting vnet header size failed: {0}
-    TapSetVnetHdrSize(TapError),
     /// EventFd error: {0}
     EventFd(io::Error),
     /// IO error: {0}
