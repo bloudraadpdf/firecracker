@@ -1,15 +1,17 @@
 // Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::ffi::{CStr, CString, OsString};
+use std::convert::Infallible;
+use std::ffi::{CStr, CString};
 use std::fs::{self, File, OpenOptions, Permissions, canonicalize, read_to_string};
-use std::io;
 use std::io::Write;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt, fchown};
-use std::os::unix::io::AsRawFd;
-use std::os::unix::process::CommandExt;
+use std::mem::MaybeUninit;
+use std::os::unix::ffi::OsStringExt;
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio, exit, id};
+use std::process::{exit, id};
+use std::{io, iter, ptr};
 
 use utils::api_listener::ApiListenerFd;
 use utils::arg_parser::UtilsArgParserError::MissingValue;
@@ -18,6 +20,7 @@ use utils::{arg_parser, validators};
 use vmm_sys_util::syscall::SyscallReturnCode;
 
 use crate::JailerError;
+use crate::bind_mount::BindMount;
 use crate::cgroup::{CgroupConfiguration, CgroupConfigurationBuilder};
 use crate::chroot::chroot;
 use crate::resource_limits::{FSIZE_ARG, NO_FILE_ARG, ResourceLimits};
@@ -58,12 +61,7 @@ const DEV_URANDOM_MINOR: u32 = 9;
 const DEV_UFFD_PATH: &CStr = c"/dev/userfaultfd";
 const DEV_UFFD_MAJOR: u32 = 10;
 
-// Relevant folders inside the jail that we create or/and for which we change ownership.
-// We need /dev in order to be able to create /dev/kvm and /dev/net/tun device.
-// We need /run for the default location of the api socket.
-// Since libc::chown is not recursive, we cannot specify only /dev/net as we want
-// to walk through the entire folder hierarchy.
-const FOLDER_HIERARCHY: [&str; 4] = ["/", "/dev", "/dev/net", "/run"];
+const FOLDER_HIERARCHY: [&str; 3] = ["/", "/dev", "/run"];
 const FOLDER_PERMISSIONS: u32 = 0o700;
 
 // When running with `--new-pid-ns` flag, the PID of the process running the exec_file differs
@@ -76,33 +74,6 @@ fn dup2(old_fd: libc::c_int, new_fd: libc::c_int) -> Result<(), JailerError> {
     SyscallReturnCode(unsafe { libc::dup2(old_fd, new_fd) })
         .into_empty_result()
         .map_err(JailerError::Dup2)
-}
-
-// This is a wrapper for the clone system call. When we want to create a new process in a new
-// pid namespace, we will call clone with a NULL stack pointer. We can do this because we will
-// not use the CLONE_VM flag, this will result with the original stack replicated, in a similar
-// manner to the fork syscall. The libc wrapper prevents use of a NULL stack pointer, so we will
-// call the syscall directly.
-fn clone(child_stack: *mut libc::c_void, flags: libc::c_int) -> Result<libc::c_int, JailerError> {
-    SyscallReturnCode(
-        // SAFETY: This is safe because we are using a library function with valid parameters.
-        libc::c_int::try_from(unsafe {
-            // Note: the order of arguments in the raw syscall differs between platforms.
-            // On x86-64, for example, the parameters passed are `flags`, `stack`, `parent_tid`,
-            // `child_tid`, and `tls`. But on On x86-32, and several other common architectures
-            // (including score, ARM, ARM 64) the order of the last two arguments is reversed,
-            // and instead we must pass `flags`, `stack`, `parent_tid`, `tls`, and `child_tid`.
-            // This difference in architecture currently doesn't matter because the last 2
-            // arguments are all 0 but if this were to change we should add an attribute such as
-            // #[cfg(target_arch = "x86_64")] or #[cfg(target_arch = "aarch64")] for each different
-            // call.
-            libc::syscall(libc::SYS_clone, flags, child_stack, 0, 0, 0)
-        })
-        // Unwrap is needed because PIDs are 32-bit.
-        .unwrap(),
-    )
-    .into_result()
-    .map_err(JailerError::Clone)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -120,9 +91,11 @@ pub struct Env {
     id: String,
     chroot_dir: PathBuf,
     exec_file_path: PathBuf,
+    exec_file_name: String,
     uid: u32,
     gid: u32,
     netns: Option<String>,
+    tun_enabled: bool,
     daemonize: bool,
     new_pid_ns: bool,
     start_time_us: u64,
@@ -130,9 +103,26 @@ pub struct Env {
     jailer_cpu_time_us: u64,
     extra_args: Vec<String>,
     cgroup_conf: Option<CgroupConfiguration>,
+    bind_mounts: Vec<BindMount>,
     resource_limits: ResourceLimits,
     uffd_dev_minor: Option<u32>,
     api_sock_fd: Option<ApiListenerFd>,
+    bootstrap: Option<std::os::unix::net::UnixDatagram>,
+    mount_ns_fd: Option<i32>,
+    exec_fd: Option<i32>,
+    control_fd: Option<i32>,
+    control_port: Option<u32>,
+    serial_out_fd: Option<i32>,
+}
+
+pub fn launch_fd(
+    arguments: &arg_parser::Arguments,
+    name: &'static str,
+) -> Result<Option<i32>, JailerError> {
+    arguments
+        .single_value(name)
+        .map(|value| utils::inherited::number(value).map_err(JailerError::Launch))
+        .transpose()
 }
 
 pub fn api_sock_fd(
@@ -154,6 +144,8 @@ fn create_owned_file_with_data(
     uid: u32,
     gid: u32,
 ) -> Result<(), JailerError> {
+    use std::os::unix::fs::{OpenOptionsExt, fchown};
+
     let mut file = OpenOptions::new()
         .write(true)
         // `create_new` maps to `O_CREAT | O_EXCL`: fail if `dst` already exists.
@@ -288,15 +280,38 @@ impl Env {
 
         let uffd_dev_minor = Self::get_userfaultfd_minor_dev_number().ok();
 
+        let bind_mounts = BindMount::from_arguments(arguments)?;
         let api_sock_fd = api_sock_fd(arguments)?;
+        let bootstrap = launch_fd(arguments, "bootstrap-fd")?
+            .map(crate::bootstrap::channel)
+            .transpose()?;
+        let mount_ns_fd = launch_fd(arguments, "mount-ns-fd")?;
+        let exec_fd = launch_fd(arguments, "exec-fd")?;
+        let control_fd = launch_fd(arguments, "control-fd")?;
+        let serial_out_fd = launch_fd(arguments, "serial-out-fd")?;
+        let control_port = arguments
+            .single_value("control-port")
+            .map(|value| value.parse::<u32>())
+            .transpose()
+            .map_err(|_| JailerError::Launch(io::ErrorKind::InvalidInput.into()))?;
+        if control_fd.is_some() != control_port.is_some()
+            || control_port == Some(0)
+            || (bootstrap.is_some() && (!new_pid_ns || daemonize))
+            || (mount_ns_fd.is_some() && !bind_mounts.is_empty())
+            || (exec_fd.is_some() && mount_ns_fd.is_none())
+        {
+            return Err(JailerError::Launch(io::ErrorKind::InvalidInput.into()));
+        }
 
         Ok(Env {
             id: id.to_owned(),
             chroot_dir,
             exec_file_path,
+            exec_file_name,
             uid,
             gid,
             netns,
+            tun_enabled: !arguments.flag_present("no-tun"),
             daemonize,
             new_pid_ns,
             start_time_us,
@@ -304,9 +319,16 @@ impl Env {
             jailer_cpu_time_us: 0,
             extra_args: arguments.extra_args(),
             cgroup_conf,
+            bind_mounts,
             resource_limits,
             uffd_dev_minor,
             api_sock_fd,
+            bootstrap,
+            mount_ns_fd,
+            exec_fd,
+            control_fd,
+            control_port,
+            serial_out_fd,
         })
     }
 
@@ -362,7 +384,12 @@ impl Env {
         Ok(())
     }
 
-    fn exec_into_new_pid_ns(&mut self, chroot_exec_file: PathBuf) -> Result<(), JailerError> {
+    fn exec_into_new_pid_ns(
+        &mut self,
+        exec_file: &File,
+        pid_file: PathBuf,
+        namespace: &File,
+    ) -> Result<(), JailerError> {
         // https://man7.org/linux/man-pages/man7/pid_namespaces.7.html
         // > a process in an ancestor namespace can send signals to the "init" process of a child
         // > PID namespace only if the "init" process has established a handler for that signal.
@@ -395,10 +422,14 @@ impl Env {
             }
         };
 
+        // The child's exec closes its close-on-exec copy of the write end. The read end then
+        // reports end of file, so the jailer exits only after the child runs the exec file.
+        let (mut exec_done, exec_signal) = io::pipe().map_err(JailerError::ExecWait)?;
+
         // Duplicate the current process. The child process will belong to the previously created
         // PID namespace. The current process will not be moved into the newly created namespace,
         // but its first child will assume the role of init(1) in the new namespace.
-        let pid = clone(std::ptr::null_mut(), libc::CLONE_NEWPID)?;
+        let (pid, pidfd) = crate::bootstrap::clone_vmm()?;
         match pid {
             0 => {
                 if is_session_leader {
@@ -407,28 +438,31 @@ impl Env {
                         .into_empty_result()
                         .map_err(JailerError::SetSid)?;
                 }
-                Err(JailerError::Exec(self.exec_command(chroot_exec_file)))
+                Err(JailerError::Exec(self.exec_command(exec_file)))
             }
             child_pid => {
+                drop(exec_signal);
+                io::copy(&mut exec_done, &mut io::sink()).map_err(JailerError::ExecWait)?;
                 // Save the PID of the process running the exec file provided
-                // inside <chroot_exec_file>.pid file.
-                self.save_exec_file_pid(child_pid, chroot_exec_file)?;
+                // inside <exec_file_name>.pid file.
+                if let Some(channel) = &self.bootstrap {
+                    crate::bootstrap::publish(
+                        channel,
+                        child_pid,
+                        pidfd.as_ref().unwrap(),
+                        namespace,
+                        exec_file,
+                    )?;
+                } else {
+                    self.save_exec_file_pid(child_pid, pid_file)?;
+                }
                 // SAFETY: This is safe because 0 is valid input to exit.
                 unsafe { libc::exit(0) }
             }
         }
     }
 
-    fn save_exec_file_pid(
-        &mut self,
-        pid: i32,
-        chroot_exec_file: PathBuf,
-    ) -> Result<(), JailerError> {
-        let chroot_exec_file_str = chroot_exec_file
-            .to_str()
-            .ok_or_else(|| JailerError::ExtractFileName(chroot_exec_file.clone()))?;
-        let pid_file_path =
-            PathBuf::from(format!("{}{}", chroot_exec_file_str, PID_FILE_EXTENSION));
+    fn save_exec_file_pid(&mut self, pid: i32, pid_file_path: PathBuf) -> Result<(), JailerError> {
         let mut pid_file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -462,6 +496,31 @@ impl Env {
         dev_major: u32,
         dev_minor: u32,
     ) -> Result<(), JailerError> {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+        let path = Path::new(dev_path.to_str().unwrap());
+        match fs::symlink_metadata(path) {
+            Ok(metadata) => {
+                if metadata.file_type().is_char_device()
+                    && metadata.rdev() == libc::makedev(dev_major, dev_minor)
+                    && metadata.mode() == libc::S_IFCHR | 0o600
+                    && metadata.uid() == self.uid()
+                    && metadata.gid() == self.gid()
+                    && metadata.nlink() == 1
+                {
+                    return Ok(());
+                }
+                return Err(JailerError::MknodDev(
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "existing jail device does not match",
+                    ),
+                    path.display().to_string(),
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(JailerError::MknodDev(error, path.display().to_string())),
+        }
         // As per sysstat.h:
         // S_IFCHR -> character special device
         // S_IRUSR -> read permission, owner
@@ -489,11 +548,37 @@ impl Env {
     }
 
     fn setup_jailed_folder(&self, folder: impl AsRef<Path>) -> Result<(), JailerError> {
+        use std::os::unix::fs::MetadataExt;
+
         let folder_path = folder.as_ref();
-        fs::create_dir_all(folder_path)
-            .map_err(|err| JailerError::CreateDir(folder_path.to_owned(), err))?;
-        fs::set_permissions(folder_path, Permissions::from_mode(FOLDER_PERMISSIONS))
-            .map_err(|err| JailerError::Chmod(folder_path.to_owned(), err))?;
+        let existing = match fs::symlink_metadata(folder_path) {
+            Ok(metadata) if metadata.is_dir() => Some(metadata),
+            Ok(_) => {
+                return Err(JailerError::CreateDir(
+                    folder_path.to_owned(),
+                    io::Error::new(io::ErrorKind::InvalidData, "jail folder is not a directory"),
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                fs::create_dir_all(folder_path)
+                    .map_err(|err| JailerError::CreateDir(folder_path.to_owned(), err))?;
+                None
+            }
+            Err(error) => return Err(JailerError::CreateDir(folder_path.to_owned(), error)),
+        };
+        if existing
+            .as_ref()
+            .is_none_or(|metadata| metadata.mode() & 0o7777 != FOLDER_PERMISSIONS)
+        {
+            fs::set_permissions(folder_path, Permissions::from_mode(FOLDER_PERMISSIONS))
+                .map_err(|err| JailerError::Chmod(folder_path.to_owned(), err))?;
+        }
+        if existing
+            .as_ref()
+            .is_some_and(|metadata| metadata.uid() == self.uid() && metadata.gid() == self.gid())
+        {
+            return Ok(());
+        }
 
         let c_path = CString::new(folder_path.to_str().unwrap()).unwrap();
         // SAFETY: This is safe because folder was checked for a null-terminator.
@@ -502,56 +587,38 @@ impl Env {
             .map_err(|err| JailerError::ChangeFileOwner(folder_path.to_owned(), err))
     }
 
-    fn copy_exec_to_chroot(&mut self) -> Result<OsString, JailerError> {
-        let exec_file_name = self
-            .exec_file_path
-            .file_name()
-            .ok_or_else(|| JailerError::ExtractFileName(self.exec_file_path.clone()))?;
-        let jailer_exec_file_path = self.chroot_dir.join(exec_file_name);
-
-        // We do a copy instead of a hard-link for 2 reasons
-        // 1. hard-linking is not possible if the file is in another device
-        // 2. while hardlinking would save up disk space and also memory by sharing parts of the
-        //    Firecracker binary (like the executable .text section), this latter part is not
-        //    desirable in Firecracker's threat model. Copying prevents 2 Firecracker processes from
-        //    sharing memory.
-        let mut src_file = OpenOptions::new()
-            .read(true)
-            .open(&self.exec_file_path)
+    fn exec_memfd(&self) -> Result<File, JailerError> {
+        // Each VM runs a private copy of the exec file. 2 Firecracker processes then share no
+        // memory, as Firecracker's threat model requires. A sealed memory file keeps the copy
+        // out of the jail and off the disk.
+        let mut src_file = File::open(&self.exec_file_path)
             .map_err(|err| JailerError::Open(self.exec_file_path.clone(), err))?;
-        let src_file_metadata = src_file
-            .metadata()
-            .map_err(|err| JailerError::Metadata(self.exec_file_path.clone(), err))?;
-        let src_file_mode = src_file_metadata.mode();
-        let mut dst_file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            // Don't allow symlinks
-            .custom_flags(libc::O_NOFOLLOW)
-            .mode(src_file_mode)
-            .open(&jailer_exec_file_path)
-            .map_err(|err| JailerError::Open(jailer_exec_file_path.clone(), err))?;
-        let dst_file_metadata = dst_file
-            .metadata()
-            .map_err(|err| JailerError::Metadata(jailer_exec_file_path.clone(), err))?;
-        if 1 < dst_file_metadata.nlink() {
-            return Err(JailerError::HardLink(jailer_exec_file_path.clone()));
-        }
-
-        // Mark destination file as owned by the specified uid/gid
-        fchown(&dst_file, Some(self.uid()), Some(self.gid()))
-            .map_err(|err| JailerError::ChangeFileOwner(jailer_exec_file_path.clone(), err))?;
-
-        // Ignore the output since it is not interesting in this case
-        _ = std::io::copy(&mut src_file, &mut dst_file).map_err(|err| {
-            JailerError::Copy(
-                self.exec_file_path.clone(),
-                jailer_exec_file_path.clone(),
-                err,
+        let name =
+            CString::new(self.exec_file_name.as_str()).map_err(JailerError::CStringParsing)?;
+        // SAFETY: `name` is a NUL-terminated string that outlives the call.
+        let fd = SyscallReturnCode(unsafe {
+            libc::memfd_create(
+                name.as_ptr(),
+                libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING | libc::MFD_EXEC,
             )
-        })?;
-
-        Ok(exec_file_name.to_owned())
+        })
+        .into_result()
+        .map_err(JailerError::MemfdCreate)?;
+        // SAFETY: `memfd_create` returned a new descriptor that nothing else owns.
+        let mut exec_file = unsafe { File::from_raw_fd(fd) };
+        io::copy(&mut src_file, &mut exec_file)
+            .map_err(|err| JailerError::Copy(self.exec_file_path.clone(), err))?;
+        // SAFETY: `F_ADD_SEALS` takes an integer seal set.
+        SyscallReturnCode(unsafe {
+            libc::fcntl(
+                fd,
+                libc::F_ADD_SEALS,
+                libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE,
+            )
+        })
+        .into_empty_result()
+        .map_err(JailerError::MemfdSeal)?;
+        Ok(exec_file)
     }
 
     fn join_netns(path: &str) -> Result<(), JailerError> {
@@ -565,27 +632,82 @@ impl Env {
             .map_err(JailerError::SetNetNs)
     }
 
-    fn exec_command(&self, chroot_exec_file: PathBuf) -> io::Error {
-        Command::new(chroot_exec_file)
-            .args(["--id", &self.id])
-            .args(["--start-time-us", &self.start_time_us.to_string()])
-            .args([
-                "--start-time-cpu-us",
-                &get_time_us(ClockType::ProcessCpu).to_string(),
-            ])
-            .args(["--parent-cpu-time-us", &self.jailer_cpu_time_us.to_string()])
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .uid(self.uid())
-            .gid(self.gid())
-            .args(
-                self.api_sock_fd
-                    .iter()
-                    .flat_map(|fd| ["--api-sock-fd".to_owned(), fd.raw().to_string()]),
-            )
-            .args(&self.extra_args)
-            .exec()
+    fn exec_command(&self, exec_file: &File) -> io::Error {
+        let Err(err) = self.fexecve(exec_file);
+        err
+    }
+
+    fn exec_args(&self) -> Vec<String> {
+        let mut args = vec![
+            self.exec_file_name.clone(),
+            "--id".to_owned(),
+            self.id.clone(),
+            "--start-time-us".to_owned(),
+            self.start_time_us.to_string(),
+            "--start-time-cpu-us".to_owned(),
+            get_time_us(ClockType::ProcessCpu).to_string(),
+            "--parent-cpu-time-us".to_owned(),
+            self.jailer_cpu_time_us.to_string(),
+        ];
+        if let Some(fd) = &self.api_sock_fd {
+            args.extend(["--api-sock-fd".to_owned(), fd.raw().to_string()]);
+        }
+        for (name, value) in [
+            ("control-fd", self.control_fd.map(|fd| fd.to_string())),
+            (
+                "control-port",
+                self.control_port.map(|port| port.to_string()),
+            ),
+            ("serial-out-fd", self.serial_out_fd.map(|fd| fd.to_string())),
+        ] {
+            if let Some(value) = value {
+                args.extend([format!("--{name}"), value]);
+            }
+        }
+        args.extend(self.extra_args.iter().cloned());
+        args
+    }
+
+    /// Drops privileges and resets the signal state as `std::process::Command::exec` does, then
+    /// runs `exec_file`. `Command` cannot run a file descriptor.
+    fn fexecve(&self, exec_file: &File) -> io::Result<Infallible> {
+        let args = self
+            .exec_args()
+            .into_iter()
+            .map(CString::new)
+            .collect::<Result<Vec<_>, _>>()?;
+        let vars = std::env::vars_os()
+            .map(|(key, value)| {
+                let mut var = key.into_vec();
+                var.push(b'=');
+                var.extend(value.into_vec());
+                CString::new(var)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let argv = null_terminated(&args);
+        let envp = null_terminated(&vars);
+        // SAFETY: `setgid` takes an integer group ID.
+        SyscallReturnCode(unsafe { libc::setgid(self.gid()) }).into_empty_result()?;
+        // SAFETY: An empty group list reads no memory.
+        SyscallReturnCode(unsafe { libc::setgroups(0, ptr::null()) }).into_empty_result()?;
+        // SAFETY: `setuid` takes an integer user ID.
+        SyscallReturnCode(unsafe { libc::setuid(self.uid()) }).into_empty_result()?;
+        let mut mask = MaybeUninit::<libc::sigset_t>::uninit();
+        // SAFETY: `mask` is valid for writes.
+        SyscallReturnCode(unsafe { libc::sigemptyset(mask.as_mut_ptr()) }).into_empty_result()?;
+        // SAFETY: `sigemptyset` initialised `mask`.
+        match unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, mask.as_ptr(), ptr::null_mut()) } {
+            0 => {}
+            err => return Err(io::Error::from_raw_os_error(err)),
+        }
+        // SAFETY: `SIG_DFL` installs no handler.
+        if unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) } == libc::SIG_ERR {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `argv` and `envp` are null-terminated arrays of NUL-terminated strings that
+        // outlive the call.
+        unsafe { libc::fexecve(exec_file.as_raw_fd(), argv.as_ptr(), envp.as_ptr()) };
+        Err(io::Error::last_os_error())
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -664,8 +786,11 @@ impl Env {
     }
 
     pub fn run(mut self) -> Result<(), JailerError> {
-        let exec_file_name = self.copy_exec_to_chroot()?;
-        let chroot_exec_file = PathBuf::from("/").join(exec_file_name);
+        let exec_file = match self.exec_fd.take() {
+            Some(fd) => crate::bootstrap::executable(fd)?,
+            None => self.exec_memfd()?,
+        };
+        let pid_file = PathBuf::from(format!("/{}{}", self.exec_file_name, PID_FILE_EXTENSION));
 
         // Join the specified network namespace, if applicable.
         if let Some(ref path) = self.netns {
@@ -695,7 +820,10 @@ impl Env {
         self.copy_midr_el1_info()?;
 
         // Jail self.
-        chroot(self.chroot_dir())?;
+        let namespace = match self.mount_ns_fd.take() {
+            Some(fd) => crate::bootstrap::join(fd, self.chroot_dir())?,
+            None => chroot(self.chroot_dir(), &self.bind_mounts)?,
+        };
 
         // This will not only create necessary directories, but will also change ownership
         // for all of them.
@@ -703,15 +831,10 @@ impl Env {
             .iter()
             .try_for_each(|f| self.setup_jailed_folder(f))?;
 
-        // Here we are creating the /dev/kvm and /dev/net/tun devices inside the jailer.
-        // Following commands can be translated into bash like this:
-        // $: mkdir -p $chroot_dir/dev/net
-        // $: dev_net_tun_path={$chroot_dir}/"tun"
-        // $: mknod $dev_net_tun_path c 10 200
-        // www.kernel.org/doc/Documentation/networking/tuntap.txt specifies 10 and 200 as the major
-        // and minor for the /dev/net/tun device.
-        self.mknod_and_own_dev(DEV_NET_TUN, DEV_NET_TUN_MAJOR, DEV_NET_TUN_MINOR)?;
-        // Do the same for /dev/kvm with (major, minor) = (10, 232).
+        if self.tun_enabled {
+            self.setup_jailed_folder("/dev/net")?;
+            self.mknod_and_own_dev(DEV_NET_TUN, DEV_NET_TUN_MAJOR, DEV_NET_TUN_MINOR)?;
+        }
         self.mknod_and_own_dev(DEV_KVM, DEV_KVM_MAJOR, DEV_KVM_MINOR)?;
         // And for /dev/urandom with (major, minor) = (1, 9).
         // If the device is not accessible on the host, output a warning to inform user that MMDS
@@ -789,12 +912,20 @@ impl Env {
 
         // If specified, exec the provided binary into a new PID namespace.
         if self.new_pid_ns {
-            self.exec_into_new_pid_ns(chroot_exec_file)
+            self.exec_into_new_pid_ns(&exec_file, pid_file, &namespace)
         } else {
-            self.save_exec_file_pid(id().try_into().unwrap(), chroot_exec_file.clone())?;
-            Err(JailerError::Exec(self.exec_command(chroot_exec_file)))
+            self.save_exec_file_pid(id().try_into().unwrap(), pid_file)?;
+            Err(JailerError::Exec(self.exec_command(&exec_file)))
         }
     }
+}
+
+fn null_terminated(strings: &[CString]) -> Vec<*const libc::c_char> {
+    strings
+        .iter()
+        .map(|string| string.as_ptr())
+        .chain(iter::once(ptr::null()))
+        .collect()
 }
 
 #[cfg(test)]
@@ -941,6 +1072,7 @@ mod tests {
         assert_eq!(format!("{}", good_env.uid()), good_arg_vals.uid);
 
         assert_eq!(good_env.netns, good_arg_vals.netns.map(String::from));
+        assert!(good_env.tun_enabled);
         assert!(good_env.daemonize);
         assert!(good_env.new_pid_ns);
 
@@ -953,10 +1085,13 @@ mod tests {
 
         let arg_parser = build_arg_parser();
         args = arg_parser.arguments().clone();
-        args.parse(&make_args(&another_good_arg_vals)).unwrap();
+        let mut no_tun_args = make_args(&another_good_arg_vals);
+        no_tun_args.push("--no-tun".to_string());
+        args.parse(&no_tun_args).unwrap();
         let another_good_env =
             Env::new(&args, 0, 0, mock_cgroups.proc_mounts_path.to_str().unwrap())
                 .expect("This another new environment should be created successfully.");
+        assert!(!another_good_env.tun_enabled);
         assert!(!another_good_env.daemonize);
         assert!(!another_good_env.new_pid_ns);
 
@@ -1160,6 +1295,13 @@ mod tests {
         assert_eq!(metadata.st_uid(), env.uid);
         assert_eq!(metadata.st_gid(), env.gid);
 
+        env.setup_jailed_folder(&foo_dir).unwrap();
+        assert_eq!(fs::metadata(&foo_dir).unwrap().st_ino(), metadata.st_ino());
+        let alias = foo_dir.with_extension("alias");
+        std::os::unix::fs::symlink(&foo_dir, &alias).unwrap();
+        assert!(env.setup_jailed_folder(&alias).is_err());
+        fs::remove_file(alias).unwrap();
+
         // Can't safely test that permissions remain unchanged by umask settings without affecting
         // the umask of the whole unit test process.
         // This crate produces a binary, so Rust integ tests aren't an option either.
@@ -1183,17 +1325,19 @@ mod tests {
             libc::S_IFCHR | libc::S_IRUSR | libc::S_IWUSR
         );
 
-        // Trying to create again the same device node is not allowed.
+        env.mknod_and_own_dev(dev_path, major, minor).unwrap();
         assert_eq!(
-            format!(
-                "{}",
-                env.mknod_and_own_dev(dev_path, major, minor).unwrap_err()
-            ),
-            format!(
-                "Failed to create {} via mknod inside the jail: File exists (os error 17)",
-                dev_path.to_str().unwrap()
-            )
+            fs::symlink_metadata(dev_path.to_str().unwrap())
+                .unwrap()
+                .st_ino(),
+            metadata.st_ino()
         );
+        fs::set_permissions(
+            dev_path.to_str().unwrap(),
+            fs::Permissions::from_mode(0o640),
+        )
+        .unwrap();
+        assert!(env.mknod_and_own_dev(dev_path, major, minor).is_err());
     }
 
     #[test]
@@ -1248,7 +1392,7 @@ mod tests {
     }
 
     #[test]
-    fn test_copy_exec_to_chroot() {
+    fn test_exec_file_stays_outside_the_jail() {
         // Create a standard environment.
         let arg_parser = build_arg_parser();
         let mut args = arg_parser.arguments().clone();
@@ -1280,25 +1424,21 @@ mod tests {
         let exec_file_name = Path::new(&some_arg_vals.exec_file).file_name().unwrap();
         fs::write(some_arg_vals.exec_file, "some_content").unwrap();
         args.parse(&make_args(&some_arg_vals)).unwrap();
-        let mut env =
-            Env::new(&args, 0, 0, mock_cgroups.proc_mounts_path.to_str().unwrap()).unwrap();
+        let env = Env::new(&args, 0, 0, mock_cgroups.proc_mounts_path.to_str().unwrap()).unwrap();
 
         // Create the required chroot dir hierarchy.
         fs::create_dir_all(env.chroot_dir()).expect("Could not create dir hierarchy.");
 
+        let exec_file = env.exec_memfd().unwrap();
+        assert!(!env.chroot_dir.join(exec_file_name).exists());
         assert_eq!(
-            env.copy_exec_to_chroot().unwrap(),
-            exec_file_name.to_os_string()
+            fs::read(format!("/proc/self/fd/{}", exec_file.as_raw_fd())).unwrap(),
+            b"some_content"
         );
-        let dest_path = env.chroot_dir.join(exec_file_name);
-        // Check that `fs::copy()` copied src content and permission bits to destination.
-        let metadata_src = fs::metadata(&env.exec_file_path).unwrap();
-        let metadata_dest = fs::metadata(&dest_path).unwrap();
-        let content_src = fs::read(&env.exec_file_path).unwrap();
-        let content_dest = fs::read(&dest_path).unwrap();
-        assert_eq!(content_src, content_dest);
-        assert_eq!(content_dest, b"some_content");
-        assert_eq!(metadata_src.permissions(), metadata_dest.permissions());
+        assert_eq!(
+            unsafe { libc::fcntl(exec_file.as_raw_fd(), libc::F_GET_SEALS) },
+            libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE
+        );
 
         // Clean up the environment.
         fs::remove_dir_all(env.chroot_dir()).expect("Could not remove dir hierarchy.");
@@ -1492,12 +1632,29 @@ mod tests {
         let index_dest_path = dest_path.join("index0");
         fs::metadata(&index_dest_path).unwrap();
         let entries = fs::read_dir(&index_dest_path).unwrap();
-        assert_eq!(entries.enumerate().count(), 6);
+        let source = Path::new("/sys/devices/system/cpu/cpu0/cache/index0");
+        let mut expected = 0;
+        for field in [
+            "size",
+            "level",
+            "type",
+            "shared_cpu_map",
+            "coherency_line_size",
+            "number_of_sets",
+        ] {
+            let value = crate::readln_special(&source.join(field)).ok();
+            expected += usize::from(value.is_some());
+            assert_eq!(
+                crate::readln_special(&index_dest_path.join(field)).ok(),
+                value
+            );
+        }
+        assert!(expected > 0);
+        assert_eq!(entries.count(), expected);
     }
 
     #[test]
     fn test_save_exec_file_pid() {
-        let exec_file_name = "file";
         let pid_file_name = "file.pid";
         let pid = 1;
 
@@ -1505,7 +1662,7 @@ mod tests {
         mock_cgroups.add_v1_mounts().unwrap();
 
         let mut env = create_env(&mock_cgroups.proc_mounts_path);
-        env.save_exec_file_pid(pid, PathBuf::from(exec_file_name))
+        env.save_exec_file_pid(pid, PathBuf::from(pid_file_name))
             .unwrap();
 
         let stored_pid = fs::read_to_string(pid_file_name);

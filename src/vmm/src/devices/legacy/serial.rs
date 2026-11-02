@@ -125,6 +125,22 @@ impl SerialEvents for SerialEventsWrapper {
     }
 }
 
+/// Serial output selected before VM construction.
+#[derive(Debug)]
+pub enum SerialOutput {
+    Path(std::path::PathBuf),
+    Descriptor(File),
+}
+
+impl SerialOutput {
+    pub fn open(&self) -> io::Result<File> {
+        match self {
+            Self::Path(path) => crate::utils::open_file_nonblock(path),
+            Self::Descriptor(file) => file.try_clone(),
+        }
+    }
+}
+
 /// The underlying output destination.
 #[derive(Debug)]
 pub enum SerialOutInner {

@@ -3,20 +3,21 @@
 
 use std::env;
 use std::ffi::CStr;
+use std::fs::File;
 use std::path::Path;
 use std::ptr::null;
 
 use vmm_sys_util::syscall::SyscallReturnCode;
 
 use super::{JailerError, to_cstring};
+use crate::bind_mount::BindMount;
 
-const OLD_ROOT_DIR: &CStr = c"old_root";
 const ROOT_DIR: &CStr = c"/";
 const CURRENT_DIR: &CStr = c".";
 
 // This uses switching to a new mount namespace + pivot_root(), together with the regular chroot,
 // to provide a hardened jail (at least compared to only relying on chroot).
-pub fn chroot(path: &Path) -> Result<(), JailerError> {
+pub fn chroot(path: &Path, binds: &[BindMount]) -> Result<File, JailerError> {
     // We unshare into a new mount namespace.
     // SAFETY: The call is safe because we're invoking a C library
     // function with valid parameters.
@@ -24,20 +25,29 @@ pub fn chroot(path: &Path) -> Result<(), JailerError> {
         .into_empty_result()
         .map_err(JailerError::UnshareNewNs)?;
 
-    // Recursively change the propagation type of all the mounts in this namespace to SLAVE, so
-    // we can call pivot_root.
+    let namespace = File::open("/proc/self/ns/mnt").map_err(JailerError::Launch)?;
+
+    // Bind mounts must neither propagate to nor receive mounts from the host.
     // SAFETY: Safe because we provide valid parameters.
     SyscallReturnCode(unsafe {
         libc::mount(
             null(),
             ROOT_DIR.as_ptr(),
             null(),
-            libc::MS_SLAVE | libc::MS_REC,
+            (if binds.is_empty() {
+                libc::MS_SLAVE
+            } else {
+                libc::MS_PRIVATE
+            }) | libc::MS_REC,
             null(),
         )
     })
     .into_empty_result()
-    .map_err(JailerError::MountPropagationSlave)?;
+    .map_err(JailerError::MountPropagation)?;
+
+    for bind in binds {
+        bind.mount(path)?;
+    }
 
     // We need a CString for the following mount call.
     let chroot_dir = to_cstring(path)?;
@@ -61,12 +71,6 @@ pub fn chroot(path: &Path) -> Result<(), JailerError> {
     // Change current dir to the chroot dir, so we only need to handle relative paths from now on.
     env::set_current_dir(path).map_err(JailerError::SetCurrentDir)?;
 
-    // Create the old_root folder we're going to use for pivot_root, using a relative path.
-    // SAFETY: The call is safe because we provide valid arguments.
-    SyscallReturnCode(unsafe { libc::mkdir(OLD_ROOT_DIR.as_ptr(), libc::S_IRUSR | libc::S_IWUSR) })
-        .into_empty_result()
-        .map_err(JailerError::MkdirOldRoot)?;
-
     // We are now ready to call pivot_root. We have to use sys_call because there is no libc
     // wrapper for pivot_root.
     // SAFETY: Safe because we provide valid parameters.
@@ -74,28 +78,17 @@ pub fn chroot(path: &Path) -> Result<(), JailerError> {
         libc::syscall(
             libc::SYS_pivot_root,
             CURRENT_DIR.as_ptr(),
-            OLD_ROOT_DIR.as_ptr(),
+            CURRENT_DIR.as_ptr(),
         )
     })
     .into_empty_result()
     .map_err(JailerError::PivotRoot)?;
 
-    // pivot_root doesn't guarantee that we will be in "/" at this point, so switch to "/"
-    // explicitly.
-    // SAFETY: Safe because we provide valid parameters.
-    SyscallReturnCode(unsafe { libc::chdir(ROOT_DIR.as_ptr()) })
-        .into_empty_result()
-        .map_err(JailerError::ChdirNewRoot)?;
-
     // Umount the old_root, thus isolating the process from everything outside the jail root folder.
     // SAFETY: Safe because we provide valid parameters.
-    SyscallReturnCode(unsafe { libc::umount2(OLD_ROOT_DIR.as_ptr(), libc::MNT_DETACH) })
+    SyscallReturnCode(unsafe { libc::umount2(CURRENT_DIR.as_ptr(), libc::MNT_DETACH) })
         .into_empty_result()
         .map_err(JailerError::UmountOldRoot)?;
 
-    // Remove the no longer necessary old_root directory.
-    // SAFETY: Safe because we provide valid parameters.
-    SyscallReturnCode(unsafe { libc::rmdir(OLD_ROOT_DIR.as_ptr()) })
-        .into_empty_result()
-        .map_err(JailerError::RmOldRootDir)
+    Ok(namespace)
 }

@@ -26,8 +26,22 @@ jailer --id <id> \
        [--resource-limit <resource=value>] \
        [--daemonize] \
        [--new-pid-ns] \
+       [--api-sock-fd <api_sock_fd>] \
        [--...extra arguments for Firecracker]
 ```
+
+- `--drive-fd <drive-id>=<descriptor>` retains a launcher-opened regular file or
+  block device and passes it to Firecracker. This option can repeat for distinct
+  drive identifiers and descriptor numbers. It needs the API configuration path;
+  configuration-file and no-API launches reject inherited drives. Each descriptor
+  must be readable, and writable when its drive is writable. Append-only and
+  path-only descriptors are rejected. The launcher must retain exclusive backing
+  access for the VM lifetime; this interface does not fence another host.
+  Firecracker uses the file directly without a jail link, mount, path reopen or
+  ownership change. The drive cannot later replace its backing through a path
+  update. Snapshot format 14 records whether a drive requires an inherited
+  backing; restore needs a descriptor for the same logical drive ID. Descriptor
+  numbers are not snapshot state. Older snapshot formats are incompatible.
 
 - `--id` specifies the unique VM identification string, which may contain
   alphanumeric characters and hyphens. The maximum length is currently 64
@@ -102,6 +116,12 @@ Here is an example on how to set multiple resource limits using this argument:
   `CLONE_NEWPID` flag. As a result, the jailer and the process running the exec
   file have different PIDs. The PID of the child process is stored in the jail
   root directory inside `<exec_file_name>.pid`.
+- `--api-sock-fd` names an inherited descriptor above 2. This descriptor must be
+  a listening `AF_UNIX` stream socket without close-on-exec. The jailer keeps it
+  open, checks it and passes `--api-sock-fd <api_sock_fd>` to Firecracker.
+  Firecracker serves its API on this socket and does not bind a path. Do not
+  pass `--api-sock` or `--no-api` to Firecracker with it. A client can connect
+  when the caller has called `listen()`, before Firecracker starts.
 - The jailer adheres to the "end of command options" convention, meaning all
   parameters specified after `--` are forwarded to Firecracker. For example,
   this can be paired with the `--config-file` Firecracker argument to specify a
@@ -115,15 +135,22 @@ Here is an example on how to set multiple resource limits using this argument:
 After starting, the Jailer goes through the following operations:
 
 - Validate **all provided paths** and the VM ID.
-- Close all open file descriptors based on `/proc/<jailer-pid>/fd` except input,
-  output and error.
+- Close all descriptors except standard streams and explicit launch roles.
+  Duplicate descriptor roles are rejected before launch.
+- If `--api-sock-fd` is present, check that its descriptor is a listening
+  `AF_UNIX` stream socket.
 - Cleanup all environment variables received from the parent process.
 - Create the `<chroot_base>/<exec_file_name>/<id>/root` folder, which will be
   henceforth referred to as `<chroot_dir>`. Nothing is done if the path already
   exists (it should not, since `<id>` is supposed to be unique).
-- Copy the file specified with `--exec-file` to `<chroot_dir>/<exec_file_name>`.
-  This ensures the new process will not share memory with any other Firecracker
-  process.
+- Copy the file specified with `--exec-file` into a new memory file
+  (`memfd_create()` with `MFD_EXEC`) and seal it against writes and size
+  changes. This ensures the new process will not share memory with any other
+  concurrent Firecracker process. The jail holds no copy of the executable. A
+  retained jail can instead supply `--exec-fd` with its sealed executable and
+  `--mount-ns-fd` with its mount namespace. The owner must prove the previous
+  VMM dead before reusing either. The bootstrap message returns the VMM pidfd,
+  mount namespace and sealed executable descriptors to that owner.
 - Set resource bounds for current process and its children through
   `--resource-limit` argument, by calling `setrlimit()` system call with the
   specific resource argument. If no limits are provided, the jailer bounds
@@ -154,12 +181,13 @@ After starting, the Jailer goes through the following operations:
   spawn a new process within a new PID namespace. The new process will assume
   the role of init(1) in the new namespace. The parent will store child's PID
   inside `<exec_file_name>.pid`, while the child drops privileges and `exec()`s
-  into the `<exec_file_name>`, as described below.
+  the sealed memory file, as described below.
 - Drop privileges via setting the provided `uid` and `gid`.
-- Exec into
+- Exec the sealed memory file with `fexecve()` as
   `<exec_file_name> --id=<id> --start-time-us=<opaque> --start-time-cpu-us=<opaque>`
-  (and also forward any extra arguments provided to the jailer after `--`, as
-  mentioned in the **Jailer Usage** section), where:
+  (with `--api-sock-fd=<api_sock_fd>` if present, and also forward any extra
+  arguments provided to the jailer after `--`, as mentioned in the **Jailer
+  Usage** section), where:
   - `<id>`: (`string`) - The `<id>` argument provided to jailer.
   - `<opaque>`: (`number`) time calculated by the jailer that it spent doing its
     work.
@@ -187,8 +215,7 @@ After opening the file descriptors mentioned in the previous section, the jailer
 will create the following resources (and all their prerequisites, such as the
 path which contains them):
 
-- `/srv/jailer/firecracker/551e7604-e35c-42b3-b825-416853441234/root/firecracker`
-  (copied from `/usr/bin/firecracker`)
+- `/srv/jailer/firecracker/551e7604-e35c-42b3-b825-416853441234/root`
 
 We are going to refer to
 `/srv/jailer/firecracker/551e7604-e35c-42b3-b825-416853441234/root` as
@@ -319,6 +346,8 @@ Note: default value for `<api-sock>` is `/run/firecracker.socket`.
 
 ## Caveats
 
+- The jailer runs Firecracker from a memory file. This needs Linux 6.3 or later
+  for `MFD_EXEC`, and the `vm.memfd_noexec` sysctl must be 0 or 1.
 - If all the cgroup controllers are bunched up on a single mount point using the
   "all" option, our current program logic will complain it cannot detect
   individual controller mount points.
