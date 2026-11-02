@@ -137,6 +137,8 @@ impl ConsoleState {
     ) -> io::Result<()> {
         self.config.validate_for_firmware(firmware)?;
         #[cfg(target_arch = "x86_64")]
+        self.validate_optical(&self.config)?;
+        #[cfg(target_arch = "x86_64")]
         self.validate_display(&self.config)?;
         #[cfg(target_arch = "x86_64")]
         if self.config.vga_rom_path.is_some() != self.display.has_rom() {
@@ -166,8 +168,26 @@ impl ConsoleState {
         matches!(self.display, ConsoleDisplayState::VirtioGpu)
     }
 
-    pub(super) fn has_optical(&self) -> bool {
-        self.optical.is_some()
+    pub(super) fn optical_irqs(&self) -> impl Iterator<Item = u32> + '_ {
+        self.config.optical_irqs()
+    }
+
+    pub(super) fn validate_optical_config(&self) -> io::Result<()> {
+        self.config.validate()?;
+        self.validate_optical(&self.config)
+    }
+
+    pub(super) fn validate_optical(&self, config: &ConsoleConfig) -> io::Result<()> {
+        let consistent = match &self.optical {
+            Some(optical) => optical.matches_drive_count(config.optical_drives.len()),
+            None => config.optical_drives.is_empty(),
+        };
+        if !consistent {
+            return Err(io::Error::other(
+                "restored optical configuration and state disagree",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -251,6 +271,32 @@ impl DeviceManager {
     }
 
     #[cfg(target_arch = "x86_64")]
+    pub(crate) fn update_optical_drive(
+        &mut self,
+        config: crate::vmm_config::console::OpticalDriveConfig,
+    ) -> io::Result<()> {
+        let console = self
+            .console
+            .as_mut()
+            .ok_or_else(|| io::Error::other("console is absent"))?;
+        let channel = console
+            .config
+            .optical_drives
+            .iter()
+            .position(|drive| drive.drive_id == config.drive_id)
+            .ok_or_else(|| io::Error::other("optical drive is absent"))?;
+        console
+            .optical
+            .as_ref()
+            .ok_or_else(|| io::Error::other("optical controller is absent"))?
+            .lock()
+            .unwrap()
+            .replace_media(channel, config.path_on_host.as_deref())?;
+        console.config.optical_drives[channel] = config;
+        Ok(())
+    }
+
+    #[cfg(target_arch = "x86_64")]
     pub fn attach_console(
         &mut self,
         vm: &Arc<KvmVm>,
@@ -267,11 +313,8 @@ impl DeviceManager {
                 "restored VGA ROM configuration and state disagree",
             ));
         }
-        if state.is_some_and(|state| config.optical_image_path.is_some() != state.optical.is_some())
-        {
-            return Err(io::Error::other(
-                "restored optical configuration and state disagree",
-            ));
+        if let Some(state) = state {
+            state.validate_optical(config)?;
         }
         let VirtioDevices::Pci(pci) = &mut self.virtio_devices else {
             return Err(io::Error::other("graphical console requires PCI"));
@@ -334,14 +377,20 @@ impl DeviceManager {
                 (ConsoleDisplay::VirtioGpu(vga), Some(renderer))
             }
         };
-        let optical = match &config.optical_image_path {
-            Some(path) => Some(OpticalDevice::attach(
+        let optical = if config.optical_drives.is_empty() {
+            None
+        } else {
+            let paths: Vec<_> = config
+                .optical_drives
+                .iter()
+                .map(|drive| drive.path_on_host.as_deref())
+                .collect();
+            Some(OpticalDevice::attach(
                 vm,
                 pci,
-                path,
+                &paths,
                 state.and_then(|state| state.optical.as_ref()),
-            )?),
-            None => None,
+            )?)
         };
         if let Some(state) = state {
             legacy
@@ -523,7 +572,7 @@ mod registration_tests {
             socket_path: directory.as_path().join("console.sock"),
             display: DisplayModel::VirtioGpu,
             vga_rom_path: None,
-            optical_image_path: None,
+            optical_drives: Vec::new(),
         };
         let mut source = setup_vm_with_memory(128 << 20);
         source.setup_irqchip(true).unwrap();
@@ -647,7 +696,10 @@ mod registration_tests {
             #[cfg(target_arch = "x86_64")]
             display: Default::default(),
             vga_rom_path: Some(rom.as_path().to_owned()),
-            optical_image_path: Some(iso.as_path().to_owned()),
+            optical_drives: vec![crate::vmm_config::console::OpticalDriveConfig {
+                drive_id: "setup".into(),
+                path_on_host: Some(iso.as_path().to_owned()),
+            }],
         };
         let mut vm = setup_vm_with_memory(0x1000);
         vm.setup_irqchip(true).unwrap();
@@ -697,7 +749,7 @@ mod registration_tests {
             if missing_state {
                 state.optical = None;
             } else {
-                state.config.optical_image_path = None;
+                state.config.optical_drives.clear();
             }
             let mut target = setup_vm_with_memory(0x1000);
             target.setup_irqchip(true).unwrap();

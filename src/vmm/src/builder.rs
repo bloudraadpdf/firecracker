@@ -227,10 +227,10 @@ pub fn build_microvm_for_boot(
             crate::arch::x86_64::layout::CONSOLE_SYSTEM_MEM_SIZE,
         )
         .map_err(|error| StartMicrovmError::Console(std::io::Error::other(error.to_string())))?;
-        if console.optical_image_path.is_some() {
+        for irq in console.optical_irqs() {
             vm.resource_allocator()
                 .gsi_legacy_allocator
-                .allocate_id_at(crate::devices::legacy::atapi::IRQ)
+                .allocate_id_at(irq)
                 .map_err(|error| {
                     StartMicrovmError::Console(std::io::Error::other(error.to_string()))
                 })?;
@@ -1219,7 +1219,7 @@ pub(crate) mod tests {
                 #[cfg(target_arch = "x86_64")]
                 display: Default::default(),
                 vga_rom_path: None,
-                optical_image_path: None,
+                optical_drives: Vec::new(),
             }),
             ..Default::default()
         };
@@ -1260,14 +1260,14 @@ pub(crate) mod tests {
         use crate::vmm_config::console::ConsoleConfig;
         use crate::vstate::resources::ResourceAllocator;
 
-        let directory = TempDir::new().unwrap();
+        let directory = TempDir::new_with_prefix("./console-irq-").unwrap();
         let rom = TempFile::new().unwrap();
         rom.as_file().write_all(&[0x55, 0xaa, 1]).unwrap();
         rom.as_file().set_len(512).unwrap();
         let iso = TempFile::new().unwrap();
         iso.as_file().set_len(2048).unwrap();
 
-        for optical in [false, true] {
+        for optical in 0..=2 {
             let mut resources: VmResources = MockVmResources::new()
                 .with_boot_source(MockBootSourceConfig::new().into())
                 .into();
@@ -1277,16 +1277,104 @@ pub(crate) mod tests {
                 #[cfg(target_arch = "x86_64")]
                 display: Default::default(),
                 vga_rom_path: Some(rom.as_path().to_owned()),
-                optical_image_path: optical.then(|| iso.as_path().to_owned()),
+                optical_drives: (0..optical)
+                    .map(|channel| crate::vmm_config::console::OpticalDriveConfig {
+                        drive_id: format!("cd{channel}"),
+                        path_on_host: Some(iso.as_path().to_owned()),
+                    })
+                    .collect(),
             });
             let mut events = EventManager::new().unwrap();
             let source = boot_test_vm(&resources, &mut events);
+            let mut replacement = None;
+            if optical > 0 {
+                use crate::rpc_interface::{RuntimeApiController, VmmAction, VmmData};
+                use crate::vmm_config::console::OpticalDriveConfig;
+                let mut runtime = RuntimeApiController::new(source.clone());
+                let selected = optical - 1;
+                let config = OpticalDriveConfig {
+                    drive_id: format!("cd{selected}"),
+                    path_on_host: None,
+                };
+                runtime
+                    .handle_request(VmmAction::UpdateOpticalDrive(config.clone()), &mut events)
+                    .unwrap();
+                assert_eq!(
+                    source
+                        .lock()
+                        .unwrap()
+                        .device_manager
+                        .console_config()
+                        .unwrap()
+                        .optical_drives[selected],
+                    config
+                );
+                let invalid = OpticalDriveConfig {
+                    path_on_host: Some(directory.as_path().join("missing.iso")),
+                    ..config.clone()
+                };
+                runtime
+                    .handle_request(VmmAction::UpdateOpticalDrive(invalid), &mut events)
+                    .unwrap_err();
+                assert_eq!(
+                    source
+                        .lock()
+                        .unwrap()
+                        .device_manager
+                        .console_config()
+                        .unwrap()
+                        .optical_drives[selected],
+                    config
+                );
+                runtime
+                    .handle_request(
+                        VmmAction::UpdateOpticalDrive(OpticalDriveConfig {
+                            drive_id: "absent".into(),
+                            path_on_host: None,
+                        }),
+                        &mut events,
+                    )
+                    .unwrap_err();
+                let media = TempFile::new().unwrap();
+                media.as_file().write_all(&[0x42; 4096]).unwrap();
+                let config = OpticalDriveConfig {
+                    path_on_host: Some(media.as_path().to_owned()),
+                    ..config
+                };
+                runtime
+                    .handle_request(VmmAction::UpdateOpticalDrive(config.clone()), &mut events)
+                    .unwrap();
+                let VmmData::FullVmConfig(current) = runtime
+                    .handle_request(VmmAction::GetFullVmConfig, &mut events)
+                    .unwrap()
+                else {
+                    panic!("configuration response expected");
+                };
+                assert_eq!(current.console.unwrap().optical_drives[selected], config);
+                if optical == 2 {
+                    assert_eq!(
+                        source
+                            .lock()
+                            .unwrap()
+                            .device_manager
+                            .console_config()
+                            .unwrap()
+                            .optical_drives[0]
+                            .path_on_host
+                            .as_deref(),
+                        Some(iso.as_path())
+                    );
+                }
+                resources.console.as_mut().unwrap().optical_drives[selected] = config;
+                replacement = Some(media);
+            }
             let (devices, allocations) = {
                 let vmm = source.lock().unwrap();
                 let vm = vmm.vm.as_kvm().unwrap();
                 let allocator = vm.resource_allocator();
                 assert!(!allocator.gsi_legacy_allocator.is_allocated(12));
-                assert_eq!(allocator.gsi_legacy_allocator.is_allocated(14), optical);
+                assert_eq!(allocator.gsi_legacy_allocator.is_allocated(14), optical > 0);
+                assert_eq!(allocator.gsi_legacy_allocator.is_allocated(15), optical > 1);
                 (vmm.device_manager.save().unwrap(), allocator.save())
             };
             drop(source);
@@ -1314,7 +1402,9 @@ pub(crate) mod tests {
             .unwrap();
             let allocator = target.resource_allocator();
             assert!(!allocator.gsi_legacy_allocator.is_allocated(12));
-            assert_eq!(allocator.gsi_legacy_allocator.is_allocated(14), optical);
+            assert_eq!(allocator.gsi_legacy_allocator.is_allocated(14), optical > 0);
+            assert_eq!(allocator.gsi_legacy_allocator.is_allocated(15), optical > 1);
+            drop(replacement);
         }
     }
 

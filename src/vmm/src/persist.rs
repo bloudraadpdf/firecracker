@@ -199,7 +199,7 @@ pub enum CreateSnapshotError {
 }
 
 /// Snapshot version
-pub const SNAPSHOT_VERSION: Version = Version::new(37, 0, 0);
+pub const SNAPSHOT_VERSION: Version = Version::new(40, 0, 0);
 
 /// Creates a Microvm snapshot.
 pub fn create_snapshot(
@@ -898,7 +898,7 @@ mod tests {
                     #[cfg(target_arch = "x86_64")]
                     vga_rom_path: Some(rom.as_path().to_owned()),
                     #[cfg(target_arch = "x86_64")]
-                    optical_image_path: None,
+                    optical_drives: Vec::new(),
                 },
                 None,
                 &mut events,
