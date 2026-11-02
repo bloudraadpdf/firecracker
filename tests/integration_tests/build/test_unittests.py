@@ -15,24 +15,25 @@ TARGET = "{}-unknown-linux-musl".format(MACHINE)
 
 
 @pytest.mark.timeout(600)
-def test_unittests(test_fc_session_root_path, request):
+@pytest.mark.parametrize(
+    "features", ["", "--features windows"], ids=["default", "windows"]
+)
+def test_unittests(test_fc_session_root_path, features):
     """
     Run unit and doc tests for all supported targets.
-
-    Skipped when test_coverage is in the same session: it runs the same tests.
     """
-    if any(item.name == "test_coverage" for item in request.session.items):
-        pytest.skip("test_coverage runs the unit tests in this session")
-
-    host.cargo_test(
-        os.path.join(test_fc_session_root_path, "unit-tests"), f"--target {TARGET}"
-    )
+    extra_args = f"--target {TARGET} {features}"
+    host.cargo_test(test_fc_session_root_path, extra_args=extra_args)
+    host.cargo_test(test_fc_session_root_path, extra_args=extra_args + " --examples")
 
 
-def test_benchmarks_compile():
+@pytest.mark.parametrize(
+    "features", ["", "--features windows"], ids=["default", "windows"]
+)
+def test_benchmarks_compile(features):
     """Checks that all benchmarks compile"""
 
-    host.cargo("bench", f"--all --no-run --target {TARGET}")
+    host.cargo("bench", f"--all --no-run --target {TARGET} {features}")
 
 
 @pytest.mark.parametrize(

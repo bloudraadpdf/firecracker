@@ -16,6 +16,7 @@ name = "firecracker"
 bench = false
 
 [features]
+windows = ["vmm/windows"]
 tracing = ["log-instrument", "utils/tracing", "vmm/tracing"]
 fuzzing = ["vmm/fuzzing"]
 gdb = ["vmm/gdb"]

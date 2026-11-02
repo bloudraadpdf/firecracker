@@ -79,6 +79,24 @@ mod tests {
     use super::*;
     use crate::api_server::parsed_request::tests::{depr_action_from_req, vmm_action_from_request};
 
+    fn expected_put_config() -> MachineConfigUpdate {
+        MachineConfigUpdate {
+            vcpu_count: Some(8),
+            mem_size_mib: Some(1024),
+            smt: Some(false),
+            #[cfg(target_arch = "x86_64")]
+            hyperv: Some(false),
+            #[cfg(target_arch = "x86_64")]
+            pit: Some(true),
+            cpu_template: None,
+            track_dirty_pages: Some(false),
+            pcie_hotplug_ports: Some(0),
+            huge_pages: Some(HugePageConfig::None),
+            #[cfg(feature = "gdb")]
+            gdb_socket_path: None,
+        }
+    }
+
     #[test]
     fn test_parse_get_machine_config_request() {
         parse_get_machine_config().unwrap();
@@ -118,17 +136,8 @@ mod tests {
             }}"#
             );
             let expected_config = MachineConfigUpdate {
-                vcpu_count: Some(8),
-                mem_size_mib: Some(1024),
-                smt: Some(false),
-                #[cfg(target_arch = "x86_64")]
-                pit: Some(true),
-                cpu_template: None,
-                track_dirty_pages: Some(false),
                 huge_pages: Some(expected),
-                pcie_hotplug_ports: Some(0),
-                #[cfg(feature = "gdb")]
-                gdb_socket_path: None,
+                ..expected_put_config()
             };
             assert_eq!(
                 vmm_action_from_request(parse_put_machine_config(&Body::new(body)).unwrap()),
@@ -142,17 +151,8 @@ mod tests {
             "cpu_template": "None"
         }"#;
         let expected_config = MachineConfigUpdate {
-            vcpu_count: Some(8),
-            mem_size_mib: Some(1024),
-            smt: Some(false),
-            #[cfg(target_arch = "x86_64")]
-            pit: Some(true),
             cpu_template: Some(StaticCpuTemplate::None),
-            track_dirty_pages: Some(false),
-            huge_pages: Some(HugePageConfig::None),
-            pcie_hotplug_ports: Some(0),
-            #[cfg(feature = "gdb")]
-            gdb_socket_path: None,
+            ..expected_put_config()
         };
         assert_eq!(
             vmm_action_from_request(parse_put_machine_config(&Body::new(body)).unwrap()),
@@ -166,17 +166,8 @@ mod tests {
             "track_dirty_pages": true
         }"#;
         let expected_config = MachineConfigUpdate {
-            vcpu_count: Some(8),
-            mem_size_mib: Some(1024),
-            smt: Some(false),
-            #[cfg(target_arch = "x86_64")]
-            pit: Some(true),
-            cpu_template: None,
             track_dirty_pages: Some(true),
-            huge_pages: Some(HugePageConfig::None),
-            pcie_hotplug_ports: Some(0),
-            #[cfg(feature = "gdb")]
-            gdb_socket_path: None,
+            ..expected_put_config()
         };
         assert_eq!(
             vmm_action_from_request(parse_put_machine_config(&Body::new(body)).unwrap()),
@@ -194,17 +185,9 @@ mod tests {
         #[cfg(target_arch = "x86_64")]
         {
             let expected_config = MachineConfigUpdate {
-                vcpu_count: Some(8),
-                mem_size_mib: Some(1024),
-                smt: Some(false),
-                #[cfg(target_arch = "x86_64")]
-                pit: Some(true),
                 cpu_template: Some(StaticCpuTemplate::T2),
                 track_dirty_pages: Some(true),
-                huge_pages: Some(HugePageConfig::None),
-                pcie_hotplug_ports: Some(0),
-                #[cfg(feature = "gdb")]
-                gdb_socket_path: None,
+                ..expected_put_config()
             };
             assert_eq!(
                 vmm_action_from_request(parse_put_machine_config(&Body::new(body)).unwrap()),
@@ -224,17 +207,9 @@ mod tests {
             "track_dirty_pages": true
         }"#;
         let expected_config = MachineConfigUpdate {
-            vcpu_count: Some(8),
-            mem_size_mib: Some(1024),
             smt: Some(true),
-            #[cfg(target_arch = "x86_64")]
-            pit: Some(true),
-            cpu_template: None,
             track_dirty_pages: Some(true),
-            huge_pages: Some(HugePageConfig::None),
-            pcie_hotplug_ports: Some(0),
-            #[cfg(feature = "gdb")]
-            gdb_socket_path: None,
+            ..expected_put_config()
         };
         assert_eq!(
             vmm_action_from_request(parse_put_machine_config(&Body::new(body)).unwrap()),
