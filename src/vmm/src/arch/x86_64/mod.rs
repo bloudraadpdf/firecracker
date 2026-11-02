@@ -7,6 +7,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the THIRD-PARTY file.
 
+/// Control-flow enforcement snapshot state.
+pub mod cet;
 /// Logic for handling x86_64 CPU models.
 pub mod cpu_model;
 mod gdt;
