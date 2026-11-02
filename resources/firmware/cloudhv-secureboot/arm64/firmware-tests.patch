@@ -1,0 +1,27 @@
+diff --git a/ArmVirtPkg/ArmVirtCloudHv.fdf b/ArmVirtPkg/ArmVirtCloudHv.fdf
+--- a/ArmVirtPkg/ArmVirtCloudHv.fdf
++++ b/ArmVirtPkg/ArmVirtCloudHv.fdf
+@@ -115,6 +115,9 @@
+ !if $(FIRECRACKER_SECURE_BOOT) == TRUE
+   INF OvmfPkg/VirtMmCommunicationDxe/VirtMmCommunication.inf
+   INF MdeModulePkg/Universal/Variable/RuntimeDxe/VariableSmmRuntimeDxe.inf
++!ifdef FIRECRACKER_VARIABLE_PROBE
++  INF OvmfPkg/CloudHv/Tests/LargeVariableProbe.inf
++!endif
+ !else
+   INF MdeModulePkg/Universal/FaultTolerantWriteDxe/FaultTolerantWriteDxe.inf
+   INF MdeModulePkg/Universal/Variable/RuntimeDxe/VariableRuntimeDxe.inf
+diff --git a/ArmVirtPkg/Tests/CloudHvSecureProbeAArch64.dsc b/ArmVirtPkg/Tests/CloudHvSecureProbeAArch64.dsc
+new file mode 100644
+--- /dev/null
++++ b/ArmVirtPkg/Tests/CloudHvSecureProbeAArch64.dsc
+@@ -0,0 +1,9 @@
++# Copyright 2026 Bloudraad.
++# SPDX-License-Identifier: BSD-2-Clause-Patent
++
++[Defines]
++  DEFINE FIRECRACKER_VARIABLE_PROBE = TRUE
++!include ArmVirtPkg/ArmVirtCloudHvSecure.dsc
++[Components]
++  OvmfPkg/CloudHv/Tests/SecureBootProbe.inf
++  OvmfPkg/CloudHv/Tests/LargeVariableProbe.inf

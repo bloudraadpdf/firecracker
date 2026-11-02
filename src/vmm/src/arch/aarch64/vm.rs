@@ -30,10 +30,10 @@ mod ioctls {
 /// Structure representing the current architecture's understand of what a "virtual machine" is.
 #[derive(Debug)]
 pub struct KvmVm {
+    // Drop GIC/ITS descriptors before VmCommon releases retained memory mappings.
+    irqchip_handle: Option<crate::arch::aarch64::gic::GICDevice>,
     /// Architecture independent parts of a vm.
     pub common: VmCommon,
-    // On aarch64 we need to keep around the fd obtained by creating the VGIC device.
-    irqchip_handle: Option<crate::arch::aarch64::gic::GICDevice>,
 }
 
 /// Error type for [`KvmVm::restore_state`]

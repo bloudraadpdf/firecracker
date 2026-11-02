@@ -710,6 +710,11 @@ pub struct RuntimeApiController {
 }
 
 impl RuntimeApiController {
+    /// Return the requested shutdown status, including fatal paused-state failures.
+    pub fn shutdown_exit_code(&self) -> Option<crate::FcExitCode> {
+        self.vmm.lock().expect("Poisoned lock").shutdown_exit_code()
+    }
+
     /// Handles the incoming runtime `VmmAction` request and provides a response for it.
     pub fn handle_request(
         &mut self,
@@ -955,7 +960,12 @@ impl RuntimeApiController {
         let vm_info = VmInfo::from(&*locked_vmm);
         let create_start_us = get_time_us(ClockType::Monotonic);
 
-        create_snapshot(&mut locked_vmm, &vm_info, create_params)?;
+        let result = create_snapshot(&mut locked_vmm, &vm_info, create_params);
+        #[cfg(feature = "windows")]
+        if locked_vmm.device_manager.uefi_vars_failed() {
+            locked_vmm.stop(crate::FcExitCode::GenericError);
+        }
+        result?;
 
         match create_params.snapshot_type {
             SnapshotType::Full => {
@@ -1360,6 +1370,8 @@ mod tests {
                 resume_vm: false,
                 network_overrides: vec![],
                 vsock_override: None,
+                tpm: None,
+                uefi_vars: None,
                 clock_realtime: false,
                 huge_pages: SnapshotLoadHugePageConfig::Snapshot,
                 vmclock_restore_notification: Default::default(),

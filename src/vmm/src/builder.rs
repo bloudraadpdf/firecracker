@@ -46,7 +46,6 @@ use crate::logger::warn;
 use crate::persist::{MicrovmState, MicrovmStateError};
 use crate::resources::VmResources;
 use crate::seccomp::BpfThreadMap;
-use crate::snapshot::Persist;
 use crate::utils::{u32_mib_to_bytes, u64_to_usize};
 use crate::vmm_config::boot_source::{
     DEFAULT_KERNEL_CMDLINE, append_root_device_cmdline, build_cmdline,
@@ -68,9 +67,14 @@ use crate::{EventManager, Vmm, VmmError};
 pub enum StartMicrovmError {
     /// Unsupported build configuration: {0}
     WindowsFeature(#[from] crate::vmm_config::WindowsFeatureDisabled),
+    /// Protected UEFI variable service attachment failed: {0}
+    UefiVars(std::io::Error),
+    /// TPM attachment failed: {0}
+    Tpm(std::io::Error),
     /// Graphical console configuration or attachment failed: {0}
-    #[cfg(target_arch = "x86_64")]
     Console(std::io::Error),
+    /// Cannot register platform events: {0}
+    PlatformRegistration(std::io::Error),
     /// The transitional PCI platform requires --enable-pci.
     PciDisabled,
     /// Unable to attach block device to Vmm: {0}
@@ -81,9 +85,6 @@ pub enum StartMicrovmError {
     ConfigureSystem(#[from] ConfigurationError),
     /// Failed to create device manager: {0}
     CreateDeviceManager(#[from] DeviceManagerCreateError),
-    /// Failed to register platform event subscribers: {0}
-    #[cfg(target_arch = "x86_64")]
-    PlatformRegistration(std::io::Error),
     /// Failed to create guest config: {0}
     CreateGuestConfig(#[from] GuestConfigError),
     /// Cannot create network device: {0}
@@ -166,7 +167,6 @@ pub fn build_microvm_for_boot(
     if !vm_resources.pci_enabled && !vm_resources.machine_config.pci_transport.is_modern() {
         return Err(StartMicrovmError::PciDisabled);
     }
-    #[cfg(target_arch = "x86_64")]
     if vm_resources.console.is_some()
         && (!vm_resources.pci_enabled
             || vm_resources.machine_config.huge_pages.is_hugetlbfs()
@@ -176,7 +176,13 @@ pub fn build_microvm_for_boot(
             "console requires PCI, at least 64 MiB and non-hugetlbfs memory",
         )));
     }
-    #[cfg(all(target_arch = "x86_64", feature = "windows"))]
+    #[cfg(target_arch = "aarch64")]
+    if vm_resources.console.is_some() && !vm_resources.machine_config.pci_transport.is_modern() {
+        return Err(StartMicrovmError::Console(std::io::Error::other(
+            "ARM console requires modern PCI",
+        )));
+    }
+    #[cfg(feature = "windows")]
     if let Some(console) = &vm_resources.console {
         console
             .validate_for_firmware(vm_resources.boot_source.config.firmware.as_ref())
@@ -298,7 +304,8 @@ pub fn build_microvm_for_boot(
         entry_point.protocol,
     )
     .map_err(ConfigurationError::FirmwareIdentity)?;
-    #[cfg(all(target_arch = "aarch64", feature = "windows"))]
+    #[cfg(target_arch = "aarch64")]
+    #[cfg(feature = "windows")]
     if entry_point.protocol == crate::arch::BootProtocol::FirmwareBoot {
         crate::arch::aarch64::reserve_firmware_memory(
             &kvm_vm,
@@ -402,11 +409,29 @@ pub fn build_microvm_for_boot(
 
     device_manager.attach_root_ports(&kvm_vm)?;
 
-    #[cfg(all(target_arch = "x86_64", feature = "windows"))]
+    #[cfg(feature = "windows")]
     if let Some(console) = &vm_resources.console {
         device_manager
-            .attach_console(&kvm_vm, console, None)
+            .attach_console(
+                &kvm_vm,
+                console,
+                None,
+                #[cfg(target_arch = "aarch64")]
+                event_manager,
+            )
             .map_err(StartMicrovmError::Console)?;
+    }
+    #[cfg(feature = "windows")]
+    if let Some(tpm) = &vm_resources.tpm {
+        device_manager
+            .attach_tpm(&kvm_vm, tpm, None)
+            .map_err(StartMicrovmError::Tpm)?;
+    }
+    #[cfg(feature = "windows")]
+    if let Some(variables) = &vm_resources.uefi_vars {
+        device_manager
+            .attach_uefi_vars(&kvm_vm, variables, None)
+            .map_err(StartMicrovmError::UefiVars)?;
     }
     device_manager.attach_vmgenid_device(&kvm_vm)?;
     device_manager.attach_vmclock_device(&kvm_vm)?;
@@ -431,7 +456,7 @@ pub fn build_microvm_for_boot(
         vm_resources.boot_source.config.firmware.as_ref(),
     )?;
 
-    #[cfg(all(target_arch = "x86_64", feature = "windows"))]
+    #[cfg(feature = "windows")]
     let platform_registration = device_manager
         .register_platform_devices(event_manager)
         .map_err(StartMicrovmError::PlatformRegistration)?;
@@ -476,7 +501,7 @@ pub fn build_microvm_for_boot(
         debug!("No GDB socket provided not starting gdb server.");
     }
 
-    #[cfg(all(target_arch = "x86_64", feature = "windows"))]
+    #[cfg(feature = "windows")]
     platform_registration.commit();
     event_manager.add_subscriber(vmm.clone());
 
@@ -600,7 +625,7 @@ pub fn build_microvm_from_snapshot(
 ) -> Result<Arc<Mutex<Vmm>>, BuildMicrovmFromSnapshotError> {
     microvm_state.validate_windows_support()?;
     microvm_state.vm_info.boot_source.validate()?;
-    #[cfg(all(target_arch = "x86_64", feature = "windows"))]
+    #[cfg(feature = "windows")]
     if let Some(console) = &microvm_state.device_states.console {
         console
             .validate_for_firmware(microvm_state.vm_info.boot_source.firmware.as_ref())
@@ -719,7 +744,7 @@ pub fn build_microvm_from_snapshot(
     let mut device_manager =
         DeviceManager::restore(device_ctor_args, &microvm_state.device_states)?;
 
-    #[cfg(all(target_arch = "x86_64", feature = "windows"))]
+    #[cfg(feature = "windows")]
     let platform_registration = device_manager
         .register_platform_devices(event_manager)
         .map_err(StartMicrovmError::PlatformRegistration)?;
@@ -744,7 +769,7 @@ pub fn build_microvm_from_snapshot(
     )?;
     let vmm = Arc::new(Mutex::new(vmm));
     vmm.lock().unwrap().instance_info.state = VmState::Paused;
-    #[cfg(all(target_arch = "x86_64", feature = "windows"))]
+    #[cfg(feature = "windows")]
     platform_registration.commit();
     event_manager.add_subscriber(vmm.clone());
 
@@ -1139,6 +1164,40 @@ pub(crate) mod tests {
     }
 
     #[cfg(target_arch = "x86_64")]
+    fn boot_test_vm(resources: &VmResources, events: &mut EventManager) -> Arc<Mutex<Vmm>> {
+        build_microvm_for_boot(
+            &InstanceInfo::default(),
+            resources,
+            events,
+            &crate::seccomp::get_empty_filters(),
+        )
+        .unwrap()
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn default_linux_omits_pc_timers() {
+        use crate::test_utils::mock_resources::{MockBootSourceConfig, MockVmResources};
+
+        for pci in [false, true] {
+            let mut resources: VmResources = MockVmResources::new()
+                .with_boot_source(MockBootSourceConfig::new().into())
+                .into();
+            resources.pci_enabled = pci;
+            let mut events = EventManager::new().unwrap();
+            let source = boot_test_vm(&resources, &mut events);
+            let vmm = source.lock().unwrap();
+            let state = vmm.device_manager.save().unwrap();
+            assert!(state.power_state.is_none());
+            assert!(state.cmos_state.is_none());
+            let vm = vmm.vm.as_kvm().unwrap();
+            assert!(!vm.resource_allocator().gsi_legacy_allocator.is_allocated(8));
+            vm.pio_bus.read(0x70, &mut [0]).unwrap_err();
+            vm.pio_bus.read(0x600, &mut [0]).unwrap_err();
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn transitional_platform_requires_pci() {
         let mut resources = VmResources::default();
@@ -1228,7 +1287,7 @@ pub(crate) mod tests {
                 let allocator = vm.resource_allocator();
                 assert!(!allocator.gsi_legacy_allocator.is_allocated(12));
                 assert_eq!(allocator.gsi_legacy_allocator.is_allocated(14), optical);
-                (vmm.device_manager.save(), allocator.save())
+                (vmm.device_manager.save().unwrap(), allocator.save())
             };
             drop(source);
             drop(events);
@@ -1523,40 +1582,6 @@ pub(crate) mod tests {
                 .get_virtio_device(VirtioDeviceType::Balloon, BALLOON_DEV_ID)
                 .is_some()
         );
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    fn boot_test_vm(resources: &VmResources, events: &mut EventManager) -> Arc<Mutex<Vmm>> {
-        build_microvm_for_boot(
-            &InstanceInfo::default(),
-            resources,
-            events,
-            &crate::seccomp::get_empty_filters(),
-        )
-        .unwrap()
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    #[test]
-    fn default_linux_omits_pc_timers() {
-        use crate::test_utils::mock_resources::{MockBootSourceConfig, MockVmResources};
-
-        for pci in [false, true] {
-            let mut resources: VmResources = MockVmResources::new()
-                .with_boot_source(MockBootSourceConfig::new().into())
-                .into();
-            resources.pci_enabled = pci;
-            let mut events = EventManager::new().unwrap();
-            let source = boot_test_vm(&resources, &mut events);
-            let vmm = source.lock().unwrap();
-            let state = vmm.device_manager.save();
-            assert!(state.power_state.is_none());
-            assert!(state.cmos_state.is_none());
-            let vm = vmm.vm.as_kvm().unwrap();
-            assert!(!vm.resource_allocator().gsi_legacy_allocator.is_allocated(8));
-            vm.pio_bus.read(0x70, &mut [0]).unwrap_err();
-            vm.pio_bus.read(0x600, &mut [0]).unwrap_err();
-        }
     }
 
     #[test]

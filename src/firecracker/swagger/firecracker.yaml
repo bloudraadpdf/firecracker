@@ -1470,14 +1470,50 @@ definitions:
         description: A description of the error condition
         readOnly: true
 
+  UefiVarsConfig:
+    type: object
+    additionalProperties: false
+    required:
+      - socket_path
+    properties:
+      socket_path:
+        type: string
+        description: Private authenticated-variable service socket (AMD64 only).
+
+  UefiVarsRestoreConfig:
+    type: object
+    additionalProperties: false
+    required:
+      - socket_path
+      - expected_generation
+    properties:
+      socket_path:
+        type: string
+      expected_generation:
+        type: integer
+        minimum: 0
+        description: Explicit current generation of the destination store before complete checkpoint replacement.
+
+  TpmConfig:
+    type: object
+    additionalProperties: false
+    required:
+      - socket_path
+    properties:
+      socket_path:
+        type: string
+        description: Private control socket of a dedicated swtpm TPM 2.0 process (AMD64 only).
+
   ConsoleConfig:
     type: object
     additionalProperties: false
     description: |
-      Optional AMD64 VGA, PS/2 keyboard, USB absolute HID mouse and optical
-      installation hardware. Requires PCI,
-      at least 64 MiB guest memory and ordinary pages. Set through the startup
-      configuration file; there is no separate console configuration endpoint.
+      Optional graphical console. AMD64 attaches VGA, PS/2 keyboard, USB
+      absolute HID mouse and optional optical media. ARM64 attaches an MMIO
+      display and one combined virtio keyboard/absolute pointer with modern PCI;
+      its configuration accepts only socket_path. Both require PCI, at least
+      64 MiB and ordinary pages. Set through the startup configuration file;
+      there is no separate console configuration endpoint.
     required:
       - socket_path
     properties:
@@ -1486,12 +1522,14 @@ definitions:
         description: Private host Unix socket for the console bridge, at most 107 bytes.
       vga_rom_path:
         type: string
-        description: |
-          Optional host path to the SeaVGABIOS expansion ROM when CloudHv firmware
-          is explicitly selected. Required for SeaBIOS and legacy profiles.
+        description: >-
+          AMD64 host path to the SeaVGABIOS expansion ROM. Required for SeaBIOS
+          and when no firmware profile is selected; optional with explicit
+          cloud-hv firmware, whose GOP driver uses the display BARs directly.
+          Omission creates no ROM mapping or ROM BAR. Not accepted on ARM64.
       optical_image_path:
         type: string
-        description: Optional host path to a read-only installation ISO.
+        description: Optional AMD64 host path to a read-only installation ISO; not accepted on ARM64.
 
   FullVmConfiguration:
     type: object
@@ -1509,6 +1547,10 @@ definitions:
         $ref: "#/definitions/CpuConfig"
       console:
         $ref: "#/definitions/ConsoleConfig"
+      tpm:
+        $ref: "#/definitions/TpmConfig"
+      uefi-vars:
+        $ref: "#/definitions/UefiVarsConfig"
       logger:
         $ref: "#/definitions/Logger"
       machine-config:
@@ -1964,6 +2006,12 @@ definitions:
           for restoring a snapshot with a different socket path than the one used
           when the snapshot was created. For example, when the original socket path
           is no longer available or when deploying to a different environment.
+      tpm:
+        $ref: "#/definitions/TpmConfig"
+        description: Dedicated destination backend, required exactly when the snapshot contains TPM state.
+      uefi_vars:
+        $ref: "#/definitions/UefiVarsRestoreConfig"
+        description: Required exactly when the snapshot contains protected firmware variables.
       clock_realtime:
         type: boolean
         description:

@@ -42,8 +42,9 @@ pub use x86_64::vm::{KvmVm, KvmVmError, VmState};
 
 #[cfg(target_arch = "x86_64")]
 pub use crate::arch::x86_64::{
-    ConfigurationError, MAX_GUEST_MEM_SIZE, arch_memory_regions, configure_system_for_boot,
-    get_kernel_start, initrd_load_addr, layout::*, load_kernel,
+    ConfigurationError, MAX_GUEST_MEM_SIZE, TPM_MEM_START, UEFI_VARS_MEM_START,
+    arch_memory_regions, configure_system_for_boot, get_kernel_start, initrd_load_addr, layout::*,
+    load_kernel,
 };
 
 /// Types of devices that can get attached to this platform.

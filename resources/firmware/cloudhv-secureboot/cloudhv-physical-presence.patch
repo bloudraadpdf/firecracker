@@ -1,0 +1,292 @@
+--- a/SecurityPkg/Library/DxeTcg2PhysicalPresenceLib/DxeTcg2PhysicalPresenceLib.inf
++++ b/SecurityPkg/Library/DxeTcg2PhysicalPresenceLib/DxeTcg2PhysicalPresenceLib.inf
+@@ -38,6 +38,7 @@
+   SecurityPkg/SecurityPkg.dec
+ 
+ [LibraryClasses]
++  BaseLib
+   MemoryAllocationLib
+   UefiLib
+   UefiBootServicesTableLib
+--- a/SecurityPkg/Library/DxeTcg2PhysicalPresenceLib/DxeTcg2PhysicalPresenceLib.c
++++ b/SecurityPkg/Library/DxeTcg2PhysicalPresenceLib/DxeTcg2PhysicalPresenceLib.c
+@@ -18,6 +18,7 @@
+ #include <Library/VariablePolicyHelperLib.h>
+ #include <Library/DebugLib.h>
+ #include <Library/BaseMemoryLib.h>
++#include <Library/BaseLib.h>
+ #include <Library/UefiRuntimeServicesTableLib.h>
+ #include <Library/UefiDriverEntryPoint.h>
+ #include <Library/UefiBootServicesTableLib.h>
+@@ -707,6 +708,19 @@
+ 
+   *RequestConfirmed = FALSE;
+ 
++#ifdef FIRECRACKER_SECURE_BOOT
++  switch (TcgPpData->PPRequest) {
++    case TCG2_PHYSICAL_PRESENCE_NO_ACTION:
++    case TCG2_PHYSICAL_PRESENCE_CLEAR:
++    case TCG2_PHYSICAL_PRESENCE_ENABLE_CLEAR:
++    case TCG2_PHYSICAL_PRESENCE_ENABLE_CLEAR_2:
++    case TCG2_PHYSICAL_PRESENCE_ENABLE_CLEAR_3:
++      break;
++    default:
++      return FALSE;
++  }
++#endif
++
+   if (TcgPpData->PPRequest <= TCG2_PHYSICAL_PRESENCE_NO_ACTION_MAX) {
+     //
+     // Need TCG2 protocol.
+@@ -726,7 +740,13 @@
+     case TCG2_PHYSICAL_PRESENCE_ENABLE_CLEAR:
+     case TCG2_PHYSICAL_PRESENCE_ENABLE_CLEAR_2:
+     case TCG2_PHYSICAL_PRESENCE_ENABLE_CLEAR_3:
++#ifdef FIRECRACKER_SECURE_BOOT
++      if (((Flags.PPFlags & TCG2_BIOS_TPM_MANAGEMENT_FLAG_PP_REQUIRED_FOR_CLEAR) == 0) &&
++          ((TcgPpData->PPRequest == TCG2_PHYSICAL_PRESENCE_CLEAR) ||
++           ((Flags.PPFlags & TCG2_BIOS_TPM_MANAGEMENT_FLAG_PP_REQUIRED_FOR_TURN_ON) == 0))) {
++#else
+       if ((Flags.PPFlags & TCG2_BIOS_TPM_MANAGEMENT_FLAG_PP_REQUIRED_FOR_CLEAR) == 0) {
++#endif
+         *RequestConfirmed = TRUE;
+       }
+ 
+@@ -845,11 +865,15 @@
+     //
+     // Invalid operation request.
+     //
++#ifdef FIRECRACKER_SECURE_BOOT
++    TcgPpData->PPResponse = TCG_PP_OPERATION_RESPONSE_BIOS_FAILURE;
++#else
+     if (TcgPpData->PPRequest <= TCG2_PHYSICAL_PRESENCE_NO_ACTION_MAX) {
+       TcgPpData->PPResponse = TCG_PP_OPERATION_RESPONSE_SUCCESS;
+     } else {
+       TcgPpData->PPResponse = TCG_PP_OPERATION_RESPONSE_BIOS_FAILURE;
+     }
++#endif
+ 
+     TcgPpData->LastPPRequest      = TcgPpData->PPRequest;
+     TcgPpData->PPRequest          = TCG2_PHYSICAL_PRESENCE_NO_ACTION;
+@@ -863,6 +887,11 @@
+                       DataSize,
+                       TcgPpData
+                       );
++#ifdef FIRECRACKER_SECURE_BOOT
++    if (EFI_ERROR (Status)) {
++      CpuDeadLoop ();
++    }
++#endif
+     return;
+   }
+ 
+@@ -930,7 +959,11 @@
+                     TcgPpData
+                     );
+   if (EFI_ERROR (Status)) {
++#ifdef FIRECRACKER_SECURE_BOOT
++    CpuDeadLoop ();
++#else
+     return;
++#endif
+   }
+ 
+   if (TcgPpData->PPResponse == TCG_PP_OPERATION_RESPONSE_USER_ABORT) {
+@@ -980,6 +1013,52 @@
+   gRT->ResetSystem (EfiResetCold, EFI_SUCCESS, 0, NULL);
+   ASSERT (FALSE);
+ }
++
++#ifdef FIRECRACKER_SECURE_BOOT
++STATIC VOID
++InitializePhysicalPresenceFlags (
++  OUT EFI_TCG2_PHYSICAL_PRESENCE_FLAGS *PpiFlags
++  )
++{
++  EFI_STATUS Status;
++  UINTN DataSize;
++  UINT32 Attributes;
++
++  //
++  // Initialize physical presence flags.
++  //
++  DataSize = sizeof (EFI_TCG2_PHYSICAL_PRESENCE_FLAGS);
++  Status   = gRT->GetVariable (
++                    TCG2_PHYSICAL_PRESENCE_FLAGS_VARIABLE,
++                    &gEfiTcg2PhysicalPresenceGuid,
++                    &Attributes,
++                    &DataSize,
++                    PpiFlags
++                    );
++  if (Status == EFI_NOT_FOUND) {
++    Attributes = EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS;
++    PpiFlags->PPFlags = PcdGet32 (PcdTcg2PhysicalPresenceFlags);
++    Status           = gRT->SetVariable (
++                              TCG2_PHYSICAL_PRESENCE_FLAGS_VARIABLE,
++                              &gEfiTcg2PhysicalPresenceGuid,
++                              EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS,
++                              sizeof (EFI_TCG2_PHYSICAL_PRESENCE_FLAGS),
++                              PpiFlags
++                              );
++    if (EFI_ERROR (Status)) {
++      DEBUG ((DEBUG_ERROR, "[TPM2] Set physical presence flag failed, Status = %r\n", Status));
++      CpuDeadLoop ();
++    }
++
++    DEBUG ((DEBUG_INFO, "[TPM2] Initial physical presence flags value is 0x%x\n", PpiFlags->PPFlags));
++  }
++
++  if (EFI_ERROR (Status) || (DataSize != sizeof (*PpiFlags)) || (Attributes != 7)) {
++    CpuDeadLoop ();
++  }
++
++}
++#endif
+ 
+ /**
+   Check and execute the pending TPM request.
+@@ -1002,30 +1081,53 @@
+ {
+   EFI_STATUS                        Status;
+   UINTN                             DataSize;
++#ifdef FIRECRACKER_SECURE_BOOT
++  UINT32                            Attributes;
++#endif
+   EFI_TCG2_PHYSICAL_PRESENCE        TcgPpData;
+   EDKII_VARIABLE_POLICY_PROTOCOL    *VariablePolicyProtocol;
+   EFI_TCG2_PHYSICAL_PRESENCE_FLAGS  PpiFlags;
+ 
++#ifdef FIRECRACKER_SECURE_BOOT
++  InitializePhysicalPresenceFlags (&PpiFlags);
++#endif
++
+   //
+   // This flags variable controls whether physical presence is required for TPM command.
+   // It should be protected from malicious software. We set it as read-only variable here.
+   //
+   Status = gBS->LocateProtocol (&gEdkiiVariablePolicyProtocolGuid, NULL, (VOID **)&VariablePolicyProtocol);
++#ifdef FIRECRACKER_SECURE_BOOT
++  if (EFI_ERROR (Status)) {
++    CpuDeadLoop ();
++  }
++#endif
+   if (!EFI_ERROR (Status)) {
+     Status = RegisterBasicVariablePolicy (
+                VariablePolicyProtocol,
+                &gEfiTcg2PhysicalPresenceGuid,
+                TCG2_PHYSICAL_PRESENCE_FLAGS_VARIABLE,
++#ifdef FIRECRACKER_SECURE_BOOT
++               sizeof (PpiFlags),
++               sizeof (PpiFlags),
++               7,
++               ~7U,
++#else
+                VARIABLE_POLICY_NO_MIN_SIZE,
+                VARIABLE_POLICY_NO_MAX_SIZE,
+                VARIABLE_POLICY_NO_MUST_ATTR,
+                VARIABLE_POLICY_NO_CANT_ATTR,
++#endif
+                VARIABLE_POLICY_TYPE_LOCK_NOW
+                );
+ 
+     if (EFI_ERROR (Status)) {
+       DEBUG ((DEBUG_ERROR, "[TPM2] Error when lock variable %s, Status = %r\n", TCG2_PHYSICAL_PRESENCE_FLAGS_VARIABLE, Status));
++#ifdef FIRECRACKER_SECURE_BOOT
++      CpuDeadLoop ();
++#else
+       ASSERT_EFI_ERROR (Status);
++#endif
+     }
+   }
+ 
+@@ -1037,6 +1139,7 @@
+     return;
+   }
+ 
++#ifndef FIRECRACKER_SECURE_BOOT
+   //
+   // Initialize physical presence flags.
+   //
+@@ -1065,6 +1168,8 @@
+     DEBUG ((DEBUG_INFO, "[TPM2] Initial physical presence flags value is 0x%x\n", PpiFlags.PPFlags));
+   }
+ 
++#endif
++
+   //
+   // Initialize physical presence variable.
+   //
+@@ -1072,11 +1177,20 @@
+   Status   = gRT->GetVariable (
+                     TCG2_PHYSICAL_PRESENCE_VARIABLE,
+                     &gEfiTcg2PhysicalPresenceGuid,
++#ifdef FIRECRACKER_SECURE_BOOT
++                    &Attributes,
++#else
+                     NULL,
++#endif
+                     &DataSize,
+                     &TcgPpData
+                     );
++#ifdef FIRECRACKER_SECURE_BOOT
++  if (Status == EFI_NOT_FOUND) {
++    Attributes = 7;
++#else
+   if (EFI_ERROR (Status)) {
++#endif
+     ZeroMem ((VOID *)&TcgPpData, sizeof (TcgPpData));
+     DataSize = sizeof (EFI_TCG2_PHYSICAL_PRESENCE);
+     Status   = gRT->SetVariable (
+@@ -1088,9 +1202,19 @@
+                       );
+     if (EFI_ERROR (Status)) {
+       DEBUG ((DEBUG_ERROR, "[TPM2] Set physical presence variable failed, Status = %r\n", Status));
++#ifdef FIRECRACKER_SECURE_BOOT
++      CpuDeadLoop ();
++#else
+       return;
+-    }
+-  }
++#endif
++    }
++  }
++
++#ifdef FIRECRACKER_SECURE_BOOT
++  if (EFI_ERROR (Status) || (DataSize != sizeof (TcgPpData)) || (Attributes != 7)) {
++    CpuDeadLoop ();
++  }
++#endif
+ 
+   DEBUG ((DEBUG_INFO, "[TPM2] Flags=%x, PPRequest=%x (LastPPRequest=%x)\n", PpiFlags.PPFlags, TcgPpData.PPRequest, TcgPpData.LastPPRequest));
+ 
+--- a/OvmfPkg/Library/PlatformBootManagerLib/BdsPlatform.c
++++ b/OvmfPkg/Library/PlatformBootManagerLib/BdsPlatform.c
+@@ -269,6 +269,13 @@
+   //
+   // Process TPM PPI request; this may require keyboard input
+   //
++#ifdef FIRECRACKER_SECURE_BOOT
++  Status = EfiBootManagerConnectAllDefaultConsoles ();
++  if (EFI_ERROR (Status) || (gST->ConIn == NULL) || (gST->ConOut == NULL)) {
++    DEBUG ((DEBUG_ERROR, "TPM physical presence requires connected consoles: %r\n", Status));
++    CpuDeadLoop ();
++  }
++#endif
+   Tcg2PhysicalPresenceLibProcessRequest (NULL);
+ 
+   //
+--- a/OvmfPkg/Include/Dsc/OvmfTpmLibs.dsc.inc
++++ b/OvmfPkg/Include/Dsc/OvmfTpmLibs.dsc.inc
+@@ -9,7 +9,12 @@
+   Tpm12CommandLib|SecurityPkg/Library/Tpm12CommandLib/Tpm12CommandLib.inf
+ !endif
+   Tpm2CommandLib|SecurityPkg/Library/Tpm2CommandLib/Tpm2CommandLib.inf
++!if $(FIRECRACKER_SECURE_BOOT) == TRUE
++  Tcg2PhysicalPresenceLib|SecurityPkg/Library/DxeTcg2PhysicalPresenceLib/DxeTcg2PhysicalPresenceLib.inf
++  Tcg2PhysicalPresencePromptLib|SecurityPkg/Library/Tcg2PhysicalPresencePromptLib/Tcg2PhysicalPresencePromptLibConsole.inf
++!else
+   Tcg2PhysicalPresenceLib|OvmfPkg/Library/Tcg2PhysicalPresenceLibQemu/DxeTcg2PhysicalPresenceLib.inf
++!endif
+   Tcg2PpVendorLib|SecurityPkg/Library/Tcg2PpVendorLibNull/Tcg2PpVendorLibNull.inf
+ !else
+   Tcg2PhysicalPresenceLib|OvmfPkg/Library/Tcg2PhysicalPresenceLibNull/DxeTcg2PhysicalPresenceLib.inf

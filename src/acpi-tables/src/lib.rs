@@ -22,8 +22,10 @@ pub use facs::Facs;
 pub use fadt::Fadt;
 pub use madt::Madt;
 pub use mcfg::Mcfg;
+mod tpm2;
 pub use root_table::{RootTable, RootTableEntries};
 pub use rsdp::Rsdp;
+pub use tpm2::Tpm2;
 use zerocopy::little_endian::{U32, U64};
 use zerocopy::{Immutable, IntoBytes};
 

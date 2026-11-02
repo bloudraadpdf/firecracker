@@ -64,20 +64,22 @@ use crate::vmm_config::pmem::{PmemConfig, PmemConfigError};
 use crate::vstate::bus::BusError;
 use crate::vstate::memory::GuestMemoryMmap;
 use crate::vstate::vm::{KvmVm, Vm};
+#[cfg(all(target_arch = "aarch64", feature = "windows"))]
+use vm_memory::{GuestMemoryBackend, GuestMemoryRegion};
 
 /// ACPI device manager.
 pub mod acpi;
-#[cfg(target_arch = "x86_64")]
 pub mod console;
 #[cfg(target_arch = "x86_64")]
 mod console_a20;
 #[cfg(target_arch = "x86_64")]
 mod console_bridge;
-#[cfg(target_arch = "x86_64")]
 mod console_display;
+#[cfg(feature = "windows")]
+mod console_input;
 #[cfg(target_arch = "x86_64")]
 mod console_optical;
-#[cfg(all(target_arch = "x86_64", feature = "windows"))]
+#[cfg(feature = "windows")]
 mod console_server;
 #[cfg(target_arch = "x86_64")]
 mod console_usb;
@@ -89,8 +91,14 @@ pub mod mmio;
 pub mod pci_mngr;
 /// Device managers (de)serialization support.
 pub mod persist;
-#[cfg(all(target_arch = "x86_64", feature = "windows"))]
+#[cfg(feature = "windows")]
 mod platform;
+#[cfg(feature = "windows")]
+mod tpm;
+#[cfg(feature = "windows")]
+mod tpm_ppi;
+#[cfg(feature = "windows")]
+mod uefi_vars;
 
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 /// Error while creating a new [`DeviceManager`]
@@ -142,8 +150,11 @@ pub enum FindDeviceError {
 #[derive(Debug, Default)]
 /// A manager of all peripheral devices of Firecracker
 pub struct DeviceManager {
+    #[cfg(feature = "windows")]
+    pub(crate) uefi_vars: Option<Arc<Mutex<uefi_vars::UefiVarsDevice>>>,
+    #[cfg(feature = "windows")]
+    pub(crate) tpm: Option<Arc<Mutex<tpm::TpmDevice>>>,
     /// Optional graphical console hardware.
-    #[cfg(target_arch = "x86_64")]
     #[cfg(feature = "windows")]
     pub console: Option<console::ConsoleHardware>,
     /// MMIO Platform devices (non-virtio)
@@ -290,9 +301,12 @@ impl DeviceManager {
         )?;
 
         Ok(DeviceManager {
-            #[cfg(target_arch = "x86_64")]
             #[cfg(feature = "windows")]
             console: None,
+            #[cfg(feature = "windows")]
+            tpm: None,
+            #[cfg(feature = "windows")]
+            uefi_vars: None,
             mmio_platform_devices: MMIOPlatformDevices::new(),
             #[cfg(target_arch = "x86_64")]
             legacy_devices: Some(legacy_devices),
@@ -385,7 +399,11 @@ impl DeviceManager {
         }
 
         #[cfg(feature = "windows")]
-        self.append_console_aml(dsdt_data)?;
+        {
+            self.append_console_aml(dsdt_data)?;
+            self.append_tpm_aml(dsdt_data)?;
+            self.append_uefi_vars_aml(dsdt_data)?;
+        }
         self.acpi_devices
             .append_aml_bytes_in_scope(self.acpi_device_scope(), dsdt_data)
     }
@@ -767,8 +785,11 @@ impl Default for VirtioDevicesState {
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 /// State of devices in the system
 pub struct DevicesState {
+    /// Complete authenticated firmware store and transport state.
+    pub uefi_vars: Option<crate::devices::uefi_vars::UefiVarsState>,
+    /// Complete quiescent TPM state; the destination socket is supplied on restore.
+    pub tpm: Option<crate::devices::tpm::TpmState>,
     /// Optional graphical console and installation hardware.
-    #[cfg(target_arch = "x86_64")]
     pub console: Option<console::ConsoleState>,
     /// Virtio devices state
     pub virtio_state: VirtioDevicesState,
@@ -790,8 +811,15 @@ impl DevicesState {
     pub(crate) fn validate_windows_support(
         &self,
     ) -> Result<(), crate::vmm_config::WindowsFeatureDisabled> {
+        let input = match &self.virtio_state {
+            VirtioDevicesState::Mmio(state) => state.input_device.is_some(),
+            VirtioDevicesState::Pci(state) => state.virtio_devices.input_device.is_some(),
+        };
+        if self.console.is_some() || self.tpm.is_some() || self.uefi_vars.is_some() || input {
+            crate::vmm_config::require_windows_support()?;
+        }
         #[cfg(target_arch = "x86_64")]
-        if self.console.is_some() || self.cmos_state.is_some() || self.power_state.is_some() {
+        if self.cmos_state.is_some() || self.power_state.is_some() {
             crate::vmm_config::require_windows_support()?;
         }
         Ok(())
@@ -801,6 +829,11 @@ impl DevicesState {
 /// Errors for (de)serialization of the devices.
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum DevicePersistError {
+    /// Unsupported build configuration: {0}
+    WindowsFeature(#[from] crate::vmm_config::WindowsFeatureDisabled),
+    #[cfg(feature = "windows")]
+    /// Input: {0}
+    Input(#[from] crate::devices::virtio::input::persist::InputPersistError),
     /// Balloon: {0}
     Balloon(#[from] BalloonError),
     /// Block: {0}
@@ -844,12 +877,18 @@ pub enum DevicePersistError {
 pub enum DeviceManagerPersistError {
     /// Unsupported build configuration: {0}
     WindowsFeature(#[from] crate::vmm_config::WindowsFeatureDisabled),
-    /// Console restore failed: {0}
-    #[cfg(target_arch = "x86_64")]
-    Console(#[from] std::io::Error),
+    /// Invalid saved ARM platform topology: {0}
+    #[cfg(target_arch = "aarch64")]
+    Platform(std::io::Error),
     /// PC timer snapshot must contain both RTC and ACPI power state.
     #[cfg(target_arch = "x86_64")]
     IncompletePcState,
+    /// Console restore failed: {0}
+    Console(#[from] std::io::Error),
+    /// TPM restore failed: {0}
+    Tpm(std::io::Error),
+    /// UEFI variable restore failed: {0}
+    UefiVars(std::io::Error),
     /// Error restoring MMIO devices: {0}
     MmioRestore(DevicePersistError),
     /// Error restoring ACPI devices: {0}
@@ -885,7 +924,54 @@ impl std::fmt::Debug for DeviceRestoreArgs<'_> {
     }
 }
 
+/// A checkpoint cannot omit state when an external device cannot be captured.
+#[derive(Debug, thiserror::Error)]
+pub enum DeviceManagerSaveError {
+    /// Cannot capture TPM state: {0}
+    #[error("Cannot capture TPM state: {0}")]
+    Tpm(std::io::Error),
+    /// Cannot capture protected firmware variables: {0}
+    #[error("Cannot capture protected firmware variables: {0}")]
+    UefiVars(std::io::Error),
+}
+
 impl DeviceManager {
+    /// Capture every device or fail without producing an incomplete checkpoint.
+    pub fn save(&self) -> Result<DevicesState, DeviceManagerSaveError> {
+        let virtio_state = match &self.virtio_devices {
+            VirtioDevices::Mmio(mmio_devices) => VirtioDevicesState::Mmio(mmio_devices.save()),
+            VirtioDevices::Pci(pci_devices) => VirtioDevicesState::Pci(pci_devices.save()),
+        };
+
+        #[cfg(feature = "windows")]
+        let state = DevicesState {
+            console: self.save_console(),
+            tpm: self.snapshot_tpm().map_err(DeviceManagerSaveError::Tpm)?,
+            uefi_vars: self
+                .snapshot_uefi_vars()
+                .map_err(DeviceManagerSaveError::UefiVars)?,
+            #[cfg(target_arch = "x86_64")]
+            cmos_state: self
+                .pc_devices()
+                .map(|pc| pc.cmos.lock().expect("Poisoned lock").save()),
+            #[cfg(target_arch = "x86_64")]
+            power_state: self
+                .pc_devices()
+                .map(|pc| pc.acpi_power.lock().expect("Poisoned lock").save()),
+            ..Default::default()
+        };
+        #[cfg(not(feature = "windows"))]
+        let state = DevicesState::default();
+
+        Ok(DevicesState {
+            virtio_state,
+            mmio_platform_state: self.mmio_platform_devices.save(),
+            acpi_state: self.acpi_devices.save(),
+            serial_state: self.serial_state(),
+            ..state
+        })
+    }
+
     #[cfg(target_arch = "x86_64")]
     pub(crate) fn has_pc_devices(&self) -> bool {
         #[cfg(feature = "windows")]
@@ -903,48 +989,80 @@ impl DeviceManager {
     pub(crate) fn pc_devices(&self) -> Option<&PcDevices> {
         self.legacy_devices.as_ref()?.pc.as_ref()
     }
-}
 
-impl<'a> Persist<'a> for DeviceManager {
-    type State = DevicesState;
-    type ConstructorArgs = DeviceRestoreArgs<'a>;
-    type Error = DeviceManagerPersistError;
-
-    fn save(&self) -> Self::State {
-        let virtio_state = match &self.virtio_devices {
-            VirtioDevices::Mmio(mmio_devices) => VirtioDevicesState::Mmio(mmio_devices.save()),
-            VirtioDevices::Pci(pci_devices) => VirtioDevicesState::Pci(pci_devices.save()),
+    #[cfg(target_arch = "aarch64")]
+    #[cfg(feature = "windows")]
+    fn validate_arm_platform_state(
+        state: &DevicesState,
+        allocator: &crate::vstate::resources::ResourceAllocator,
+        memory: &GuestMemoryMmap,
+    ) -> std::io::Result<()> {
+        let (pci, input) = match &state.virtio_state {
+            VirtioDevicesState::Pci(devices) => (
+                true,
+                devices
+                    .virtio_devices
+                    .input_device
+                    .as_ref()
+                    .map(|device| device.device_id.as_str()),
+            ),
+            VirtioDevicesState::Mmio(devices) => (
+                false,
+                devices
+                    .input_device
+                    .as_ref()
+                    .map(|device| device.device_id.as_str()),
+            ),
         };
-
-        DevicesState {
-            #[cfg(all(target_arch = "x86_64", feature = "windows"))]
-            console: self.save_console(),
-            #[cfg(all(target_arch = "x86_64", not(feature = "windows")))]
-            console: None,
-            #[cfg(all(target_arch = "x86_64", feature = "windows"))]
-            cmos_state: self
-                .pc_devices()
-                .map(|pc| pc.cmos.lock().expect("Poisoned lock").save()),
-            #[cfg(all(target_arch = "x86_64", not(feature = "windows")))]
-            cmos_state: None,
-            #[cfg(all(target_arch = "x86_64", feature = "windows"))]
-            power_state: self
-                .pc_devices()
-                .map(|pc| pc.acpi_power.lock().expect("Poisoned lock").save()),
-            #[cfg(all(target_arch = "x86_64", not(feature = "windows")))]
-            power_state: None,
-            virtio_state,
-            mmio_platform_state: self.mmio_platform_devices.save(),
-            acpi_state: self.acpi_devices.save(),
-            serial_state: self.serial_state(),
+        console::validate_arm_input(
+            state.console.is_some(),
+            pci,
+            allocator.pci_transport.is_modern(),
+            input,
+        )?;
+        if let Some(console) = &state.console {
+            console.validate()?;
         }
+        let tpm = state.tpm.is_some();
+        let variables = state.uefi_vars.is_some();
+        let validate =
+            |(base, length)| Self::validate_security_mapping(base, length, tpm, variables);
+        memory
+            .iter()
+            .map(|region| (region.start_addr().0, region.len()))
+            .try_for_each(validate)?;
+        match &state.virtio_state {
+            VirtioDevicesState::Mmio(devices) => devices.mmio_regions().try_for_each(validate)?,
+            VirtioDevicesState::Pci(devices) => devices.mmio_regions().try_for_each(validate)?,
+        }
+        [
+            state.mmio_platform_state.serial.as_ref(),
+            state.mmio_platform_state.rtc.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|region| (region.addr, region.len))
+        .try_for_each(validate)?;
+        if let Some(console) = &state.console {
+            console.mmio_regions().try_for_each(validate)?;
+        }
+        Ok(())
     }
 
-    fn restore(
-        constructor_args: Self::ConstructorArgs,
-        state: &Self::State,
-    ) -> Result<Self, Self::Error> {
+    /// Restore devices before the VM is published to its caller.
+    pub fn restore(
+        constructor_args: DeviceRestoreArgs<'_>,
+        state: &DevicesState,
+    ) -> Result<Self, DeviceManagerPersistError> {
         state.validate_windows_support()?;
+        #[cfg(target_arch = "aarch64")]
+        #[cfg(feature = "windows")]
+        Self::validate_arm_platform_state(
+            state,
+            &constructor_args.vm.resource_allocator(),
+            constructor_args.mem,
+        )
+        .map_err(DeviceManagerPersistError::Platform)?;
         #[cfg(target_arch = "x86_64")]
         let pc_enabled = match (&state.cmos_state, &state.power_state) {
             (Some(_), Some(_)) => true,
@@ -1058,9 +1176,12 @@ impl<'a> Persist<'a> for DeviceManager {
         };
 
         let manager = DeviceManager {
-            #[cfg(target_arch = "x86_64")]
             #[cfg(feature = "windows")]
             console: None,
+            #[cfg(feature = "windows")]
+            tpm: None,
+            #[cfg(feature = "windows")]
+            uefi_vars: None,
             mmio_platform_devices,
             #[cfg(target_arch = "x86_64")]
             legacy_devices: Some(legacy_devices),
@@ -1068,11 +1189,45 @@ impl<'a> Persist<'a> for DeviceManager {
             virtio_devices,
             blk_worker_filter: constructor_args.blk_worker_filter,
         };
-        #[cfg(all(target_arch = "x86_64", feature = "windows"))]
+        #[cfg(feature = "windows")]
         let manager = {
             let mut manager = manager;
+            if let Some(variables) = &state.uefi_vars {
+                let config = constructor_args
+                    .vm_resources
+                    .uefi_vars
+                    .as_ref()
+                    .ok_or_else(|| {
+                        std::io::Error::other("UEFI variables restore requires a dedicated backend")
+                    })?;
+                let restore = constructor_args
+                    .vm_resources
+                    .uefi_vars_restore
+                    .as_ref()
+                    .ok_or_else(|| {
+                        std::io::Error::other(
+                            "UEFI variables restore requires an expected generation",
+                        )
+                    })?;
+                manager
+                    .attach_uefi_vars(constructor_args.vm, config, Some((restore, variables)))
+                    .map_err(DeviceManagerPersistError::UefiVars)?;
+            }
+            if let Some(tpm) = &state.tpm {
+                let config = constructor_args.vm_resources.tpm.as_ref().ok_or_else(|| {
+                    std::io::Error::other("TPM restore requires a dedicated backend socket")
+                })?;
+                manager
+                    .attach_tpm(constructor_args.vm, config, Some(tpm))
+                    .map_err(DeviceManagerPersistError::Tpm)?;
+            }
             if let Some(console) = &state.console {
-                manager.restore_console(constructor_args.vm, console)?;
+                manager.restore_console(
+                    constructor_args.vm,
+                    console,
+                    #[cfg(target_arch = "aarch64")]
+                    constructor_args.event_manager,
+                )?;
                 constructor_args.vm_resources.console = manager.console_config();
             }
             manager
@@ -1114,9 +1269,12 @@ pub(crate) mod tests {
         let legacy_devices = PortIODeviceManager::for_tests(false);
 
         DeviceManager {
-            #[cfg(target_arch = "x86_64")]
             #[cfg(feature = "windows")]
             console: None,
+            #[cfg(feature = "windows")]
+            tpm: None,
+            #[cfg(feature = "windows")]
+            uefi_vars: None,
             mmio_platform_devices,
             #[cfg(target_arch = "x86_64")]
             legacy_devices: Some(legacy_devices),
@@ -1133,6 +1291,16 @@ pub(crate) mod tests {
         let exit = EventFd::new(libc::EFD_NONBLOCK).unwrap();
         manager.legacy_devices.as_mut().unwrap().pc = Some(PcDevices::new(&exit).unwrap());
         manager
+    }
+
+    pub(crate) fn default_device_manager_with_pci(
+        vm: &Arc<KvmVm>,
+        hotplug_ports: u8,
+    ) -> DeviceManager {
+        let mut device_manager = default_device_manager();
+        device_manager.virtio_devices =
+            VirtioDevices::Pci(PciDevices::new(vm, hotplug_ports).unwrap());
+        device_manager
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -1159,7 +1327,7 @@ pub(crate) mod tests {
             .unwrap();
             manager.attach_vmgenid_device(&source).unwrap();
             manager.attach_vmclock_device(&source).unwrap();
-            let mut state = manager.save();
+            let mut state = manager.save().unwrap();
             let allocation = source.resource_allocator().save();
             drop(manager);
             drop(source);
@@ -1213,8 +1381,8 @@ pub(crate) mod tests {
             }
             let restored = restore(&state).unwrap();
             assert_eq!(restored.pc_devices().is_some(), present);
-            assert_eq!(restored.save().power_state.is_some(), present);
-            assert_eq!(restored.save().cmos_state.is_some(), present);
+            assert_eq!(restored.save().unwrap().power_state.is_some(), present);
+            assert_eq!(restored.save().unwrap().cmos_state.is_some(), present);
             assert_eq!(
                 target
                     .resource_allocator()
@@ -1259,16 +1427,6 @@ pub(crate) mod tests {
         assert!(power.upgrade().is_none());
         assert!(rtc.upgrade().is_none());
         events.remove_subscriber(owner).unwrap();
-    }
-
-    pub(crate) fn default_device_manager_with_pci(
-        vm: &Arc<KvmVm>,
-        hotplug_ports: u8,
-    ) -> DeviceManager {
-        let mut device_manager = default_device_manager();
-        device_manager.virtio_devices =
-            VirtioDevices::Pci(PciDevices::new(vm, hotplug_ports).unwrap());
-        device_manager
     }
 
     #[cfg(target_arch = "aarch64")]

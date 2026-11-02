@@ -162,6 +162,8 @@ pub struct GuestRegionUffdMapping {
 /// Errors related to saving and restoring Microvm state.
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum MicrovmStateError {
+    /// Cannot capture device state: {0}
+    SaveDevices(crate::device_manager::DeviceManagerSaveError),
     /// Cannot prepare devices for snapshot: {0}
     PrepareDevices(#[from] PrepareSaveError),
     /// Operation not allowed: {0}
@@ -197,7 +199,7 @@ pub enum CreateSnapshotError {
 }
 
 /// Snapshot version
-pub const SNAPSHOT_VERSION: Version = Version::new(23, 0, 0);
+pub const SNAPSHOT_VERSION: Version = Version::new(32, 0, 0);
 
 /// Creates a Microvm snapshot.
 pub fn create_snapshot(
@@ -417,6 +419,9 @@ pub fn restore_from_snapshot(
 ) -> Result<Arc<Mutex<Vmm>>, RestoreFromSnapshotError> {
     let mut microvm_state = snapshot_state_from_file(&params.snapshot_path)?;
     microvm_state.validate_windows_support()?;
+    if params.tpm.is_some() || params.uefi_vars.is_some() {
+        crate::vmm_config::require_windows_support()?;
+    }
     for entry in &params.network_overrides {
         // Only the active transport carries virtio device state, so we look at whichever
         // variant this snapshot was saved with and map down to the shared inner `NetState`.
@@ -459,6 +464,29 @@ pub fn restore_from_snapshot(
             .uds_path
             .clone_from(&vsock_override.uds_path);
     }
+    if microvm_state.device_states.tpm.is_some() != params.tpm.is_some() {
+        return Err(SnapshotStateFromFileError::TpmBackend.into());
+    }
+    if let Some(tpm) = &params.tpm {
+        tpm.validate().map_err(SnapshotStateFromFileError::Open)?;
+    }
+    vm_resources.tpm = params.tpm.clone();
+    if microvm_state.device_states.uefi_vars.is_some() != params.uefi_vars.is_some() {
+        return Err(SnapshotStateFromFileError::UefiVarsBackend.into());
+    }
+    vm_resources.uefi_vars =
+        params
+            .uefi_vars
+            .as_ref()
+            .map(|restore| crate::vmm_config::uefi_vars::UefiVarsConfig {
+                socket_path: restore.socket_path.clone(),
+            });
+    if let Some(config) = &vm_resources.uefi_vars {
+        config
+            .validate()
+            .map_err(SnapshotStateFromFileError::Open)?;
+    }
+    vm_resources.uefi_vars_restore = params.uefi_vars.clone();
     let track_dirty_pages = params.track_dirty_pages;
 
     let vcpu_count = microvm_state
@@ -559,6 +587,10 @@ pub fn restore_from_snapshot(
 /// Error type for [`snapshot_state_from_file`]
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum SnapshotStateFromFileError {
+    /// A dedicated variable-service backend and expected generation are required exactly when the snapshot contains protected variables.
+    UefiVarsBackend,
+    /// A dedicated TPM backend is required exactly when the snapshot contains TPM state.
+    TpmBackend,
     /// Failed to open snapshot file: {0}
     Open(#[from] std::io::Error),
     /// Failed to load snapshot state from file: {0}
@@ -749,6 +781,8 @@ mod tests {
     #[cfg(target_arch = "aarch64")]
     use crate::construct_kvm_mpidrs;
     use crate::devices::virtio::block::CacheType;
+    #[cfg(target_arch = "aarch64")]
+    #[cfg(feature = "windows")]
     use crate::snapshot::Persist;
     use crate::vmm_config::balloon::BalloonDeviceConfig;
     use crate::vmm_config::net::NetworkInterfaceConfig;
@@ -812,7 +846,6 @@ mod tests {
         vmm
     }
 
-    #[cfg(target_arch = "x86_64")]
     #[test]
     #[cfg(feature = "windows")]
     fn maximum_optional_buffers_fit_snapshot_reader() {
@@ -820,18 +853,26 @@ mod tests {
         use crate::vmm_config::console::ConsoleConfig;
         use crate::vmm_config::machine_config::MAX_SUPPORTED_VCPUS;
         use crate::vstate::vm::tests::setup_vm_with_memory;
+        #[cfg(target_arch = "x86_64")]
         use std::io::Write;
         use vmm_sys_util::tempdir::TempDir;
 
         let directory = TempDir::new().unwrap();
-        let rom = TempFile::new().unwrap();
-        let mut bytes: Vec<u8> = (0..=255).cycle().take(65536).collect();
-        bytes[..3].copy_from_slice(&[0x55, 0xaa, 128]);
-        let checksum = bytes.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte));
-        bytes[65535] = bytes[65535].wrapping_sub(checksum);
-        rom.as_file().write_all(&bytes).unwrap();
+        #[cfg(target_arch = "x86_64")]
+        let rom = {
+            let rom = TempFile::new().unwrap();
+            let mut bytes: Vec<u8> = (0..=255).cycle().take(65536).collect();
+            bytes[..3].copy_from_slice(&[0x55, 0xaa, 128]);
+            let checksum = bytes.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte));
+            bytes[65535] = bytes[65535].wrapping_sub(checksum);
+            rom.as_file().write_all(&bytes).unwrap();
+            rom
+        };
         let mut vm = setup_vm_with_memory(0x1000);
+        #[cfg(target_arch = "x86_64")]
         vm.setup_irqchip(true).unwrap();
+        #[cfg(target_arch = "aarch64")]
+        vm.setup_irqchip(1).unwrap();
         let vm = Arc::new(vm);
         let mut events = EventManager::new().unwrap();
         let mut manager = DeviceManager::new(
@@ -851,16 +892,36 @@ mod tests {
                 &vm,
                 &ConsoleConfig {
                     socket_path: directory.as_path().join("console.sock"),
+                    #[cfg(target_arch = "x86_64")]
                     vga_rom_path: Some(rom.as_path().to_owned()),
+                    #[cfg(target_arch = "x86_64")]
                     optical_image_path: None,
                 },
                 None,
+                #[cfg(target_arch = "aarch64")]
+                &mut events,
             )
             .unwrap();
         manager.console.as_ref().unwrap().fill_test_framebuffer();
         let mut state = MicrovmState {
             device_states: crate::device_manager::DevicesState {
                 console: manager.save_console(),
+                #[cfg(target_arch = "aarch64")]
+                virtio_state: {
+                    let crate::device_manager::VirtioDevices::Pci(pci) = &manager.virtio_devices
+                    else {
+                        panic!("expected PCI");
+                    };
+                    let mut saved = pci.save();
+                    saved
+                        .virtio_devices
+                        .input_device
+                        .as_mut()
+                        .unwrap()
+                        .device_state =
+                        crate::devices::virtio::input::persist::InputState::maximum_test_state();
+                    crate::device_manager::VirtioDevicesState::Pci(saved)
+                },
                 ..Default::default()
             },
             // Maximum supported count, without running guest instructions. Hardware
@@ -870,6 +931,9 @@ mod tests {
                 .collect(),
             ..Default::default()
         };
+        state.device_states.tpm = Some(crate::devices::tpm::TpmState::maximum_test_state());
+        state.device_states.uefi_vars =
+            Some(crate::devices::uefi_vars::UefiVarsState::maximum_test_state());
         state.vm_info.boot_source.firmware =
             Some(crate::vmm_config::boot_source::FirmwareConfig::CloudHv {
                 system_uuid: "11223344-5566-7788-99aa-bbccddeeff01"
@@ -880,8 +944,8 @@ mod tests {
         let mut encoded = Vec::new();
         Snapshot::new(&state).save(&mut encoded).unwrap();
         // Ensure the high-entropy large buffers actually reached the encoder.
-        assert!(encoded.len() > 16 * 1024 * 1024);
-        eprintln!("console optional-buffer snapshot bytes: {}", encoded.len());
+        assert!(encoded.len() > 28 * 1024 * 1024);
+        eprintln!("combined optional-buffer snapshot bytes: {}", encoded.len());
         let restored = Snapshot::<MicrovmState>::load(&mut encoded.as_slice()).unwrap();
         assert_eq!(
             restored.data.vcpu_states.len(),
@@ -963,7 +1027,7 @@ mod tests {
     fn test_microvm_state_snapshot() {
         let vmm = default_vmm_with_devices();
         vmm.device_manager.prepare_save().unwrap();
-        let states = vmm.device_manager.save();
+        let states = vmm.device_manager.save().unwrap();
 
         // Only checking that all devices are saved, actual device state
         // is tested by that device's tests.

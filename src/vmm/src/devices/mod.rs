@@ -10,11 +10,13 @@
 use std::io;
 
 pub mod acpi;
-#[cfg(target_arch = "x86_64")]
 pub mod display;
+pub(crate) mod keyboard;
 pub mod legacy;
 pub mod pci;
 pub mod pseudo;
+pub mod tpm;
+pub mod uefi_vars;
 #[cfg(target_arch = "x86_64")]
 pub mod usb;
 pub mod virtio;

@@ -122,7 +122,6 @@ use std::time::Duration;
 
 use device_manager::DeviceManager;
 use event_manager::{EventManager as BaseEventManager, EventOps, Events, MutEventSubscriber};
-use snapshot::Persist;
 use vm_memory::GuestMemoryBackend;
 use vmm_sys_util::epoll::EventSet;
 use vmm_sys_util::terminal::Terminal;
@@ -360,6 +359,8 @@ impl Vmm {
 
         self.device_manager
             .for_each_virtio_device(|device_type, device| match device_type {
+                // Input has no independent settings; the console configuration is reported below.
+                VirtioDeviceType::Input => (),
                 VirtioDeviceType::Block => {
                     if let Some(b) = device.as_any().downcast_ref::<Block>() {
                         block.push(b.config());
@@ -418,10 +419,18 @@ impl Vmm {
         // in resources.rs which is used to retrieve the config before the VM
         // is started.
         VmmConfig {
-            #[cfg(all(target_arch = "x86_64", feature = "windows"))]
+            #[cfg(feature = "windows")]
             console: self.device_manager.console_config(),
-            #[cfg(all(target_arch = "x86_64", not(feature = "windows")))]
+            #[cfg(not(feature = "windows"))]
             console: None,
+            #[cfg(feature = "windows")]
+            tpm: self.device_manager.tpm_config(),
+            #[cfg(not(feature = "windows"))]
+            tpm: None,
+            #[cfg(feature = "windows")]
+            uefi_vars: self.device_manager.uefi_vars_config(),
+            #[cfg(not(feature = "windows"))]
+            uefi_vars: None,
             balloon,
             drives: block,
             boot_source: self.boot_source_config.clone(),
@@ -554,7 +563,10 @@ impl Vmm {
         // state before we save device state, that interrupt will never be delivered to the guest
         // upon resuming from the snapshot.
         self.device_manager.prepare_save()?;
-        let device_states = self.device_manager.save();
+        let device_states = self
+            .device_manager
+            .save()
+            .map_err(MicrovmStateError::SaveDevices)?;
         let kvm_vm = self
             .vm
             .as_kvm()
@@ -882,6 +894,10 @@ impl MutEventSubscriber for Vmm {
                     let _ = kvm_vm.vcpus_exit_evt().read();
 
                     let exit_code = 'exit_code: {
+                        #[cfg(feature = "windows")]
+                        if self.device_manager.uefi_vars_failed() {
+                            break 'exit_code FcExitCode::GenericError;
+                        }
                         // Query each vcpu for their exit_code.
                         let handles = kvm_vm.vcpus_handles();
                         for handle in handles.iter() {

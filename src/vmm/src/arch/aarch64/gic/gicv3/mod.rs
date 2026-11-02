@@ -255,6 +255,26 @@ mod tests {
     use crate::arch::aarch64::gic::{GICVersion, create_gic};
 
     #[test]
+    fn fixed_security_pages_do_not_overlap_interrupt_controller() {
+        for cpus in [
+            1,
+            u64::from(crate::vmm_config::machine_config::MAX_SUPPORTED_VCPUS),
+            u64::from(u8::MAX),
+        ] {
+            let ranges = [
+                (GICv3::get_dist_addr(), GICv3::get_dist_size()),
+                (GICv3::get_redists_addr(cpus), GICv3::get_redists_size(cpus)),
+                (GICv3::get_msi_address(cpus), GICv3::get_msi_size()),
+            ];
+            for (start, size) in ranges {
+                for base in [crate::arch::TPM_MEM_START, crate::arch::UEFI_VARS_MEM_START] {
+                    assert!(base + 0x1000 <= start || start + size <= base);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn test_save_pending_tables() {
         use std::os::unix::io::AsRawFd;
 

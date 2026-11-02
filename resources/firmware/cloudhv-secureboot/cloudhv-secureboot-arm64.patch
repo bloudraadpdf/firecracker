@@ -1,0 +1,500 @@
+diff --git a/ArmVirtPkg/ArmVirt.dsc.inc b/ArmVirtPkg/ArmVirt.dsc.inc
+--- a/ArmVirtPkg/ArmVirt.dsc.inc
++++ b/ArmVirtPkg/ArmVirt.dsc.inc
+@@ -10,6 +10,9 @@
+ #
+
+ [Defines]
++!ifndef FIRECRACKER_SECURE_BOOT
++  DEFINE FIRECRACKER_SECURE_BOOT = FALSE
++!endif
+
+   #
+   # Shell can be useful for debugging but should not be enabled for production
+@@ -607,6 +610,10 @@
+   #
+   # Runtime variable
+   #
++!if $(FIRECRACKER_SECURE_BOOT) == TRUE
++  OvmfPkg/VirtMmCommunicationDxe/VirtMmCommunication.inf
++  MdeModulePkg/Universal/Variable/RuntimeDxe/VariableSmmRuntimeDxe.inf
++!else
+ !if $(FLASH_BACKED_RUNTIME_VARIABLE)
+ !if $(QEMU_PV_VARS)
+   OvmfPkg/VirtMmCommunicationDxe/VirtMmCommunication.inf
+@@ -632,6 +639,7 @@
+       NULL|MdeModulePkg/Library/VarCheckUefiLib/VarCheckUefiLib.inf
+   }
+ !endif
++!endif # FIRECRACKER_SECURE_BOOT
+
+   #
+   # Multiple Console IO support
+diff --git a/ArmVirtPkg/ArmVirtCloudHv.dsc b/ArmVirtPkg/ArmVirtCloudHv.dsc
+--- a/ArmVirtPkg/ArmVirtCloudHv.dsc
++++ b/ArmVirtPkg/ArmVirtCloudHv.dsc
+@@ -11,11 +11,22 @@
+ #
+ ################################################################################
+ [Defines]
++!ifndef FIRECRACKER_SECURE_BOOT
++  DEFINE FIRECRACKER_SECURE_BOOT = FALSE
++!endif
+   PLATFORM_NAME                  = ArmVirtCloudHv
+   PLATFORM_GUID                  = DFFED32B-DFFE-D32B-DFFE-D32BDFFED32B
+   PLATFORM_VERSION               = 0.1
+   DSC_SPECIFICATION              = 0x00010005
++!if $(FIRECRACKER_SECURE_BOOT) == TRUE
++  OUTPUT_DIRECTORY               = Build/ArmVirtCloudHvSecure-AARCH64
++!else
++!ifdef FIRECRACKER_CONSOLE
++  OUTPUT_DIRECTORY               = Build/ArmVirtCloudHvConsole-AARCH64
++!else
+   OUTPUT_DIRECTORY               = Build/ArmVirtCloudHv-AARCH64
++!endif
++!endif
+   SUPPORTED_ARCHITECTURES        = AARCH64
+   BUILD_TARGETS                  = DEBUG|RELEASE|NOOPT
+   SKUID_IDENTIFIER               = DEFAULT
+@@ -27,7 +38,16 @@
+   #
+   DEFINE PLAT_CLOUD_HV           = TRUE
+   DEFINE TTY_TERMINAL            = FALSE
++!if $(FIRECRACKER_SECURE_BOOT) == TRUE
++  DEFINE SECURE_BOOT_ENABLE      = TRUE
++  DEFINE FIRECRACKER_CONSOLE      = TRUE
++  DEFINE TPM2_ENABLE             = TRUE
++  DEFINE TPM2_ENABLE_SUPPORTED   = TRUE
++  DEFINE QEMU_PV_VARS            = TRUE
++  DEFINE QEMU_PV_VARS_SUPPORTED  = TRUE
++!else
+   DEFINE SECURE_BOOT_ENABLE      = FALSE
++!endif
+   DEFINE NETWORK_TLS_ENABLE      = FALSE
+
+   #
+@@ -55,7 +75,18 @@
+   QemuBootOrderLib|OvmfPkg/Library/QemuBootOrderLib/QemuBootOrderLib.inf
+   PciHostBridgeUtilityLib|ArmVirtPkg/Library/ArmVirtPciHostBridgeUtilityLib/ArmVirtPciHostBridgeUtilityLib.inf
+
++!if $(FIRECRACKER_SECURE_BOOT) == TRUE
++  TpmPlatformHierarchyLib|SecurityPkg/Library/PeiDxeTpmPlatformHierarchyLib/PeiDxeTpmPlatformHierarchyLib.inf
++  Tpm2CommandLib|SecurityPkg/Library/Tpm2CommandLib/Tpm2CommandLib.inf
++  Tpm2HelpLib|SecurityPkg/Library/Tpm2HelpLib/Tpm2HelpLib.inf
++  Tcg2PhysicalPresenceLib|SecurityPkg/Library/DxeTcg2PhysicalPresenceLib/DxeTcg2PhysicalPresenceLib.inf
++  Tcg2PhysicalPresencePromptLib|SecurityPkg/Library/Tcg2PhysicalPresencePromptLib/Tcg2PhysicalPresencePromptLibConsole.inf
++  Tcg2PpVendorLib|SecurityPkg/Library/Tcg2PpVendorLibNull/Tcg2PpVendorLibNull.inf
++  TpmMeasurementLib|SecurityPkg/Library/DxeTpmMeasurementLib/DxeTpmMeasurementLib.inf
++!else
+   TpmPlatformHierarchyLib|SecurityPkg/Library/PeiDxeTpmPlatformHierarchyLibNull/PeiDxeTpmPlatformHierarchyLib.inf
++  Tcg2PhysicalPresenceLib|OvmfPkg/Library/Tcg2PhysicalPresenceLibNull/DxeTcg2PhysicalPresenceLib.inf
++!endif
+   ArmTransferListLib|ArmPkg/Library/ArmTransferListLib/ArmTransferListLib.inf
+
+ !include MdePkg/MdeLibs.dsc.inc
+@@ -64,11 +95,31 @@
+   PrePiLib|EmbeddedPkg/Library/PrePiLib/PrePiLib.inf
+   ArmVirtMemInfoLib|ArmVirtPkg/Library/CloudHvVirtMemInfoLib/CloudHvVirtMemInfoPeiLib.inf
+
++[LibraryClasses.common.PEI_CORE, LibraryClasses.common.PEIM]
++!if $(FIRECRACKER_SECURE_BOOT) == TRUE
++  PcdLib|MdePkg/Library/PeiPcdLib/PeiPcdLib.inf
++!endif
++
++[LibraryClasses.common.PEIM]
++!if $(FIRECRACKER_SECURE_BOOT) == TRUE
++  Tpm2DeviceLib|SecurityPkg/Library/Tpm2DeviceLibDTpm/Tpm2DeviceLibDTpm.inf
++  BaseCryptLib|CryptoPkg/Library/BaseCryptLib/PeiCryptLib.inf
++!endif
++
+ [LibraryClasses.common.DXE_DRIVER]
++!if $(FIRECRACKER_SECURE_BOOT) == TRUE
++  Tpm2DeviceLib|SecurityPkg/Library/Tpm2DeviceLibTcg2/Tpm2DeviceLibTcg2.inf
++!endif
+   QemuFwCfgLib|OvmfPkg/Library/QemuFwCfgLib/QemuFwCfgMmioDxeLib.inf
+   ReportStatusCodeLib|MdeModulePkg/Library/DxeReportStatusCodeLib/DxeReportStatusCodeLib.inf
+
+ [BuildOptions]
++!ifdef FIRECRACKER_CONSOLE
++  GCC:*_*_*_CC_FLAGS = -DFIRECRACKER_CONSOLE
++!endif
++!if $(FIRECRACKER_SECURE_BOOT) == TRUE
++  GCC:*_*_*_CC_FLAGS = -DFIRECRACKER_SECURE_BOOT
++!endif
+ !include NetworkPkg/NetworkBuildOptions.dsc.inc
+
+ ################################################################################
+@@ -78,6 +129,11 @@
+ ################################################################################
+
+ [PcdsFeatureFlag.common]
++!if $(FIRECRACKER_SECURE_BOOT) == TRUE
++  gArmVirtTokenSpaceGuid.PcdTpm2SupportEnabled|TRUE
++  gUefiOvmfPkgTokenSpaceGuid.PcdQemuVarsRequire|TRUE
++  gEfiMdeModulePkgTokenSpaceGuid.PcdEnableVariableRuntimeCache|FALSE
++!endif
+   ## If TRUE, Graphics Output Protocol will be installed on virtual handle created by ConsplitterDxe.
+   #  It could be set FALSE to save size.
+   gEfiMdeModulePkgTokenSpaceGuid.PcdConOutGopSupport|TRUE
+@@ -157,7 +213,13 @@
+   ## PL031 RealTimeClock
+   gArmPlatformTokenSpaceGuid.PcdPL031RtcBase|0x0
+
++!if $(FIRECRACKER_SECURE_BOOT) == TRUE
++  gEfiSecurityPkgTokenSpaceGuid.PcdTpmBaseAddress|0x10000000
++  gEfiSecurityPkgTokenSpaceGuid.PcdTpmInstanceGuid|{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}
++  gEfiSecurityPkgTokenSpaceGuid.PcdTpm2HashMask|0
++!else
+   gEfiSecurityPkgTokenSpaceGuid.PcdTpmBaseAddress|0x0
++!endif
+
+   # ArmVirtCloudHv is by construction the Cloud Hypervisor platform. On X64
+   # this PCD is discovered at runtime by OvmfPkg/PlatformPei probing the host
+@@ -195,7 +257,20 @@
+   ArmPlatformPkg/MemoryInitPei/MemoryInitPeim.inf
+   ArmPkg/Drivers/CpuPei/CpuPei.inf
+
++!if $(FIRECRACKER_SECURE_BOOT) == TRUE
++  OvmfPkg/Tcg/Tcg2Config/Tcg2ConfigPei.inf
++  SecurityPkg/Tcg/Tcg2Pei/Tcg2Pei.inf {
++    <LibraryClasses>
++      HashLib|SecurityPkg/Library/HashLibBaseCryptoRouter/HashLibBaseCryptoRouterPei.inf
++      NULL|SecurityPkg/Library/HashInstanceLibSha1/HashInstanceLibSha1.inf
++      NULL|SecurityPkg/Library/HashInstanceLibSha256/HashInstanceLibSha256.inf
++      NULL|SecurityPkg/Library/HashInstanceLibSha384/HashInstanceLibSha384.inf
++      NULL|SecurityPkg/Library/HashInstanceLibSha512/HashInstanceLibSha512.inf
++      NULL|SecurityPkg/Library/HashInstanceLibSm3/HashInstanceLibSm3.inf
++  }
++!else
+   MdeModulePkg/Universal/Variable/Pei/VariablePei.inf
++!endif
+
+   MdeModulePkg/Core/DxeIplPeim/DxeIpl.inf {
+     <LibraryClasses>
+@@ -205,7 +280,9 @@
+   #
+   # Architectural Protocols
+   #
++!if $(FIRECRACKER_SECURE_BOOT) == FALSE
+   MdeModulePkg/Universal/FaultTolerantWriteDxe/FaultTolerantWriteDxe.inf
++!endif
+   EmbeddedPkg/RealTimeClockRuntimeDxe/RealTimeClockRuntimeDxe.inf {
+     <LibraryClasses>
+       NULL|ArmVirtPkg/Library/ArmVirtPL031FdtClientLib/ArmVirtPL031FdtClientLib.inf
+@@ -252,3 +329,21 @@
+     <LibraryClasses>
+       NULL|OvmfPkg/Fdt/FdtPciPcdProducerLib/FdtPciPcdProducerLib.inf
+   }
++
++!ifdef FIRECRACKER_CONSOLE
++  OvmfPkg/QemuVideoDxe/QemuVideoDxe.inf
++  OvmfPkg/VirtioInputDxe/VirtioInput.inf
++!endif
++!if $(FIRECRACKER_SECURE_BOOT) == TRUE
++  SecurityPkg/Tcg/Tcg2Dxe/Tcg2Dxe.inf {
++    <LibraryClasses>
++      HashLib|SecurityPkg/Library/HashLibBaseCryptoRouter/HashLibBaseCryptoRouterDxe.inf
++      Tpm2DeviceLib|SecurityPkg/Library/Tpm2DeviceLibRouter/Tpm2DeviceLibRouterDxe.inf
++      NULL|SecurityPkg/Library/Tpm2DeviceLibDTpm/Tpm2InstanceLibDTpm.inf
++      NULL|SecurityPkg/Library/HashInstanceLibSha1/HashInstanceLibSha1.inf
++      NULL|SecurityPkg/Library/HashInstanceLibSha256/HashInstanceLibSha256.inf
++      NULL|SecurityPkg/Library/HashInstanceLibSha384/HashInstanceLibSha384.inf
++      NULL|SecurityPkg/Library/HashInstanceLibSha512/HashInstanceLibSha512.inf
++      NULL|SecurityPkg/Library/HashInstanceLibSm3/HashInstanceLibSm3.inf
++  }
++!endif
+diff --git a/ArmVirtPkg/ArmVirtCloudHv.fdf b/ArmVirtPkg/ArmVirtCloudHv.fdf
+--- a/ArmVirtPkg/ArmVirtCloudHv.fdf
++++ b/ArmVirtPkg/ArmVirtCloudHv.fdf
+@@ -112,8 +112,13 @@
+   INF MdeModulePkg/Core/RuntimeDxe/RuntimeDxe.inf
+   INF MdeModulePkg/Universal/SecurityStubDxe/SecurityStubDxe.inf
+   INF MdeModulePkg/Universal/CapsuleRuntimeDxe/CapsuleRuntimeDxe.inf
++!if $(FIRECRACKER_SECURE_BOOT) == TRUE
++  INF OvmfPkg/VirtMmCommunicationDxe/VirtMmCommunication.inf
++  INF MdeModulePkg/Universal/Variable/RuntimeDxe/VariableSmmRuntimeDxe.inf
++!else
+   INF MdeModulePkg/Universal/FaultTolerantWriteDxe/FaultTolerantWriteDxe.inf
+   INF MdeModulePkg/Universal/Variable/RuntimeDxe/VariableRuntimeDxe.inf
++!endif
+ !if $(SECURE_BOOT_ENABLE) == TRUE
+   INF SecurityPkg/VariableAuthenticated/SecureBootConfigDxe/SecureBootConfigDxe.inf
+ !endif
+@@ -206,6 +211,13 @@
+   INF OvmfPkg/PciHotPlugInitDxe/PciHotPlugInit.inf
+   INF OvmfPkg/VirtioPciDeviceDxe/VirtioPciDeviceDxe.inf
+   INF OvmfPkg/Virtio10Dxe/Virtio10.inf
++!ifdef FIRECRACKER_CONSOLE
++  INF OvmfPkg/QemuVideoDxe/QemuVideoDxe.inf
++  INF OvmfPkg/VirtioInputDxe/VirtioInput.inf
++!endif
++!if $(FIRECRACKER_SECURE_BOOT) == TRUE
++  INF SecurityPkg/Tcg/Tcg2Dxe/Tcg2Dxe.inf
++!endif
+
+   #
+   # TianoCore logo (splash screen)
+@@ -241,7 +253,12 @@
+   INF ArmPlatformPkg/MemoryInitPei/MemoryInitPeim.inf
+   INF ArmPkg/Drivers/CpuPei/CpuPei.inf
+   INF MdeModulePkg/Universal/PCD/Pei/Pcd.inf
++!if $(FIRECRACKER_SECURE_BOOT) == TRUE
++  INF OvmfPkg/Tcg/Tcg2Config/Tcg2ConfigPei.inf
++  INF SecurityPkg/Tcg/Tcg2Pei/Tcg2Pei.inf
++!else
+   INF MdeModulePkg/Universal/Variable/Pei/VariablePei.inf
++!endif
+   INF MdeModulePkg/Core/DxeIplPeim/DxeIpl.inf
+
+   FILE FV_IMAGE = 9E21FD93-9C72-4c15-8C4B-E77F1DB2D792 {
+diff --git a/ArmVirtPkg/ArmVirtCloudHvConsole.dsc b/ArmVirtPkg/ArmVirtCloudHvConsole.dsc
+new file mode 100644
+--- /dev/null
++++ b/ArmVirtPkg/ArmVirtCloudHvConsole.dsc
+@@ -0,0 +1,5 @@
++# Copyright 2026 Bloudraad.
++# SPDX-License-Identifier: BSD-2-Clause-Patent
++[Defines]
++  DEFINE FIRECRACKER_CONSOLE = TRUE
++!include ArmVirtPkg/ArmVirtCloudHv.dsc
+diff --git a/ArmVirtPkg/ArmVirtCloudHvSecure.dsc b/ArmVirtPkg/ArmVirtCloudHvSecure.dsc
+new file mode 100644
+--- /dev/null
++++ b/ArmVirtPkg/ArmVirtCloudHvSecure.dsc
+@@ -0,0 +1,4 @@
++# SPDX-License-Identifier: BSD-2-Clause-Patent
++[Defines]
++  DEFINE FIRECRACKER_SECURE_BOOT = TRUE
++!include ArmVirtPkg/ArmVirtCloudHv.dsc
+diff --git a/ArmVirtPkg/Library/PlatformPeiLib/PlatformPeiLib.c b/ArmVirtPkg/Library/PlatformPeiLib/PlatformPeiLib.c
+--- a/ArmVirtPkg/Library/PlatformPeiLib/PlatformPeiLib.c
++++ b/ArmVirtPkg/Library/PlatformPeiLib/PlatformPeiLib.c
+@@ -98,6 +98,7 @@
+   UINT64                    *FdtHobData;
+   EARLY_PL011_BASE_ADDRESS  *UartHobData;
+   FDT_SERIAL_PORTS          Ports;
++#ifndef FIRECRACKER_SECURE_BOOT
+   INT32                     Node, Prev;
+   INT32                     Parent, Depth;
+   CONST CHAR8               *Compatible;
+@@ -106,6 +107,7 @@
+   INT32                     RangesLen;
+   CONST UINT64              *RegProp;
+   CONST UINT32              *RangesProp;
++#endif
+   UINT64                    TpmBase;
+   EFI_STATUS                Status;
+   CHAR8                     DebugLevelBuf[32];
+@@ -196,6 +198,12 @@
+                                  &UartHobData->DebugLevel
+                                  );
+
++#ifdef FIRECRACKER_SECURE_BOOT
++  TpmBase = PcdGet64 (PcdTpmBaseAddress);
++  if (TpmBase == 0) {
++    CpuDeadLoop ();
++  }
++#else
+   TpmBase = 0;
+
+   //
+@@ -279,6 +287,8 @@
+     }
+   }
+
++#endif
++
+   if (FeaturePcdGet (PcdTpm2SupportEnabled)) {
+     if (TpmBase != 0) {
+       DEBUG ((DEBUG_INFO, "%a: TPM @ 0x%lx\n", __func__, TpmBase));
+diff --git a/OvmfPkg/Library/PlatformBootManagerLibLight/PlatformBm.c b/OvmfPkg/Library/PlatformBootManagerLibLight/PlatformBm.c
+--- a/OvmfPkg/Library/PlatformBootManagerLibLight/PlatformBm.c
++++ b/OvmfPkg/Library/PlatformBootManagerLibLight/PlatformBm.c
+@@ -11,6 +11,14 @@
+
+ #include <IndustryStandard/Pci22.h>
+ #include <IndustryStandard/Virtio095.h>
++#ifdef FIRECRACKER_CONSOLE
++#include <IndustryStandard/Virtio10.h>
++#include <Protocol/SimpleTextIn.h>
++#endif
++#ifdef FIRECRACKER_SECURE_BOOT
++#include <Library/Tcg2PhysicalPresenceLib.h>
++#include <Protocol/Tcg2Protocol.h>
++#endif
+ #include <Library/BootLogoLib.h>
+ #include <Library/DevicePathLib.h>
+ #include <Library/PcdLib.h>
+@@ -476,6 +484,41 @@
+ {
+   return IsVirtioPci (Handle, ReportText, VIRTIO_SUBSYSTEM_CONSOLE);
+ }
++
++#ifdef FIRECRACKER_CONSOLE
++STATIC
++BOOLEAN
++EFIAPI
++IsVirtioPciInput (
++  IN EFI_HANDLE    Handle,
++  IN CONST CHAR16  *ReportText
++  )
++{
++  return IsVirtioPci (Handle, ReportText, VIRTIO_SUBSYSTEM_INPUT);
++}
++
++STATIC
++VOID
++EFIAPI
++AddInput (
++  IN EFI_HANDLE    Handle,
++  IN CONST CHAR16  *ReportText
++  )
++{
++  EFI_DEVICE_PATH_PROTOCOL  *DevicePath;
++  EFI_STATUS                Status;
++
++  DevicePath = DevicePathFromHandle (Handle);
++  if (DevicePath == NULL) {
++    return;
++  }
++  Status = EfiBootManagerUpdateConsoleVariable (ConIn, DevicePath, NULL);
++  if (EFI_ERROR (Status)) {
++    DEBUG ((DEBUG_ERROR, "%a: %s: %r\n", __func__, ReportText, Status));
++    CpuDeadLoop ();
++  }
++}
++#endif
+
+ /**
+   This CALLBACK_FUNCTION attempts to connect a handle non-recursively, asking
+@@ -787,7 +830,9 @@
+   //
+   // Disable the TPM 2 platform hierarchy
+   //
++#ifndef FIRECRACKER_SECURE_BOOT
+   ConfigureTpmPlatformHierarchy ();
++#endif
+
+   //
+   // Dispatch deferred images after EndOfDxe event.
+@@ -818,6 +863,10 @@
+   // ErrOut.
+   //
+   FilterAndProcess (&gEfiGraphicsOutputProtocolGuid, NULL, AddOutput);
++#ifdef FIRECRACKER_CONSOLE
++  FilterAndProcess (&gEfiPciIoProtocolGuid, IsVirtioPciInput, Connect);
++  FilterAndProcess (&gEfiSimpleTextInProtocolGuid, NULL, AddInput);
++#endif
+
+   //
+   // Add the hardcoded short-form USB keyboard device path to ConIn.
+@@ -981,6 +1030,29 @@
+   RETURN_STATUS  Status;
+   BOOLEAN        Uninstall;
+   BOOLEAN        ShellEnabled;
++#ifdef FIRECRACKER_SECURE_BOOT
++  EFI_TCG2_PROTOCOL                *Tcg2;
++  EFI_TCG2_BOOT_SERVICE_CAPABILITY  Capability = {0};
++
++  Status = EfiBootManagerConnectAllDefaultConsoles ();
++  if (EFI_ERROR (Status) || (gST->ConIn == NULL) || (gST->ConOut == NULL)) {
++    DEBUG ((DEBUG_ERROR, "TPM physical presence requires connected consoles: %r\n", Status));
++    CpuDeadLoop ();
++  }
++  Status = gBS->LocateProtocol (&gEfiTcg2ProtocolGuid, NULL, (VOID **)&Tcg2);
++  if (EFI_ERROR (Status)) {
++    DEBUG ((DEBUG_ERROR, "TPM2 protocol unavailable: %r\n", Status));
++    CpuDeadLoop ();
++  }
++  Capability.Size = sizeof (Capability);
++  Status = Tcg2->GetCapability (Tcg2, &Capability);
++  if (EFI_ERROR (Status) || !Capability.TPMPresentFlag) {
++    DEBUG ((DEBUG_ERROR, "TPM2 capability unavailable: %r, present %u\n", Status, Capability.TPMPresentFlag));
++    CpuDeadLoop ();
++  }
++  Tcg2PhysicalPresenceLibProcessRequest (NULL);
++  ConfigureTpmPlatformHierarchy ();
++#endif
+
+   //
+   // Show the splash screen.
+diff --git a/OvmfPkg/Library/PlatformBootManagerLibLight/PlatformBootManagerLib.inf b/OvmfPkg/Library/PlatformBootManagerLibLight/PlatformBootManagerLib.inf
+--- a/OvmfPkg/Library/PlatformBootManagerLibLight/PlatformBootManagerLib.inf
++++ b/OvmfPkg/Library/PlatformBootManagerLibLight/PlatformBootManagerLib.inf
+@@ -49,6 +49,7 @@
+   QemuLoadImageLib
+   ReportStatusCodeLib
+   TpmPlatformHierarchyLib
++  Tcg2PhysicalPresenceLib
+   UefiBootManagerLib
+   UefiBootServicesTableLib
+   UefiLib
+@@ -76,6 +77,8 @@
+ [Protocols]
+   gEfiFirmwareVolume2ProtocolGuid
+   gEfiGraphicsOutputProtocolGuid
++  gEfiSimpleTextInProtocolGuid
++  gEfiTcg2ProtocolGuid
+   gEfiMemoryAttributeProtocolGuid
+   gEfiPciRootBridgeIoProtocolGuid
+   gVirtioDeviceProtocolGuid
+diff --git a/OvmfPkg/VirtMmCommunicationDxe/QemuMmio.c b/OvmfPkg/VirtMmCommunicationDxe/QemuMmio.c
+--- a/OvmfPkg/VirtMmCommunicationDxe/QemuMmio.c
++++ b/OvmfPkg/VirtMmCommunicationDxe/QemuMmio.c
+@@ -27,6 +27,41 @@
+ {
+   EFI_STATUS  Status;
+
++#if defined (FIRECRACKER_SECURE_BOOT) && defined (MDE_CPU_AARCH64)
++  EFI_GCD_MEMORY_SPACE_DESCRIPTOR  Descriptor;
++
++  if ((mUefiVarsAddr & EFI_PAGE_MASK) != 0) {
++    return EFI_UNSUPPORTED;
++  }
++  Status = gDS->GetMemorySpaceDescriptor (mUefiVarsAddr, &Descriptor);
++  if (EFI_ERROR (Status)) {
++    return Status;
++  }
++  if (Descriptor.GcdMemoryType == EfiGcdMemoryTypeMemoryMappedIo) {
++    if (((Descriptor.Capabilities & EFI_MEMORY_UC) == 0) ||
++        ((Descriptor.Attributes & (EFI_MEMORY_RP | EFI_MEMORY_RO | EFI_MEMORY_WP)) != 0) ||
++        (Descriptor.Length < EFI_PAGE_SIZE) || (Descriptor.BaseAddress > mUefiVarsAddr) ||
++        (mUefiVarsAddr - Descriptor.BaseAddress > Descriptor.Length - EFI_PAGE_SIZE)) {
++      return EFI_UNSUPPORTED;
++    }
++    Status = gDS->SetMemorySpaceCapabilities (
++                    mUefiVarsAddr, EFI_PAGE_SIZE,
++                    Descriptor.Capabilities | EFI_MEMORY_RUNTIME
++                    );
++    if (EFI_ERROR (Status)) {
++      return Status;
++    }
++    return gDS->SetMemorySpaceAttributes (
++                  mUefiVarsAddr, EFI_PAGE_SIZE,
++                  (Descriptor.Attributes & ~(EFI_MEMORY_UC | EFI_MEMORY_WC | EFI_MEMORY_WT |
++                                             EFI_MEMORY_WB | EFI_MEMORY_UCE)) |
++                  EFI_MEMORY_UC | EFI_MEMORY_RUNTIME
++                  );
++  }
++  if (Descriptor.GcdMemoryType != EfiGcdMemoryTypeNonExistent) {
++    return EFI_UNSUPPORTED;
++  }
++#endif
+   Status = gDS->AddMemorySpace (
+                   EfiGcdMemoryTypeMemoryMappedIo,
+                   mUefiVarsAddr,
+@@ -106,7 +141,14 @@
+     return Status;
+   }
+
++#if defined (FIRECRACKER_SECURE_BOOT) && defined (MDE_CPU_AARCH64)
++  Status = VirtMmHwMemAttr ();
++  if (EFI_ERROR (Status)) {
++    return Status;
++  }
++#else
+   VirtMmHwMemAttr ();
++#endif
+
+   Magic = MmioRead16 (mUefiVarsAddr + UEFI_VARS_REG_MAGIC);
+   if (Magic != UEFI_VARS_MAGIC_VALUE) {

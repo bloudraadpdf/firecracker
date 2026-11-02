@@ -181,13 +181,15 @@ impl VirtioDeviceState {
             return Err(PersistError::InvalidInput);
         }
 
-        let optional_queues = matches!(self.device_type, VirtioDeviceType::Block)
-            || (matches!(
-                self.device_type,
-                VirtioDeviceType::Net | VirtioDeviceType::Balloon
-            ) && self.acked_features
-                & (1 << crate::devices::virtio::generated::virtio_config::VIRTIO_F_VERSION_1)
-                == 0);
+        let optional_queues = matches!(
+            self.device_type,
+            VirtioDeviceType::Block | VirtioDeviceType::Input
+        ) || (matches!(
+            self.device_type,
+            VirtioDeviceType::Net | VirtioDeviceType::Balloon
+        ) && self.acked_features
+            & (1 << crate::devices::virtio::generated::virtio_config::VIRTIO_F_VERSION_1)
+            == 0);
         if self.activated && !optional_queues && self.queues.iter().any(|queue| !queue.ready) {
             return Err(PersistError::InvalidInput);
         }

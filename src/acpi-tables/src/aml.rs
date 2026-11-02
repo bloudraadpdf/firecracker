@@ -905,6 +905,25 @@ impl Aml for LessThan<'_> {
     }
 }
 
+macro_rules! unary_op {
+    ($name:ident, $($opcode:expr),+) => {
+        pub struct $name<'a>(pub &'a dyn Aml);
+
+        impl Aml for $name<'_> {
+            fn append_aml_bytes(&self, bytes: &mut Vec<u8>) -> Result<(), AmlError> {
+                bytes.extend_from_slice(&[$($opcode),+]);
+                self.0.append_aml_bytes(bytes)
+            }
+        }
+    };
+}
+
+unary_op!(ObjectType, 0x8e);
+unary_op!(SizeOf, 0x87);
+unary_op!(DerefOf, 0x83);
+unary_op!(Not, 0x92);
+unary_op!(Sleep, 0x5b, 0x22);
+
 pub struct Arg(pub u8);
 
 impl Aml for Arg {

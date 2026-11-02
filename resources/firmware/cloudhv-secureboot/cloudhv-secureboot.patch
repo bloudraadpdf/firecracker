@@ -1,0 +1,207 @@
+--- a/OvmfPkg/CloudHv/CloudHvX64.dsc
++++ b/OvmfPkg/CloudHv/CloudHvX64.dsc
+@@ -15,11 +15,16 @@
+ #
+ ################################################################################
+ [Defines]
++!ifndef FIRECRACKER_SECURE_BOOT
++  DEFINE FIRECRACKER_SECURE_BOOT = FALSE
++!endif
+   PLATFORM_NAME                  = CloudHv
+   PLATFORM_GUID                  = 97bb49d2-9814-4bea-8311-f8b9ac231e11
+   PLATFORM_VERSION               = 0.1
+   DSC_SPECIFICATION              = 0x00010005
+-!ifdef FIRECRACKER_CONSOLE
++!if $(FIRECRACKER_SECURE_BOOT) == TRUE
++  OUTPUT_DIRECTORY               = Build/CloudHvConsoleSecureX64
++!elseif $(FIRECRACKER_CONSOLE) == TRUE
+   OUTPUT_DIRECTORY               = Build/CloudHvConsoleX64
+ !else
+   OUTPUT_DIRECTORY               = Build/CloudHvX64
+@@ -33,11 +38,19 @@
+   # Defines for default states.  These can be changed on the command line.
+   # -D FLAG=VALUE
+   #
++!if $(FIRECRACKER_SECURE_BOOT) == TRUE
++  DEFINE SECURE_BOOT_ENABLE      = TRUE
++!else
+   DEFINE SECURE_BOOT_ENABLE      = FALSE
++!endif
+   DEFINE SMM_REQUIRE             = FALSE
+   DEFINE SOURCE_DEBUG_ENABLE     = FALSE
+ 
+ !include OvmfPkg/Include/Dsc/OvmfTpmDefines.dsc.inc
++!if $(FIRECRACKER_SECURE_BOOT) == TRUE
++  DEFINE TPM2_ENABLE = TRUE
++  DEFINE TPM1_ENABLE = FALSE
++!endif
+ 
+   #
+   # Shell can be useful for debugging but should not be enabled for production
+@@ -81,7 +94,9 @@
+ !endif
+ 
+ [BuildOptions]
+-!ifdef FIRECRACKER_CONSOLE
++!if $(FIRECRACKER_SECURE_BOOT) == TRUE
++  GCC:*_*_*_CC_FLAGS = -DFIRECRACKER_CONSOLE -DFIRECRACKER_SECURE_BOOT
++!elseif $(FIRECRACKER_CONSOLE) == TRUE
+   GCC:*_*_*_CC_FLAGS = -DFIRECRACKER_CONSOLE
+ !endif
+   GCC:RELEASE_*_*_CC_FLAGS             = -DMDEPKG_NDEBUG
+@@ -371,7 +386,7 @@
+   BaseCryptLib|CryptoPkg/Library/BaseCryptLib/RuntimeCryptLib.inf
+   PciLib|OvmfPkg/Library/DxePciLibI440FxQ35/DxePciLibI440FxQ35.inf
+   VariablePolicyLib|MdeModulePkg/Library/VariablePolicyLib/VariablePolicyLibRuntimeDxe.inf
+-!if $(SMM_REQUIRE) == TRUE
++!if $(SMM_REQUIRE) == TRUE || $(FIRECRACKER_SECURE_BOOT) == TRUE
+   MmUnblockMemoryLib|MdePkg/Library/MmUnblockMemoryLib/MmUnblockMemoryLibNull.inf
+ !endif
+ 
+@@ -484,6 +499,10 @@
+ #
+ ################################################################################
+ [PcdsFeatureFlag]
++!if $(FIRECRACKER_SECURE_BOOT) == TRUE
++  gUefiOvmfPkgTokenSpaceGuid.PcdQemuVarsRequire|TRUE
++  gEfiMdeModulePkgTokenSpaceGuid.PcdEnableVariableRuntimeCache|FALSE
++!endif
+   gEfiMdeModulePkgTokenSpaceGuid.PcdHiiOsRuntimeSupport|FALSE
+   gEfiMdeModulePkgTokenSpaceGuid.PcdDxeIplSupportUefiDecompress|FALSE
+   gEfiMdeModulePkgTokenSpaceGuid.PcdDxeIplSwitchToLongMode|FALSE
+@@ -929,6 +948,10 @@
+ 
+ !else
+ 
++!if $(FIRECRACKER_SECURE_BOOT) == TRUE
++  OvmfPkg/VirtMmCommunicationDxe/VirtMmCommunication.inf
++  MdeModulePkg/Universal/Variable/RuntimeDxe/VariableSmmRuntimeDxe.inf
++!else
+   #
+   # Variable driver stack (non-SMM)
+   #
+@@ -944,6 +967,8 @@
+   }
+ !endif
+ 
++!endif
++
+   #
+   # TPM support
+   #
+--- a/OvmfPkg/CloudHv/CloudHvX64.fdf
++++ b/OvmfPkg/CloudHv/CloudHvX64.fdf
+@@ -200,7 +200,7 @@
+   INF  MdeModulePkg/Universal/DevicePathDxe/DevicePathDxe.inf
+   INF  MdeModulePkg/Universal/PCD/Dxe/Pcd.inf
+   INF  OvmfPkg/AmdSevDxe/AmdSevDxe.inf
+-!if $(SMM_REQUIRE) == FALSE
++!if $(SMM_REQUIRE) == FALSE && $(FIRECRACKER_SECURE_BOOT) == FALSE
+   INF  OvmfPkg/QemuFlashFvbServicesRuntimeDxe/FvbServicesRuntimeDxe.inf
+ !endif
+ }
+@@ -331,6 +331,10 @@
+ 
+ !else
+ 
++!if $(FIRECRACKER_SECURE_BOOT) == TRUE
++INF OvmfPkg/VirtMmCommunicationDxe/VirtMmCommunication.inf
++INF MdeModulePkg/Universal/Variable/RuntimeDxe/VariableSmmRuntimeDxe.inf
++!else
+ #
+ # Variable driver stack (non-SMM)
+ #
+@@ -338,6 +342,8 @@
+ INF  OvmfPkg/EmuVariableFvbRuntimeDxe/Fvb.inf
+ INF  MdeModulePkg/Universal/FaultTolerantWriteDxe/FaultTolerantWriteDxe.inf
+ INF  MdeModulePkg/Universal/Variable/RuntimeDxe/VariableRuntimeDxe.inf
++!endif
++
+ !endif
+ 
+ #
+--- a/OvmfPkg/VirtMmCommunicationDxe/QemuHwInfo.c
++++ b/OvmfPkg/VirtMmCommunicationDxe/QemuHwInfo.c
+@@ -22,6 +22,10 @@
+   VOID
+   )
+ {
++#ifdef FIRECRACKER_SECURE_BOOT
++  mUefiVarsAddr = 0xFED50000;
++  return EFI_SUCCESS;
++#else
+   FIRMWARE_CONFIG_ITEM  FwCfgItem;
+   UINTN                 FwCfgSize;
+   VOID                  *HardwareInfoBlob;
+@@ -75,4 +79,5 @@
+   FreeHardwareInfoList (&HwInfoList);
+   FreePool (HardwareInfoBlob);
+   return RETURN_SUCCESS;
++#endif
+ }
+--- a/OvmfPkg/VirtMmCommunicationDxe/QemuMmio.c
++++ b/OvmfPkg/VirtMmCommunicationDxe/QemuMmio.c
+@@ -10,6 +10,9 @@
+ #include <Library/DebugLib.h>
+ #include <Library/DxeServicesTableLib.h>
+ #include <Library/IoLib.h>
++#ifdef FIRECRACKER_SECURE_BOOT
++#include <Library/TimerLib.h>
++#endif
+ #include <Library/UefiBootServicesTableLib.h>
+ #include <Library/UefiRuntimeServicesTableLib.h>
+ 
+@@ -59,14 +62,22 @@
+   UINT32  Sts;
+ 
+   MmioWrite16 (mUefiVarsAddr + UEFI_VARS_REG_CMD_STS, Cmd);
++#ifdef FIRECRACKER_SECURE_BOOT
++  for (Count = 0; Count < 50000; Count++) {
++#else
+   for (Count = 0; Count < 100; Count++) {
++#endif
+     Sts = MmioRead16 (mUefiVarsAddr + UEFI_VARS_REG_CMD_STS);
+     DEBUG ((DEBUG_VERBOSE, "%a: Sts: 0x%x\n", __func__, Sts));
+     switch (Sts) {
+       case UEFI_VARS_STS_SUCCESS:
+         return RETURN_SUCCESS;
+       case UEFI_VARS_STS_BUSY:
++#ifdef FIRECRACKER_SECURE_BOOT
++        MicroSecondDelay (100);
++#else
+         CpuPause ();
++#endif
+         break;
+       case UEFI_VARS_STS_ERR_NOT_SUPPORTED:
+         return RETURN_UNSUPPORTED;
+--- a/OvmfPkg/VirtMmCommunicationDxe/VirtMmCommunication.h
++++ b/OvmfPkg/VirtMmCommunicationDxe/VirtMmCommunication.h
+@@ -7,7 +7,7 @@
+
+ /* communication buffer */
+
+-#define MAX_BUFFER_SIZE  (64 * 1024)
++#define MAX_BUFFER_SIZE  (2 * 1024 * 1024)
+
+ extern VOID                  *mCommunicateBuffer;
+ extern EFI_PHYSICAL_ADDRESS  mCommunicateBufferPhys;
+--- a/OvmfPkg/VirtMmCommunicationDxe/VirtMmCommunication.inf
++++ b/OvmfPkg/VirtMmCommunicationDxe/VirtMmCommunication.inf
+@@ -45,6 +45,7 @@
+   DxeServicesTableLib
+   HobLib
+   IoLib
++  TimerLib
+   MemoryAllocationLib
+   UefiDriverEntryPoint
+ 
+--- /dev/null
++++ b/OvmfPkg/CloudHv/CloudHvConsoleSecureX64.dsc
+@@ -0,0 +1,7 @@
++## @file
++# Firecracker console with TPM2 and host-authenticated UEFI variables.
++# SPDX-License-Identifier: BSD-2-Clause-Patent
++##
++[Defines]
++  DEFINE FIRECRACKER_SECURE_BOOT = TRUE
++!include OvmfPkg/CloudHv/CloudHvConsoleX64.dsc

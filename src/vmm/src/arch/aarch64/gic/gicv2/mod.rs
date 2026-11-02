@@ -180,3 +180,21 @@ impl GICv2 {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixed_security_pages_do_not_overlap_interrupt_controller() {
+        let ranges = [
+            (GICv2::get_dist_addr(), GICv2::get_dist_size()),
+            (GICv2::get_cpu_addr(), GICv2::get_cpu_size()),
+        ];
+        for (start, size) in ranges {
+            for base in [crate::arch::TPM_MEM_START, crate::arch::UEFI_VARS_MEM_START] {
+                assert!(base + 0x1000 <= start || start + size <= base);
+            }
+        }
+    }
+}

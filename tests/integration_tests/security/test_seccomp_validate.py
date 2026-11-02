@@ -90,3 +90,17 @@ def test_validate_filter(seccompiler, bin_test_syscall, monkeypatch, tmp_path, t
                     denied_args[1] = how
                     denied_str = " ".join(str(x) for x in denied_args)
                     assert utils.run_cmd(f"{cmd} {denied_str}").returncode == 159
+
+            if syscall in ["setsockopt", "clock_nanosleep"]:
+                denied_values = (
+                    [(0, 20), (1, 19), (1, 22), (6, 20)]
+                    if syscall == "setsockopt"
+                    else [(0, 0), (1, 1)]
+                )
+                indices = (1, 2) if syscall == "setsockopt" else (0, 1)
+                for values in denied_values:
+                    denied_args = allowed_args.copy()
+                    for index, value in zip(indices, values):
+                        denied_args[index] = value
+                    denied_str = " ".join(str(x) for x in denied_args)
+                    assert utils.run_cmd(f"{cmd} {denied_str}").returncode == 159
