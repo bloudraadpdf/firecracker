@@ -408,6 +408,8 @@ impl Vcpu {
     /// Returns error or enum specifying whether emulation was handled or interrupted.
     pub fn run_emulation(&mut self) -> Result<VcpuEmulation, VcpuError> {
         match self.kvm_vcpu.fd.run() {
+            #[cfg(target_arch = "x86_64")]
+            Ok(VcpuExit::IoIn(..) | VcpuExit::IoOut(..)) => self.kvm_vcpu.emulate_pio(),
             Err(ref err) if err.errno() == libc::EINTR => {
                 self.kvm_vcpu.fd.set_kvm_immediate_exit(0);
                 // Notify that this KVM_RUN was interrupted.
