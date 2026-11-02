@@ -122,6 +122,16 @@ pub trait VirtioDevice: AsAny + MutEventSubscriber + Send {
     /// This must return `Some` exactly for indices below [`Self::num_queues`].
     fn queue_config_mut(&mut self, index: usize) -> Option<&mut QueueConfig>;
 
+    /// Activates a previously absent queue on a running legacy device.
+    fn activate_legacy_queue(
+        &mut self,
+        _index: usize,
+        _page_frame: u32,
+        _mem: &GuestMemoryMmap,
+    ) -> Result<(), super::queue::QueueError> {
+        Err(super::queue::QueueError::NotReady)
+    }
+
     /// Returns the event fd for the selected queue.
     ///
     /// This must return `Some` exactly for indices below [`Self::num_queues`].
@@ -176,6 +186,11 @@ pub trait VirtioDevice: AsAny + MutEventSubscriber + Send {
     /// Each device returns its live config struct bytes here.
     fn config_as_bytes(&self) -> &[u8];
 
+    /// Length of device configuration exposed through legacy PCI ports.
+    fn legacy_config_len(&self) -> usize {
+        self.config_as_bytes().len()
+    }
+
     /// Reads this device configuration space at `offset`.
     fn read_config(&self, offset: u64, data: &mut [u8]) {
         let config = self.config_as_bytes();
@@ -198,6 +213,15 @@ pub trait VirtioDevice: AsAny + MutEventSubscriber + Send {
         mem: GuestMemoryMmap,
         interrupt: Arc<dyn VirtioInterrupt>,
     ) -> Result<(), ActivateError>;
+
+    /// Activate the configured queues of a legacy PCI device.
+    fn activate_legacy(
+        &mut self,
+        mem: GuestMemoryMmap,
+        interrupt: Arc<dyn VirtioInterrupt>,
+    ) -> Result<(), ActivateError> {
+        self.activate(mem, interrupt)
+    }
 
     /// Checks if the resources of this device are activated.
     fn is_activated(&self) -> bool;

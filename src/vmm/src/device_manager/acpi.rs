@@ -103,14 +103,24 @@ impl ACPIDeviceManager {
 
 impl Aml for ACPIDeviceManager {
     fn append_aml_bytes(&self, v: &mut Vec<u8>) -> Result<(), aml::AmlError> {
+        self.append_aml_bytes_in_scope(crate::acpi::DeviceScope::SystemBus, v)
+    }
+}
+
+impl ACPIDeviceManager {
+    pub(crate) fn append_aml_bytes_in_scope(
+        &self,
+        scope: crate::acpi::DeviceScope,
+        v: &mut Vec<u8>,
+    ) -> Result<(), aml::AmlError> {
         // AML for [`VmGenId`] device.
         self.vmgenid().append_aml_bytes(v)?;
         // AML for [`VmClock`] device.
-        self.vmclock().append_aml_bytes(v)?;
+        self.vmclock().append_aml_bytes_in_scope(scope, v)?;
 
         // Create the AML for the GED interrupt handler
         aml::Device::new(
-            "_SB_.GED_".try_into()?,
+            scope.device_path("GED_")?,
             vec![
                 &aml::Name::new("_HID".try_into()?, &"ACPI0013")?,
                 &aml::Name::new(

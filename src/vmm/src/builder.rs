@@ -68,6 +68,8 @@ use crate::{EventManager, Vmm, VmmError};
 pub enum StartMicrovmError {
     /// Unsupported build configuration: {0}
     WindowsFeature(#[from] crate::vmm_config::WindowsFeatureDisabled),
+    /// The transitional PCI platform requires --enable-pci.
+    PciDisabled,
     /// Unable to attach block device to Vmm: {0}
     AttachBlockDevice(io::Error),
     /// Could not attach device: {0}
@@ -158,6 +160,9 @@ pub fn build_microvm_for_boot(
     seccomp_filters: &BpfThreadMap,
 ) -> Result<Arc<Mutex<Vmm>>, StartMicrovmError> {
     vm_resources.validate_windows_support()?;
+    if !vm_resources.pci_enabled && !vm_resources.machine_config.pci_transport.is_modern() {
+        return Err(StartMicrovmError::PciDisabled);
+    }
     // Timestamp for measuring microVM boot duration.
     let request_ts = TimestampUs::default();
 
@@ -188,6 +193,7 @@ pub fn build_microvm_for_boot(
     // Set up KVM VM and register memory regions.
     // Build custom CPU config if a custom template is provided.
     let mut vm = KvmVm::new(kvm)?;
+    vm.resource_allocator().pci_transport = vm_resources.machine_config.pci_transport;
     let vcpus = vm.create_vcpus(&vm_resources.machine_config)?;
     vm.register_dram_memory_regions(guest_memory)?;
 
@@ -1082,23 +1088,49 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn transitional_platform_requires_pci() {
+        let mut resources = VmResources::default();
+        resources.machine_config.pci_transport = crate::pci::PciTransportMode::Transitional;
+        let result = build_microvm_for_boot(
+            &InstanceInfo::default(),
+            &resources,
+            &mut EventManager::new().unwrap(),
+            &Default::default(),
+        );
+        assert!(matches!(result, Err(StartMicrovmError::PciDisabled)));
+    }
+
     pub(crate) fn default_vmm_with_pci() -> Vmm {
         default_vmm_with_pci_ports(0)
     }
 
     pub(crate) fn default_vmm_with_pci_ports(hotplug_ports: u8) -> Vmm {
+        default_vmm_with_pci_settings(crate::pci::PciTransportMode::Modern, hotplug_ports)
+    }
+
+    pub(crate) fn default_vmm_with_pci_mode(mode: crate::pci::PciTransportMode) -> Vmm {
+        default_vmm_with_pci_settings(mode, 0)
+    }
+
+    fn default_vmm_with_pci_settings(mode: crate::pci::PciTransportMode, hotplug_ports: u8) -> Vmm {
         let mut vm = setup_vm_with_memory(mib_to_bytes(128));
 
         let _ = vm
             .create_vcpus(&crate::vmm_config::machine_config::MachineConfig::default())
             .unwrap();
 
+        vm.resource_allocator().pci_transport = mode;
         let vm = Arc::new(vm);
         let device_manager = default_device_manager_with_pci(&vm, hotplug_ports);
 
         Vmm {
             instance_info: InstanceInfo::default(),
-            machine_config: MachineConfig::default(),
+            machine_config: MachineConfig {
+                pci_transport: mode,
+                ..Default::default()
+            },
             boot_source_config: BootSourceConfig::default(),
             shutdown_exit_code: None,
             vm: Vm::Kvm(vm),

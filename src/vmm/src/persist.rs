@@ -486,6 +486,7 @@ pub fn restore_from_snapshot(
 
     vm_resources
         .update_machine_config(&MachineConfigUpdate {
+            pci_transport: Some(microvm_state.vm_state.resource_allocator.pci_transport),
             vcpu_count: Some(vcpu_count),
             mem_size_mib: Some(u64_to_usize(microvm_state.vm_info.mem_size_mib)),
             smt: Some(microvm_state.vm_info.smt),

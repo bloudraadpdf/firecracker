@@ -109,8 +109,18 @@ impl Persist<'_> for Queue {
             uses_notif_suppression: false,
             num_added: state.num_added,
         };
-        if constructor_args.is_activated && queue.config.ready {
-            queue.initialize(&constructor_args.mem)?;
+        if constructor_args.is_activated {
+            if queue.config.size == 0
+                || queue.config.size > queue.config.max_size
+                || !queue.config.size.is_power_of_two()
+            {
+                return Err(QueueError::InvalidSize(queue.config.size));
+            }
+            if queue.config.ready {
+                queue.initialize(&constructor_args.mem)?;
+            } else if queue.next_avail.0 != 0 || queue.next_used.0 != 0 || queue.num_added.0 != 0 {
+                return Err(QueueError::NotReady);
+            }
         }
         Ok(queue)
     }
@@ -171,10 +181,14 @@ impl VirtioDeviceState {
             return Err(PersistError::InvalidInput);
         }
 
-        if self.activated
-            && self.device_type != VirtioDeviceType::Block
-            && self.queues.iter().any(|queue| !queue.ready)
-        {
+        let optional_queues = matches!(self.device_type, VirtioDeviceType::Block)
+            || (matches!(
+                self.device_type,
+                VirtioDeviceType::Net | VirtioDeviceType::Balloon
+            ) && self.acked_features
+                & (1 << crate::devices::virtio::generated::virtio_config::VIRTIO_F_VERSION_1)
+                == 0);
+        if self.activated && !optional_queues && self.queues.iter().any(|queue| !queue.ready) {
             return Err(PersistError::InvalidInput);
         }
 
@@ -379,17 +393,21 @@ mod tests {
         };
         state.queues = vec![bad_q];
         state.activated = true;
-        state
-            .build_queues_checked(&mem, VirtioDeviceType::Net, state.queues.len(), max_size)
-            .unwrap_err();
-
-        // activated && !q.is_valid()
-        let bad_q = QueueState::default();
-        state.queues = vec![bad_q];
-        state.activated = true;
-        state
-            .build_queues_checked(&mem, VirtioDeviceType::Net, state.queues.len(), max_size)
-            .unwrap_err();
+        for invalid in [
+            QueueState {
+                size: max_size + 1,
+                ..Default::default()
+            },
+            QueueState {
+                next_used: Wrapping(1),
+                ..Default::default()
+            },
+        ] {
+            state.queues = vec![invalid];
+            state
+                .build_queues_checked(&mem, VirtioDeviceType::Net, state.queues.len(), max_size)
+                .unwrap_err();
+        }
     }
 
     #[test]

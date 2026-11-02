@@ -208,14 +208,18 @@ impl<'a> Persist<'a> for VmClock {
     }
 }
 
-impl Aml for VmClock {
-    fn append_aml_bytes(&self, v: &mut Vec<u8>) -> Result<(), aml::AmlError> {
+impl VmClock {
+    pub(crate) fn append_aml_bytes_in_scope(
+        &self,
+        scope: crate::acpi::DeviceScope,
+        v: &mut Vec<u8>,
+    ) -> Result<(), aml::AmlError> {
         #[cfg(target_arch = "x86_64")]
         let interrupt = self.gsi;
         #[cfg(target_arch = "aarch64")]
         let interrupt = self.gsi + crate::arch::SPI_START;
         aml::Device::new(
-            "_SB_.VCLK".try_into()?,
+            scope.device_path("VCLK")?,
             vec![
                 &aml::Name::new("_HID".try_into()?, &"AMZNC10C")?,
                 &aml::Name::new("_CID".try_into()?, &"VMCLOCK")?,

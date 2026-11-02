@@ -27,7 +27,8 @@ use crate::devices::virtio::pmem::persist::PmemConstructorArgs;
 use crate::devices::virtio::rng::Entropy;
 use crate::devices::virtio::rng::persist::EntropyConstructorArgs;
 use crate::devices::virtio::transport::pci::device::{
-    CAPABILITY_BAR_SIZE, VirtioPciDevice, VirtioPciDeviceError, VirtioPciDeviceState,
+    CAPABILITY_BAR_SIZE, PciInterruptForwarder, VirtioPciDevice, VirtioPciDeviceError,
+    VirtioPciDeviceState,
 };
 use crate::devices::virtio::vsock::persist::{
     VsockConstructorArgs, VsockState, VsockUdsConstructorArgs,
@@ -36,6 +37,7 @@ use crate::devices::virtio::vsock::{Vsock, VsockUnixBackend};
 use crate::logger::{debug, warn};
 use crate::pci::PciSBDF;
 use crate::pci::bus::PciBusError;
+use crate::pci::intx::PciIntxGroup;
 use crate::resources::VmResources;
 use crate::seccomp::BpfProgram;
 use crate::snapshot::Persist;
@@ -57,6 +59,8 @@ pub enum PciPlacement {
 
 #[derive(Debug)]
 pub struct PciDevices {
+    intx: Option<Arc<Mutex<PciIntxGroup>>>,
+    intx_sub_id: Option<event_manager::SubscriberId>,
     /// PCIe segment of the VMM. We currently support a single PCIe segment.
     pub pci_segment: PciSegment,
     /// All VirtIO PCI devices of the system
@@ -95,11 +99,24 @@ pub enum PciManagerError {
 
 impl PciDevices {
     pub fn new(vm: &Arc<KvmVm>, hotplug_ports: u8) -> Result<Self, PciManagerError> {
-        // Currently we don't assign any IRQs to PCI devices. We will be using MSI-X interrupts
-        // only.
-        let pci_segment = PciSegment::new(0, vm, &[0u8; 32], hotplug_ports)?;
+        #[cfg(target_arch = "x86_64")]
+        let intx = if vm.resource_allocator().pci_transport.is_modern() {
+            None
+        } else {
+            Some(Arc::new(Mutex::new(PciIntxGroup::new(vm.clone())?)))
+        };
+        #[cfg(target_arch = "aarch64")]
+        let intx: Option<Arc<Mutex<PciIntxGroup>>> = None;
+        let irq = if intx.is_some() {
+            u8::try_from(crate::pci::intx::PCI_INTX_GSI).unwrap()
+        } else {
+            0
+        };
+        let pci_segment = PciSegment::new(0, vm, &[irq; 32], hotplug_ports)?;
 
         Ok(Self {
+            intx,
+            intx_sub_id: None,
             pci_segment,
             virtio_devices: HashMap::new(),
         })
@@ -114,7 +131,23 @@ impl PciDevices {
         virtio_device: Arc<Mutex<VirtioPciDevice>>,
         event_manager: &mut EventManager,
     ) -> Result<(), PciManagerError> {
-        let bar_address = {
+        if let Some(group) = &self.intx {
+            if self.intx_sub_id.is_none() {
+                self.intx_sub_id = Some(event_manager.add_subscriber(group.clone()));
+            }
+            virtio_device.lock().unwrap().attach_intx(group.clone())?;
+            if let Some(forwarder) = PciInterruptForwarder::new(&virtio_device) {
+                let id = match forwarder.register(event_manager) {
+                    Ok(id) => id,
+                    Err(error) => {
+                        virtio_device.lock().unwrap().detach_intx()?;
+                        return Err(error.into());
+                    }
+                };
+                virtio_device.lock().unwrap().interrupt_sub_id = Some(id);
+            }
+        }
+        let (bar_address, io_bar_address) = {
             let mut device = virtio_device.lock().unwrap();
 
             device.register_notification_ioevents(vm)?;
@@ -122,7 +155,12 @@ impl PciDevices {
             let sub_id = event_manager.add_subscriber(device.virtio_device());
             device.sub_id = Some(sub_id);
 
-            device.bar_address()
+            (
+                device.bar_address(),
+                device
+                    .io_bar_address()
+                    .map(|base| (base, device.io_bar_size())),
+            )
         };
 
         self.virtio_devices
@@ -143,6 +181,12 @@ impl PciDevices {
         vm.common
             .mmio_bus
             .insert(virtio_device.clone(), bar_address, CAPABILITY_BAR_SIZE)?;
+        #[cfg(target_arch = "x86_64")]
+        if let Some((base, size)) = io_bar_address {
+            vm.pio_bus.insert(virtio_device, base, size)?;
+        }
+        #[cfg(target_arch = "aarch64")]
+        debug_assert!(io_bar_address.is_none());
 
         Ok(())
     }
@@ -176,7 +220,7 @@ impl PciDevices {
 
         // Create the transport
         let mut virtio_device =
-            VirtioPciDevice::new(id.clone(), vm, device, Arc::new(msix_vectors), sbdf);
+            VirtioPciDevice::new(id.clone(), vm, device, Arc::new(msix_vectors), sbdf)?;
 
         // It's likely that the guest has already programmed the root port's
         // window. Try to place the device BAR inside that window if possible.
@@ -186,7 +230,7 @@ impl PciDevices {
         // Don't hold the resource allocator lock across attach_common()
         // below: a device access holds the bus lock and can take the allocator
         // lock, so the reverse order can deadlock.
-        virtio_device.allocate_bars(&mut vm.resource_allocator().mmio32_memory, port_window)?;
+        virtio_device.allocate_bars(&mut vm.resource_allocator(), port_window)?;
 
         let virtio_device = Arc::new(Mutex::new(virtio_device));
 
@@ -244,19 +288,32 @@ impl PciDevices {
         // Next operations of removing device from mmio_bus and pci_bus need to wait for any other
         // user of the device to finish. This requires us to not hold the lock for the device in
         // case someone will try to access the device while we are in these several lines of code.
-        let (bar_addr, sub_id) = {
+        let (bar_addr, io_bar_address, sub_id) = {
             let pci_device = pci_device_arc.lock().expect("Poisoned lock");
 
             pci_device
                 .unregister_notification_ioevents(vm)
                 .map_err(PciManagerError::Kvm)?;
-            (pci_device.bar_address(), pci_device.sub_id)
+            (
+                pci_device.bar_address(),
+                pci_device
+                    .io_bar_address()
+                    .map(|base| (base, pci_device.io_bar_size())),
+                pci_device.sub_id,
+            )
         };
 
         vm.common
             .mmio_bus
             .remove(bar_addr, CAPABILITY_BAR_SIZE)
             .map_err(PciManagerError::Bus)?;
+
+        #[cfg(target_arch = "x86_64")]
+        if let Some((base, size)) = io_bar_address {
+            vm.pio_bus.remove(base, size)?;
+        }
+        #[cfg(target_arch = "aarch64")]
+        debug_assert!(io_bar_address.is_none());
 
         if let Some(sub_id) = sub_id
             && event_manager.remove_subscriber(sub_id).is_err()
@@ -272,8 +329,11 @@ impl PciDevices {
             .lock()
             .expect("Poisoned lock")
             .commit_dirty();
-
-        pci_device.free_bars(&mut vm.resource_allocator().mmio32_memory);
+        pci_device.free_bars(&mut vm.resource_allocator());
+        pci_device.detach_intx()?;
+        if let Some(id) = pci_device.interrupt_sub_id.take() {
+            let _ = event_manager.remove_subscriber(id);
+        }
 
         // Ensure no other references to the device remain, so it is freed when
         // this function returns.
@@ -808,6 +868,16 @@ mod tests {
 
     #[test]
     fn test_device_manager_persistence() {
+        device_manager_persistence(crate::pci::PciTransportMode::Modern);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_transitional_device_manager_persistence() {
+        device_manager_persistence(crate::pci::PciTransportMode::Transitional);
+    }
+
+    fn device_manager_persistence(mode: crate::pci::PciTransportMode) {
         // These need to survive so the restored blocks find them.
         let _block_files;
         let _pmem_files;
@@ -819,7 +889,7 @@ mod tests {
         // Set up a vmm with one of each device, and get the serialized DeviceStates.
         {
             let mut event_manager = EventManager::new().expect("Unable to create EventManager");
-            let mut vmm = default_vmm_with_pci();
+            let mut vmm = default_vmm_with_pci_mode(mode);
             let mut cmdline = default_kernel_cmdline();
 
             // Add a balloon device.

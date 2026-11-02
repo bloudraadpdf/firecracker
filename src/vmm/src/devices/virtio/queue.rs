@@ -408,6 +408,22 @@ impl Queue {
         *self = Self::new(self.config.max_size);
     }
 
+    /// Configure a stopped queue using the legacy PCI page-frame register.
+    pub fn configure_legacy_pci(&mut self, page_frame: u32) {
+        *self = Self::new(self.config.max_size);
+        if page_frame == 0 {
+            return;
+        }
+        self.config.desc_table_address = GuestAddress(u64::from(page_frame) << 12);
+        self.config.avail_ring_address =
+            GuestAddress(self.config.desc_table_address.0 + self.desc_table_size() as u64);
+        self.config.used_ring_address = GuestAddress(
+            (self.config.avail_ring_address.0 + self.avail_ring_size() as u64)
+                .next_multiple_of(4096),
+        );
+        self.config.ready = true;
+    }
+
     fn desc_table_size(&self) -> usize {
         std::mem::size_of::<Descriptor>() * usize::from(self.config.size)
     }
@@ -491,6 +507,9 @@ impl Queue {
         Ok(())
     }
 
+    pub fn is_initialized(&self) -> bool {
+        self.config.ready && self.desc_table != GuestMemorySlice::UNRESOLVED
+    }
     // The transports prevent active queue reconfiguration. An out-of-range access indicates
     // invalid device state, so abort as for `InvalidAvailIdx`.
 
@@ -568,6 +587,9 @@ impl Queue {
 
     /// Returns the number of yet-to-be-popped descriptor chains in the avail ring.
     pub fn len(&self) -> u16 {
+        if !self.is_initialized() {
+            return 0;
+        }
         (Wrapping(self.avail_ring_idx_get()) - self.next_avail).0
     }
 
@@ -671,6 +693,9 @@ impl Queue {
         desc_index: u16,
         len: u32,
     ) -> Result<(), QueueError> {
+        if !self.is_initialized() {
+            return Err(QueueError::NotReady);
+        }
         if self.config.size <= desc_index {
             error!(
                 "attempted to add out of bounds descriptor to used ring: {}",
@@ -697,6 +722,9 @@ impl Queue {
     /// Set the used ring index to the current `next_used` value.
     /// Should be called once after number of `add_used` calls.
     pub fn advance_used_ring_idx(&mut self) {
+        if !self.is_initialized() {
+            return;
+        }
         // This fence ensures all descriptor writes are visible before the index update is.
         fence(Ordering::Release);
         self.used_ring_idx_set(self.next_used.0);
@@ -720,6 +748,9 @@ impl Queue {
     /// from the available ring and we can't guarantee that there will be a notification. In this
     /// case the caller might want to consume the mentioned descriptors and call this method again.
     fn try_enable_notification(&mut self) -> Result<bool, InvalidAvailIdx> {
+        if !self.is_initialized() {
+            return Ok(true);
+        }
         // If the device doesn't use notification suppression, we'll continue to get notifications
         // no matter what.
         if !self.uses_notif_suppression {
@@ -761,6 +792,9 @@ impl Queue {
     /// `avail.idx`; only correct when the driver does not add to the avail
     /// ring until it has observed our used-ring update.
     pub fn enable_notification(&mut self) {
+        if !self.is_initialized() {
+            return;
+        }
         if !self.uses_notif_suppression {
             return;
         }
@@ -777,6 +811,9 @@ impl Queue {
     ///
     /// This is similar to the `vring_need_event()` method implemented by the Linux kernel.
     pub fn prepare_kick(&mut self) -> bool {
+        if !self.is_initialized() {
+            return false;
+        }
         // If the device doesn't use notification suppression, always return true
         if !self.uses_notif_suppression {
             return true;
@@ -1367,6 +1404,49 @@ mod tests {
         multi_region_mem, single_region_mem, single_region_mem_dirty_tracking,
     };
     use crate::vstate::memory::GuestAddress;
+
+    #[test]
+    fn legacy_pci_queue_processes_contiguous_rings() {
+        let mem = default_mem();
+        let mut queue = Queue::new(128);
+        queue.configure_legacy_pci(1);
+        mem.write_obj(
+            Descriptor {
+                addr: 0x8000,
+                len: 512,
+                flags: 0,
+                next: 0,
+            },
+            GuestAddress(0x1000),
+        )
+        .unwrap();
+        mem.write_obj(1u16, GuestAddress(0x1802)).unwrap();
+        mem.write_obj(0u16, GuestAddress(0x1804)).unwrap();
+        queue.initialize(&mem).unwrap();
+        let descriptor = queue.pop().unwrap().unwrap();
+        assert_eq!(descriptor.addr, GuestAddress(0x8000));
+        assert_eq!(descriptor.len, 512);
+        queue.add_used(descriptor.index, 512).unwrap();
+        queue.advance_used_ring_idx();
+        assert_eq!(mem.read_obj::<u16>(GuestAddress(0x2002)).unwrap(), 1);
+        assert_eq!(mem.read_obj::<u32>(GuestAddress(0x2004)).unwrap(), 0);
+        assert_eq!(mem.read_obj::<u32>(GuestAddress(0x2008)).unwrap(), 512);
+        queue.configure_legacy_pci(0);
+        assert_eq!(queue.config, Queue::new(128).config);
+        assert!(!queue.is_initialized());
+    }
+
+    #[test]
+    fn legacy_pci_queue_address_uses_all_pfn_bits() {
+        let mut queue = Queue::new(32768);
+        queue.config.size = 1;
+        queue.configure_legacy_pci(u32::MAX);
+        assert_eq!(queue.config.size, 32768);
+        assert!(queue.config.ready);
+        assert_eq!(queue.config.desc_table_address.0, 0x0fff_ffff_f000);
+        assert_eq!(queue.config.avail_ring_address.0, 0x1000_0007_f000);
+        assert_eq!(queue.config.used_ring_address.0, 0x1000_0009_0000);
+    }
 
     #[test]
     fn test_checked_new_descriptor_chain() {
