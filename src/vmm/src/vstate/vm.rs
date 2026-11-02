@@ -87,6 +87,10 @@ pub struct VmCommon {
     /// to exercise partial-failure handling. 0 means never fail.
     #[cfg(test)]
     fail_set_user_memory_region_in: AtomicU32,
+    // Last: failed slot removals must outlive the VM and vCPU descriptors.
+    #[cfg(target_arch = "x86_64")]
+    #[cfg(feature = "windows")]
+    retained_mappings: Mutex<Vec<Arc<vm_memory::MmapRegion>>>,
 }
 
 /// Errors associated with the wrappers over KVM ioctls.
@@ -197,6 +201,9 @@ impl KvmVm {
             vcpus_exit_evt,
             #[cfg(test)]
             fail_set_user_memory_region_in: AtomicU32::new(0),
+            #[cfg(target_arch = "x86_64")]
+            #[cfg(feature = "windows")]
+            retained_mappings: Mutex::new(Vec::new()),
         })
     }
 
@@ -418,6 +425,13 @@ impl KvmVm {
         } else {
             Some(next)
         }
+    }
+
+    /// Retains a mapping after failed KVM slot removal, until all VM descriptors close.
+    #[cfg(target_arch = "x86_64")]
+    #[cfg(feature = "windows")]
+    pub(crate) fn retain_failed_memory_mapping(&self, mapping: Arc<vm_memory::MmapRegion>) {
+        self.common.retained_mappings.lock().unwrap().push(mapping);
     }
 
     pub(crate) fn set_user_memory_region(

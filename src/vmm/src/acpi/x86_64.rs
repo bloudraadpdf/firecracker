@@ -3,6 +3,8 @@
 
 use std::mem::size_of;
 
+#[cfg(feature = "windows")]
+use acpi_tables::fadt::IAPC_BOOT_ARG_FLAGS_8042;
 use acpi_tables::fadt::IAPC_BOOT_ARG_FLAGS_VGA_NOT_PRESENT;
 use acpi_tables::madt::{InterruptSourceOverride, IoAPIC, LocalAPIC};
 use acpi_tables::{Aml, Fadt, GenericAddressStructure, aml};
@@ -33,7 +35,14 @@ pub(crate) fn setup_interrupt_controllers(nr_vcpus: u8, pc_enabled: bool) -> Vec
 
 #[inline(always)]
 pub(crate) fn setup_arch_fadt(fadt: &mut Fadt, devices: &crate::device_manager::DeviceManager) {
-    fadt.setup_iapc_flags(1 << IAPC_BOOT_ARG_FLAGS_VGA_NOT_PRESENT);
+    let flags = 1 << IAPC_BOOT_ARG_FLAGS_VGA_NOT_PRESENT;
+    #[cfg(feature = "windows")]
+    let flags = if devices.console.is_some() {
+        1 << IAPC_BOOT_ARG_FLAGS_8042
+    } else {
+        flags
+    };
+    fadt.setup_iapc_flags(flags);
     if !devices.has_pc_devices() {
         return;
     }

@@ -21,6 +21,14 @@ struct Source {
     masked: bool,
 }
 
+#[derive(Debug)]
+enum Registration {
+    #[cfg(target_arch = "x86_64")]
+    Pending,
+    Active,
+    Failed(String),
+}
+
 /// A wired-OR PCI interrupt line with one ISR per device.
 #[derive(Debug)]
 pub(crate) struct PciIntxGroup {
@@ -29,6 +37,7 @@ pub(crate) struct PciIntxGroup {
     resample: EventFd,
     sources: HashMap<u8, Source>,
     asserted: bool,
+    registration: Registration,
 }
 
 impl PciIntxGroup {
@@ -51,7 +60,28 @@ impl PciIntxGroup {
             resample,
             sources: HashMap::new(),
             asserted: false,
+            registration: Registration::Pending,
         })
+    }
+
+    pub(crate) fn is_registered(&self) -> bool {
+        matches!(self.registration, Registration::Active)
+    }
+
+    pub(crate) fn check_registered(&self) -> std::io::Result<()> {
+        match &self.registration {
+            Registration::Active => Ok(()),
+            #[cfg(target_arch = "x86_64")]
+            Registration::Pending => {
+                Err(std::io::Error::other("PCI INTx resampling not registered"))
+            }
+            Registration::Failed(error) => Err(std::io::Error::other(error.clone())),
+        }
+    }
+
+    #[cfg(all(target_arch = "x86_64", feature = "windows"))]
+    pub(crate) fn reset_registration(&mut self) {
+        self.registration = Registration::Pending;
     }
 
     pub(crate) fn bind(
@@ -119,9 +149,12 @@ impl PciIntxGroup {
 
 impl MutEventSubscriber for PciIntxGroup {
     fn init(&mut self, ops: &mut EventOps) {
-        if let Err(err) = ops.add(Events::new(&self.resample, EventSet::IN)) {
-            error!("Failed to register PCI INTx resampling: {err}");
-        }
+        self.registration = match ops.add(Events::new(&self.resample, EventSet::IN)) {
+            Ok(()) => Registration::Active,
+            Err(err) => {
+                Registration::Failed(format!("Failed to register PCI INTx resampling: {err}"))
+            }
+        };
     }
 
     fn process(&mut self, event: Events, _ops: &mut EventOps) {

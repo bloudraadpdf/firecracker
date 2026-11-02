@@ -1,0 +1,272 @@
+--- /dev/null
++++ b/OvmfPkg/CloudHv/CloudHvConsoleX64.dsc
+@@ -0,0 +1,10 @@
++## @file
++# Firecracker graphical CloudHv build profile.
++# Copyright 2026 Bloudraad.
++# SPDX-License-Identifier: BSD-2-Clause-Patent
++##
++
++[Defines]
++  DEFINE FIRECRACKER_CONSOLE = TRUE
++
++!include OvmfPkg/CloudHv/CloudHvX64.dsc
+--- a/OvmfPkg/CloudHv/CloudHvX64.dsc
++++ b/OvmfPkg/CloudHv/CloudHvX64.dsc
+@@ -19,7 +19,11 @@
+   PLATFORM_GUID                  = 97bb49d2-9814-4bea-8311-f8b9ac231e11
+   PLATFORM_VERSION               = 0.1
+   DSC_SPECIFICATION              = 0x00010005
++!ifdef FIRECRACKER_CONSOLE
++  OUTPUT_DIRECTORY               = Build/CloudHvConsoleX64
++!else
+   OUTPUT_DIRECTORY               = Build/CloudHvX64
++!endif
+   SUPPORTED_ARCHITECTURES        = X64
+   BUILD_TARGETS                  = NOOPT|DEBUG|RELEASE
+   SKUID_IDENTIFIER               = DEFAULT
+@@ -79,6 +83,9 @@
+ [BuildOptions]
++!ifdef FIRECRACKER_CONSOLE
++  GCC:*_*_*_CC_FLAGS = -DFIRECRACKER_CONSOLE
++!endif
+   GCC:RELEASE_*_*_CC_FLAGS             = -DMDEPKG_NDEBUG
+   INTEL:RELEASE_*_*_CC_FLAGS           = /D MDEPKG_NDEBUG
+   MSFT:RELEASE_*_*_CC_FLAGS            = /D MDEPKG_NDEBUG
+ !if $(TOOL_CHAIN_TAG) != "XCODE5" && $(TOOL_CHAIN_TAG) != "CLANGPDB"
+   GCC:*_*_*_CC_FLAGS                   = -mno-mmx -mno-sse
+@@ -130,7 +137,10 @@
+ !include MdePkg/MdeLibs.dsc.inc
+ 
+ [LibraryClasses]
++!ifdef FIRECRACKER_CONSOLE
++  UefiUsbLib|MdePkg/Library/UefiUsbLib/UefiUsbLib.inf
++!endif
+   GptLib|MdeModulePkg/Library/GptLib/GptLib.inf
+   SmmRelocationLib|OvmfPkg/Library/SmmRelocationLib/SmmRelocationLib.inf
+   PcdLib|MdePkg/Library/BasePcdLibNull/BasePcdLibNull.inf
+   TimerLib|OvmfPkg/Library/AcpiTimerLib/BaseAcpiTimerLib.inf
+@@ -614,8 +624,13 @@
+   gEfiMdeModulePkgTokenSpaceGuid.PcdAcpiS3Enable|FALSE
+   gUefiOvmfPkgTokenSpaceGuid.PcdOvmfHostBridgePciDevId|0
++!ifdef FIRECRACKER_CONSOLE
++  gUefiOvmfPkgTokenSpaceGuid.PcdPciIoBase|0x1000
++  gUefiOvmfPkgTokenSpaceGuid.PcdPciIoSize|0xF000
++!else
+   gUefiOvmfPkgTokenSpaceGuid.PcdPciIoBase|0x0
+   gUefiOvmfPkgTokenSpaceGuid.PcdPciIoSize|0x0
++!endif
+   gUefiOvmfPkgTokenSpaceGuid.PcdPciMmio32Base|0x0
+   gUefiOvmfPkgTokenSpaceGuid.PcdPciMmio32Size|0x0
+   gUefiOvmfPkgTokenSpaceGuid.PcdPciMmio64Base|0x0
+   gUefiOvmfPkgTokenSpaceGuid.PcdPciMmio64Size|0x800000000
+@@ -784,6 +796,14 @@
+   MdeModulePkg/Universal/WatchdogTimerDxe/WatchdogTimer.inf
+   MdeModulePkg/Universal/MonotonicCounterRuntimeDxe/MonotonicCounterRuntimeDxe.inf
+   MdeModulePkg/Universal/CapsuleRuntimeDxe/CapsuleRuntimeDxe.inf
++!ifdef FIRECRACKER_CONSOLE
++  OvmfPkg/QemuVideoDxe/QemuVideoDxe.inf
++  OvmfPkg/SioBusDxe/SioBusDxe.inf
++  MdeModulePkg/Bus/Isa/Ps2KeyboardDxe/Ps2KeyboardDxe.inf
++  MdeModulePkg/Bus/Pci/UhciDxe/UhciDxe.inf
++  MdeModulePkg/Bus/Usb/UsbBusDxe/UsbBusDxe.inf
++  MdeModulePkg/Bus/Usb/UsbMouseAbsolutePointerDxe/UsbMouseAbsolutePointerDxe.inf
++!endif
+   MdeModulePkg/Universal/Console/ConPlatformDxe/ConPlatformDxe.inf
+   MdeModulePkg/Universal/Console/ConSplitterDxe/ConSplitterDxe.inf
+   MdeModulePkg/Universal/Console/GraphicsConsoleDxe/GraphicsConsoleDxe.inf {
+--- a/OvmfPkg/CloudHv/CloudHvX64.fdf
++++ b/OvmfPkg/CloudHv/CloudHvX64.fdf
+@@ -241,6 +241,14 @@
+ INF  MdeModulePkg/Universal/WatchdogTimerDxe/WatchdogTimer.inf
+ INF  MdeModulePkg/Universal/MonotonicCounterRuntimeDxe/MonotonicCounterRuntimeDxe.inf
+ INF  MdeModulePkg/Universal/CapsuleRuntimeDxe/CapsuleRuntimeDxe.inf
++!ifdef FIRECRACKER_CONSOLE
++INF  OvmfPkg/QemuVideoDxe/QemuVideoDxe.inf
++INF  OvmfPkg/SioBusDxe/SioBusDxe.inf
++INF  MdeModulePkg/Bus/Isa/Ps2KeyboardDxe/Ps2KeyboardDxe.inf
++INF  MdeModulePkg/Bus/Pci/UhciDxe/UhciDxe.inf
++INF  MdeModulePkg/Bus/Usb/UsbBusDxe/UsbBusDxe.inf
++INF  MdeModulePkg/Bus/Usb/UsbMouseAbsolutePointerDxe/UsbMouseAbsolutePointerDxe.inf
++!endif
+ INF  MdeModulePkg/Universal/Console/ConPlatformDxe/ConPlatformDxe.inf
+ INF  MdeModulePkg/Universal/Console/ConSplitterDxe/ConSplitterDxe.inf
+ INF  MdeModulePkg/Universal/Console/GraphicsConsoleDxe/GraphicsConsoleDxe.inf
+--- a/OvmfPkg/Library/PlatformInitLib/Platform.c
++++ b/OvmfPkg/Library/PlatformInitLib/Platform.c
+@@ -138,8 +138,13 @@
+   UINT32  PciBase;
+   UINT32  PciSize;
+ 
++#ifdef FIRECRACKER_CONSOLE
++  PciIoBase = 0x1000;
++  PciIoSize = 0xF000;
++#else
+   PciIoBase = 0xC000;
+   PciIoSize = 0x4000;
++#endif
+ 
+   //
+   // Video memory + Legacy BIOS region
+diff --git a/MdeModulePkg/Bus/Usb/UsbMouseAbsolutePointerDxe/UsbMouseAbsolutePointer.c b/MdeModulePkg/Bus/Usb/UsbMouseAbsolutePointerDxe/UsbMouseAbsolutePointer.c
+--- a/MdeModulePkg/Bus/Usb/UsbMouseAbsolutePointerDxe/UsbMouseAbsolutePointer.c
++++ b/MdeModulePkg/Bus/Usb/UsbMouseAbsolutePointerDxe/UsbMouseAbsolutePointer.c
+@@ -7,6 +7,13 @@
+ **/
+ 
+ #include "UsbMouseAbsolutePointer.h"
++
++STATIC CONST UINT8  mFirecrackerTabletReport[] = {
++  0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x09, 0x01, 0xA1, 0x00, 0x05, 0x09, 0x19, 0x01, 0x29, 0x03,
++  0x15, 0x00, 0x25, 0x01, 0x95, 0x03, 0x75, 0x01, 0x81, 0x02, 0x95, 0x01, 0x75, 0x05, 0x81, 0x01,
++  0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x15, 0x00, 0x26, 0xFF, 0x7F, 0x75, 0x10, 0x95, 0x02, 0x81,
++  0x02, 0x09, 0x38, 0x15, 0x81, 0x25, 0x7F, 0x75, 0x08, 0x95, 0x01, 0x81, 0x06, 0xC0, 0xC0,
++};
+ 
+ EFI_DRIVER_BINDING_PROTOCOL  gUsbMouseAbsolutePointerDriverBinding = {
+   USBMouseAbsolutePointerDriverBindingSupported,
+@@ -498,6 +505,7 @@
+ {
+   EFI_STATUS                    Status;
+   EFI_USB_INTERFACE_DESCRIPTOR  InterfaceDescriptor;
++  EFI_USB_DEVICE_DESCRIPTOR     DeviceDescriptor;
+ 
+   //
+   // Get the default interface descriptor
+@@ -517,6 +525,14 @@
+       )
+   {
+     return TRUE;
++  }
++
++  if ((InterfaceDescriptor.InterfaceClass == CLASS_HID) &&
++      (InterfaceDescriptor.InterfaceSubClass == 0) &&
++      (InterfaceDescriptor.InterfaceProtocol == 0) &&
++      !EFI_ERROR (UsbIo->UsbGetDeviceDescriptor (UsbIo, &DeviceDescriptor)))
++  {
++    return (DeviceDescriptor.IdVendor == 0x1D0F) && (DeviceDescriptor.IdProduct == 0xFC03);
+   }
+ 
+   return FALSE;
+@@ -657,11 +673,19 @@
+   //
+   // Parse report descriptor
+   //
+-  Status = ParseMouseReportDescriptor (
+-             UsbMouseAbsolutePointerDev,
+-             ReportDesc,
+-             MouseHidDesc->HidClassDesc[0].DescriptorLength
+-             );
++  UsbMouseAbsolutePointerDev->AbsoluteReport =
++    UsbMouseAbsolutePointerDev->InterfaceDescriptor.InterfaceSubClass == 0;
++  if (UsbMouseAbsolutePointerDev->AbsoluteReport) {
++    Status = ((MouseHidDesc->HidClassDesc[0].DescriptorLength == sizeof (mFirecrackerTabletReport)) &&
++              (CompareMem (ReportDesc, mFirecrackerTabletReport, sizeof (mFirecrackerTabletReport)) == 0)) ?
++             EFI_SUCCESS : EFI_UNSUPPORTED;
++  } else {
++    Status = ParseMouseReportDescriptor (
++               UsbMouseAbsolutePointerDev,
++               ReportDesc,
++               MouseHidDesc->HidClassDesc[0].DescriptorLength
++               );
++  }
+ 
+   if (EFI_ERROR (Status)) {
+     FreePool (Buf);
+@@ -669,13 +693,13 @@
+     return Status;
+   }
+ 
+-  UsbMouseAbsolutePointerDev->Mode.AbsoluteMaxX = 1024;
+-  UsbMouseAbsolutePointerDev->Mode.AbsoluteMaxY = 1024;
+-  UsbMouseAbsolutePointerDev->Mode.AbsoluteMaxZ = 1024;
++  UsbMouseAbsolutePointerDev->Mode.AbsoluteMaxX = UsbMouseAbsolutePointerDev->AbsoluteReport ? 32767 : 1024;
++  UsbMouseAbsolutePointerDev->Mode.AbsoluteMaxY = UsbMouseAbsolutePointerDev->AbsoluteReport ? 32767 : 1024;
++  UsbMouseAbsolutePointerDev->Mode.AbsoluteMaxZ = UsbMouseAbsolutePointerDev->AbsoluteReport ? 0 : 1024;
+   UsbMouseAbsolutePointerDev->Mode.AbsoluteMinX = 0;
+   UsbMouseAbsolutePointerDev->Mode.AbsoluteMinY = 0;
+   UsbMouseAbsolutePointerDev->Mode.AbsoluteMinZ = 0;
+-  UsbMouseAbsolutePointerDev->Mode.Attributes   = 0x3;
++  UsbMouseAbsolutePointerDev->Mode.Attributes   = UsbMouseAbsolutePointerDev->AbsoluteReport ? EFI_ABSP_SupportsAltActive : 0x3;
+ 
+   //
+   // Let the cursor's starting position is in the center of the screen.
+@@ -686,25 +710,26 @@
+     DivU64x32 (UsbMouseAbsolutePointerDev->Mode.AbsoluteMaxY + UsbMouseAbsolutePointerDev->Mode.AbsoluteMinY, 2);
+ 
+   //
+-  // Set boot protocol for the USB mouse.
+-  // This driver only supports boot protocol.
+-  //
+-  UsbGetProtocolRequest (
+-    UsbIo,
+-    UsbMouseAbsolutePointerDev->InterfaceDescriptor.InterfaceNumber,
+-    &Protocol
+-    );
+-  if (Protocol != BOOT_PROTOCOL) {
+-    Status = UsbSetProtocolRequest (
+-               UsbIo,
+-               UsbMouseAbsolutePointerDev->InterfaceDescriptor.InterfaceNumber,
+-               BOOT_PROTOCOL
+-               );
+-
+-    if (EFI_ERROR (Status)) {
+-      FreePool (Buf);
+-      FreePool (ReportDesc);
+-      return Status;
++  // Select boot protocol only for boot-mouse interfaces.
++  //
++  if (!UsbMouseAbsolutePointerDev->AbsoluteReport) {
++    UsbGetProtocolRequest (
++      UsbIo,
++      UsbMouseAbsolutePointerDev->InterfaceDescriptor.InterfaceNumber,
++      &Protocol
++      );
++    if (Protocol != BOOT_PROTOCOL) {
++      Status = UsbSetProtocolRequest (
++                 UsbIo,
++                 UsbMouseAbsolutePointerDev->InterfaceDescriptor.InterfaceNumber,
++                 BOOT_PROTOCOL
++                 );
++
++      if (EFI_ERROR (Status)) {
++        FreePool (Buf);
++        FreePool (ReportDesc);
++        return Status;
++      }
+     }
+   }
+ 
+@@ -812,6 +837,21 @@
+   // If no error and no data, just return EFI_SUCCESS.
+   //
+   if ((DataLength == 0) || (Data == NULL)) {
++    return EFI_SUCCESS;
++  }
++
++  if (UsbMouseAbsolutePointerDevice->AbsoluteReport) {
++    if ((DataLength != 6) ||
++        (ReadUnaligned16 ((UINT16 *)((UINT8 *)Data + 1)) > 32767) ||
++        (ReadUnaligned16 ((UINT16 *)((UINT8 *)Data + 3)) > 32767))
++    {
++      return EFI_DEVICE_ERROR;
++    }
++
++    UsbMouseAbsolutePointerDevice->State.ActiveButtons = *(UINT8 *)Data & (BIT0 | BIT1);
++    UsbMouseAbsolutePointerDevice->State.CurrentX = ReadUnaligned16 ((UINT16 *)((UINT8 *)Data + 1));
++    UsbMouseAbsolutePointerDevice->State.CurrentY = ReadUnaligned16 ((UINT16 *)((UINT8 *)Data + 3));
++    UsbMouseAbsolutePointerDevice->StateChanged = TRUE;
+     return EFI_SUCCESS;
+   }
+ 
+diff --git a/MdeModulePkg/Bus/Usb/UsbMouseAbsolutePointerDxe/UsbMouseAbsolutePointer.h b/MdeModulePkg/Bus/Usb/UsbMouseAbsolutePointerDxe/UsbMouseAbsolutePointer.h
+--- a/MdeModulePkg/Bus/Usb/UsbMouseAbsolutePointerDxe/UsbMouseAbsolutePointer.h
++++ b/MdeModulePkg/Bus/Usb/UsbMouseAbsolutePointerDxe/UsbMouseAbsolutePointer.h
+@@ -74,6 +74,7 @@
+   EFI_ABSOLUTE_POINTER_STATE       State;
+   EFI_ABSOLUTE_POINTER_MODE        Mode;
+   BOOLEAN                          StateChanged;
++  BOOLEAN                          AbsoluteReport;
+   USB_MOUSE_BUTTON_DATA            PrivateData;
+   EFI_UNICODE_STRING_TABLE         *ControllerNameTable;
+ } USB_MOUSE_ABSOLUTE_POINTER_DEV;

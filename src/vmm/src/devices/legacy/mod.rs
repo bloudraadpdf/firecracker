@@ -9,6 +9,8 @@
 #[cfg(target_arch = "x86_64")]
 pub mod acpi;
 #[cfg(target_arch = "x86_64")]
+pub mod atapi;
+#[cfg(target_arch = "x86_64")]
 pub mod cmos;
 #[cfg(target_arch = "aarch64")]
 pub mod gpio_pl061;
@@ -27,7 +29,7 @@ use vmm_sys_util::eventfd::EventFd;
 
 #[cfg(target_arch = "aarch64")]
 pub use self::gpio_pl061::{PL061Device, PL061Error, PL061State};
-pub use self::i8042::{I8042Device, I8042Error as I8042DeviceError};
+pub use self::i8042::{I8042Device, I8042Error as I8042DeviceError, I8042State};
 #[cfg(target_arch = "aarch64")]
 pub use self::rtc_pl031::RTCDevice;
 pub use self::serial::{SerialDevice, SerialEventsWrapper, SerialWrapper};

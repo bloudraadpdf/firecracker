@@ -3,10 +3,13 @@
 
 //! Transactional event registration for platform devices.
 
-use super::DeviceManager;
+use super::console_server::ConsoleServer;
+use super::console_usb::UsbDevice;
 use super::legacy::PortIODeviceManager;
+use super::{DeviceManager, VirtioDevices};
 use crate::EventManager;
 use crate::devices::legacy::{acpi::AcpiPower, cmos::Rtc};
+use crate::pci::intx::PciIntxGroup;
 use event_manager::{SubscriberId, SubscriberOps};
 use std::io;
 use std::sync::{Arc, Mutex};
@@ -14,17 +17,30 @@ use std::sync::{Arc, Mutex};
 /// Rolls back the platform subscriptions if subsequent VM startup fails.
 pub(crate) struct PlatformRegistration<'a> {
     events: &'a mut EventManager,
+    subscriber: Option<SubscriberId>,
+    usb: Option<(SubscriberId, Arc<Mutex<UsbDevice>>)>,
+    intx: Option<(SubscriberId, Arc<Mutex<PciIntxGroup>>)>,
     acpi_power: Option<(SubscriberId, Arc<Mutex<AcpiPower>>)>,
     rtc: Option<(SubscriberId, Arc<Mutex<Rtc>>)>,
 }
 
 impl<'a> PlatformRegistration<'a> {
-    pub(crate) fn new(events: &'a mut EventManager) -> Self {
-        Self {
+    pub(crate) fn new(
+        events: &'a mut EventManager,
+        server: Option<&Arc<Mutex<ConsoleServer>>>,
+    ) -> io::Result<Self> {
+        let registration = Self {
+            subscriber: server.map(|server| events.add_subscriber(server.clone())),
             events,
+            intx: None,
+            usb: None,
             acpi_power: None,
             rtc: None,
+        };
+        if let Some(server) = server {
+            server.lock().unwrap().check_registered()?;
         }
+        Ok(registration)
     }
 
     fn with_legacy(mut self, legacy: Option<&PortIODeviceManager>) -> io::Result<Self> {
@@ -39,7 +55,28 @@ impl<'a> PlatformRegistration<'a> {
         Ok(self)
     }
 
+    pub(super) fn with_intx(mut self, group: Option<Arc<Mutex<PciIntxGroup>>>) -> io::Result<Self> {
+        if let Some(group) = group {
+            let id = self.events.add_subscriber(group.clone());
+            self.intx = Some((id, group.clone()));
+            group.lock().unwrap().check_registered()?;
+        }
+        Ok(self)
+    }
+
+    pub(super) fn with_usb(mut self, usb: Option<&Arc<Mutex<UsbDevice>>>) -> io::Result<Self> {
+        if let Some(usb) = usb {
+            let id = self.events.add_subscriber(usb.clone());
+            self.usb = Some((id, usb.clone()));
+            usb.lock().unwrap().check_registered()?;
+        }
+        Ok(self)
+    }
+
     pub(crate) fn commit(mut self) {
+        self.subscriber = None;
+        self.usb = None;
+        self.intx = None;
         self.acpi_power = None;
         self.rtc = None;
     }
@@ -47,6 +84,14 @@ impl<'a> PlatformRegistration<'a> {
 
 impl Drop for PlatformRegistration<'_> {
     fn drop(&mut self) {
+        if let Some((id, usb)) = self.usb.take() {
+            self.events.remove_subscriber(id).unwrap();
+            usb.lock().unwrap().reset_registration();
+        }
+        if let Some((id, group)) = self.intx.take() {
+            self.events.remove_subscriber(id).unwrap();
+            group.lock().unwrap().reset_registration();
+        }
         if let Some((id, rtc)) = self.rtc.take() {
             self.events.remove_subscriber(id).unwrap();
             rtc.lock().unwrap().reset_registration();
@@ -54,6 +99,9 @@ impl Drop for PlatformRegistration<'_> {
         if let Some((id, power)) = self.acpi_power.take() {
             self.events.remove_subscriber(id).unwrap();
             power.lock().unwrap().reset_registration();
+        }
+        if let Some(subscriber) = self.subscriber.take() {
+            self.events.remove_subscriber(subscriber).unwrap();
         }
     }
 }
@@ -63,7 +111,17 @@ impl DeviceManager {
         &self,
         events: &'a mut EventManager,
     ) -> io::Result<PlatformRegistration<'a>> {
-        PlatformRegistration::new(events).with_legacy(self.legacy_devices.as_ref())
+        let intx = self
+            .console
+            .as_ref()
+            .and_then(|_| match &self.virtio_devices {
+                VirtioDevices::Pci(pci) => pci.unregistered_intx(),
+                VirtioDevices::Mmio(_) => None,
+            });
+        PlatformRegistration::new(events, self.console.as_ref().map(|console| &console.server))?
+            .with_legacy(self.legacy_devices.as_ref())?
+            .with_intx(intx)?
+            .with_usb(self.console.as_ref().map(|console| &console.usb))
     }
 }
 

@@ -5,4 +5,5 @@ pub mod api_listener;
 pub mod arg_parser;
 pub mod inherited;
 pub mod time;
+pub mod unix_socket;
 pub mod validators;

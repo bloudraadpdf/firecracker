@@ -91,6 +91,11 @@ pub const SYSTEM_MEM_START: u64 = 0x9fc00;
 /// ACPI features (new tables and/or devices).
 pub const SYSTEM_MEM_SIZE: u64 = RSDP_ADDR - SYSTEM_MEM_START;
 
+/// Platform tables for console VMs, outside video RAM and option-ROM shadow RAM.
+pub const CONSOLE_SYSTEM_MEM_START: u64 = 32 << 20;
+/// Reserved capacity for console platform tables.
+pub const CONSOLE_SYSTEM_MEM_SIZE: u64 = 1 << 20;
+
 /// First address that cannot be addressed using 32 bit anymore.
 pub const FIRST_ADDR_PAST_32BITS: u64 = 1 << 32;
 
