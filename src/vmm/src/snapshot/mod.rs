@@ -45,8 +45,8 @@ const SNAPSHOT_MAGIC_ID: u64 = 0x0710_1984_AAAA_0000u64;
 
 /// Maximum size in bytes for snapshot deserialization to prevent DOS attacks.
 /// Snapshots contain VM state which can be large, but we set a reasonable upper bound.
-/// Includes the optional console's 16 MiB display memory and other device state.
-const SNAPSHOT_DESERIALIZATION_BYTES_LIMIT: usize = 32 * 1024 * 1024;
+/// Includes bounded GPU resources, scanout, backing entries and the VGA console.
+const SNAPSHOT_DESERIALIZATION_BYTES_LIMIT: usize = 128 * 1024 * 1024;
 
 /// Error definitions for the Snapshot API.
 #[derive(Debug, thiserror::Error, displaydoc::Display)]

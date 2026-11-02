@@ -70,6 +70,7 @@ pub enum VirtioDeviceType {
     Mem = virtio_ids::VIRTIO_ID_MEM as u8,
     Pmem = virtio_ids::VIRTIO_ID_PMEM as u8,
     Input = virtio_ids::VIRTIO_ID_INPUT as u8,
+    Gpu = virtio_ids::VIRTIO_ID_GPU as u8,
 }
 
 /// Unique identifier for a virtio device: its type and string ID.

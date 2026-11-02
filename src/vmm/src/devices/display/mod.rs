@@ -12,12 +12,18 @@ use std::time::Instant;
 #[cfg(feature = "windows")]
 mod memory;
 #[cfg(feature = "windows")]
+pub(crate) mod pci;
+#[cfg(feature = "windows")]
 use memory::VideoMemory;
 
 #[cfg(feature = "windows")]
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+#[cfg(target_arch = "x86_64")]
+pub(crate) mod rom;
 mod state;
+#[cfg(target_arch = "x86_64")]
+pub use state::VgaPciState;
 pub use state::VgaState;
 
 /// Framebuffer BAR size, in bytes.

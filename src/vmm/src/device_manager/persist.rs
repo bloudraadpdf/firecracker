@@ -27,6 +27,11 @@ use crate::devices::virtio::block::device::Block;
 use crate::devices::virtio::block::persist::{BlockConstructorArgs, BlockState};
 use crate::devices::virtio::device::{VirtioDevice, VirtioDeviceType};
 #[cfg(feature = "windows")]
+use crate::devices::virtio::gpu::Gpu;
+use crate::devices::virtio::gpu::persist::GpuState;
+#[cfg(feature = "windows")]
+use crate::devices::virtio::gpu::persist::{GpuConstructorArgs, GpuPersistError};
+#[cfg(feature = "windows")]
 use crate::devices::virtio::input::Input;
 use crate::devices::virtio::input::persist::InputState;
 #[cfg(feature = "windows")]
@@ -146,6 +151,8 @@ pub struct DeviceStates<Tr> {
     pub memory_device: Option<VirtioDeviceState<VirtioMemState, Tr>>,
     /// Keyboard and absolute-pointer device states.
     pub input_device: Option<VirtioDeviceState<InputState, Tr>>,
+    /// Graphics device state.
+    pub gpu_device: Option<VirtioDeviceState<GpuState, Tr>>,
 }
 
 impl<Tr> Default for DeviceStates<Tr> {
@@ -160,6 +167,7 @@ impl<Tr> Default for DeviceStates<Tr> {
             pmem_devices: Vec::new(),
             memory_device: None,
             input_device: None,
+            gpu_device: None,
         }
     }
 }
@@ -196,6 +204,9 @@ impl DeviceStates<MMIODeviceState> {
                         .as_ref()
                         .map(|state| &state.transport_state.device_info),
                     self.input_device
+                        .as_ref()
+                        .map(|state| &state.transport_state.device_info),
+                    self.gpu_device
                         .as_ref()
                         .map(|state| &state.transport_state.device_info),
                 ]
@@ -527,6 +538,20 @@ impl<'a> Persist<'a> for MMIOVirtioDevices {
                     #[cfg(not(feature = "windows"))]
                     unreachable!("virtio-input requires the windows build feature");
                 }
+                VirtioDeviceType::Gpu => {
+                    #[cfg(feature = "windows")]
+                    {
+                        let device_state =
+                            locked_device.as_any().downcast_ref::<Gpu>().unwrap().save();
+                        states.gpu_device = Some(VirtioDeviceState {
+                            device_id,
+                            device_state,
+                            transport_state,
+                        });
+                    }
+                    #[cfg(not(feature = "windows"))]
+                    unreachable!("virtio-gpu requires the windows build feature");
+                }
                 VirtioDeviceType::Mem => {
                     let mem = locked_device
                         .as_mut_any()
@@ -551,7 +576,7 @@ impl<'a> Persist<'a> for MMIOVirtioDevices {
         constructor_args: Self::ConstructorArgs,
         state: &Self::State,
     ) -> Result<Self, Self::Error> {
-        if state.input_device.is_some() {
+        if state.input_device.is_some() || state.gpu_device.is_some() {
             crate::vmm_config::require_windows_support()?;
         }
 
@@ -777,6 +802,34 @@ impl<'a> Persist<'a> for MMIOVirtioDevices {
             }
         }
 
+        #[cfg(feature = "windows")]
+        if let Some(gpu_state) = &state.gpu_device {
+            let device = Arc::new(Mutex::new(Gpu::restore(
+                GpuConstructorArgs { mem: mem.clone() },
+                &gpu_state.device_state,
+            )?));
+            restore_helper(
+                device.clone(),
+                gpu_state.device_state.virtio_state.activated,
+                false,
+                &gpu_state.device_id,
+                &gpu_state.transport_state,
+                constructor_args.event_manager,
+            )?;
+            if let Err(error) = device.lock().unwrap().check_registered() {
+                let id = dev_manager
+                    .get_virtio_device(VirtioDeviceType::Gpu, &gpu_state.device_id)
+                    .unwrap()
+                    .sub_id
+                    .unwrap();
+                constructor_args
+                    .event_manager
+                    .remove_subscriber(id)
+                    .map_err(|error| GpuPersistError::Registration(std::io::Error::other(error)))?;
+                return Err(GpuPersistError::Registration(error).into());
+            }
+        }
+
         for pmem_state in &state.pmem_devices {
             let device = Arc::new(Mutex::new(Pmem::restore(
                 PmemConstructorArgs {
@@ -938,6 +991,7 @@ mod tests {
                 && self.entropy_device == other.entropy_device
                 && self.memory_device == other.memory_device
                 && self.input_device == other.input_device
+                && self.gpu_device == other.gpu_device
         }
     }
 

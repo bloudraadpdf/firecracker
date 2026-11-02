@@ -183,7 +183,7 @@ impl VirtioDeviceState {
 
         let optional_queues = matches!(
             self.device_type,
-            VirtioDeviceType::Block | VirtioDeviceType::Input
+            VirtioDeviceType::Block | VirtioDeviceType::Input | VirtioDeviceType::Gpu
         ) || (matches!(
             self.device_type,
             VirtioDeviceType::Net | VirtioDeviceType::Balloon

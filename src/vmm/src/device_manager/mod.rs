@@ -817,11 +817,20 @@ impl DevicesState {
     pub(crate) fn validate_windows_support(
         &self,
     ) -> Result<(), crate::vmm_config::WindowsFeatureDisabled> {
-        let input = match &self.virtio_state {
-            VirtioDevicesState::Mmio(state) => state.input_device.is_some(),
-            VirtioDevicesState::Pci(state) => state.virtio_devices.input_device.is_some(),
+        let windows_device = match &self.virtio_state {
+            VirtioDevicesState::Mmio(state) => {
+                state.input_device.is_some() || state.gpu_device.is_some()
+            }
+            VirtioDevicesState::Pci(state) => {
+                let state = &state.virtio_devices;
+                state.input_device.is_some() || state.gpu_device.is_some()
+            }
         };
-        if self.console.is_some() || self.tpm.is_some() || self.uefi_vars.is_some() || input {
+        if self.console.is_some()
+            || self.tpm.is_some()
+            || self.uefi_vars.is_some()
+            || windows_device
+        {
             crate::vmm_config::require_windows_support()?;
         }
         #[cfg(target_arch = "x86_64")]
@@ -835,6 +844,9 @@ impl DevicesState {
 /// Errors for (de)serialization of the devices.
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum DevicePersistError {
+    #[cfg(feature = "windows")]
+    /// GPU: {0}
+    Gpu(#[from] crate::devices::virtio::gpu::persist::GpuPersistError),
     /// Unsupported build configuration: {0}
     WindowsFeature(#[from] crate::vmm_config::WindowsFeatureDisabled),
     #[cfg(feature = "windows")]
@@ -1064,6 +1076,32 @@ impl DeviceManager {
         state: &DevicesState,
     ) -> Result<Self, DeviceManagerPersistError> {
         state.validate_windows_support()?;
+        #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+        {
+            let gpu = match &state.virtio_state {
+                VirtioDevicesState::Pci(pci) => pci
+                    .virtio_devices
+                    .gpu_device
+                    .as_ref()
+                    .map(|device| device.device_id.as_str()),
+                VirtioDevicesState::Mmio(mmio) => mmio
+                    .gpu_device
+                    .as_ref()
+                    .map(|device| device.device_id.as_str()),
+            };
+            let console_gpu = state
+                .console
+                .as_ref()
+                .is_some_and(console::ConsoleState::uses_gpu);
+            if console_gpu != gpu.is_some()
+                || gpu.is_some_and(|id| id != crate::devices::virtio::gpu::GPU_DEV_ID)
+                || (console_gpu && !matches!(state.virtio_state, VirtioDevicesState::Pci(_)))
+            {
+                return Err(DeviceManagerPersistError::Console(std::io::Error::other(
+                    "console and GPU snapshot topology disagree",
+                )));
+            }
+        }
         #[cfg(target_arch = "aarch64")]
         #[cfg(feature = "windows")]
         Self::validate_arm_platform_state(
@@ -1244,7 +1282,6 @@ impl DeviceManager {
                 manager.restore_console(
                     constructor_args.vm,
                     console,
-                    #[cfg(target_arch = "aarch64")]
                     constructor_args.event_manager,
                 )?;
                 constructor_args.vm_resources.console = manager.console_config();

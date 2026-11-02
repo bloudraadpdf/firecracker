@@ -7,12 +7,28 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+/// AMD64 boot and native display profile.
+#[cfg(target_arch = "x86_64")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DisplayModel {
+    /// Legacy VGA for guests without a virtio display driver.
+    #[default]
+    Vga,
+    /// VGA boot display with a modern virtio 2D display driver.
+    VirtioGpu,
+}
+
 /// Local console endpoint and architecture-specific installation hardware.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConsoleConfig {
     /// Private Unix socket consumed by the host console service.
     pub socket_path: PathBuf,
+    /// Legacy VGA by default; virtio GPU requires explicit CloudHv firmware.
+    #[cfg(target_arch = "x86_64")]
+    #[serde(default)]
+    pub display: DisplayModel,
     /// Optional with explicit CloudHv firmware; required for SeaBIOS and legacy profiles.
     #[cfg(target_arch = "x86_64")]
     pub vga_rom_path: Option<PathBuf>,
@@ -25,6 +41,12 @@ impl ConsoleConfig {
     /// Validate host paths before constructing devices.
     pub fn validate(&self) -> Result<(), std::io::Error> {
         super::require_windows_support()?;
+        #[cfg(target_arch = "x86_64")]
+        if self.display == DisplayModel::VirtioGpu && self.vga_rom_path.is_some() {
+            return Err(std::io::Error::other(
+                "virtio GPU does not use a VGA option ROM",
+            ));
+        }
         utils::unix_socket::validate(&self.socket_path)
     }
 
@@ -34,6 +56,17 @@ impl ConsoleConfig {
         firmware: Option<&crate::vmm_config::boot_source::FirmwareConfig>,
     ) -> Result<(), std::io::Error> {
         self.validate()?;
+        #[cfg(target_arch = "x86_64")]
+        if self.display == DisplayModel::VirtioGpu
+            && !matches!(
+                firmware,
+                Some(crate::vmm_config::boot_source::FirmwareConfig::CloudHv { .. })
+            )
+        {
+            return Err(std::io::Error::other(
+                "virtio GPU requires explicit CloudHv firmware",
+            ));
+        }
         #[cfg(target_arch = "x86_64")]
         if self.vga_rom_path.is_none()
             && !matches!(
@@ -86,10 +119,38 @@ mod tests {
     }
 
     #[test]
+    fn virtio_gpu_requires_cloud_hv_and_no_option_rom() {
+        use crate::vmm_config::boot_source::FirmwareConfig;
+        let mut config: ConsoleConfig =
+            serde_json::from_str(r#"{"socket_path":"console.sock","display":"virtio-gpu"}"#)
+                .unwrap();
+        assert_eq!(config.display, DisplayModel::VirtioGpu);
+        config.validate_for_firmware(None).unwrap_err();
+        config
+            .validate_for_firmware(Some(&FirmwareConfig::SeaBios))
+            .unwrap_err();
+        let firmware = FirmwareConfig::CloudHv {
+            system_uuid: "11223344-5566-7788-99aa-bbccddeeff01"
+                .to_owned()
+                .try_into()
+                .unwrap(),
+        };
+        config.validate_for_firmware(Some(&firmware)).unwrap();
+        config.vga_rom_path = Some("vgabios.bin".into());
+        config.validate().unwrap_err();
+        serde_json::from_str::<ConsoleConfig>(
+            r#"{"socket_path":"console.sock","display":"unknown"}"#,
+        )
+        .unwrap_err();
+    }
+
+    #[test]
     fn console_configuration_rejects_ambiguous_or_invalid_paths() {
         for path in [String::new(), "x".repeat(108), "bad\0path".into()] {
             let config = ConsoleConfig {
                 socket_path: path.into(),
+                #[cfg(target_arch = "x86_64")]
+                display: Default::default(),
                 vga_rom_path: Some("vgabios.bin".into()),
                 optical_image_path: None,
             };
