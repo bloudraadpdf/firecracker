@@ -27,6 +27,10 @@ pub enum OpCode {
     Read = io_uring_op::IORING_OP_READ as u8,
     /// Write operation.
     Write = io_uring_op::IORING_OP_WRITE as u8,
+    /// Vectored read operation.
+    Readv = io_uring_op::IORING_OP_READV as u8,
+    /// Vectored write operation.
+    Writev = io_uring_op::IORING_OP_WRITEV as u8,
     /// Fsync operation.
     Fsync = io_uring_op::IORING_OP_FSYNC as u8,
 }
@@ -37,6 +41,8 @@ impl From<OpCode> for &'static str {
         match opcode {
             OpCode::Read => "read",
             OpCode::Write => "write",
+            OpCode::Readv => "readv",
+            OpCode::Writev => "writev",
             OpCode::Fsync => "fsync",
         }
     }
@@ -98,6 +104,20 @@ impl<T: Debug> Operation<T> {
             offset: Some(offset),
             user_data,
         }
+    }
+
+    /// Construct a vectored read operation.
+    pub fn readv(fd: FixedFd, addr: usize, len: u32, offset: u64, user_data: T) -> Self {
+        let mut operation = Self::read(fd, addr, len, offset, user_data);
+        operation.opcode = OpCode::Readv;
+        operation
+    }
+
+    /// Construct a vectored write operation.
+    pub fn writev(fd: FixedFd, addr: usize, len: u32, offset: u64, user_data: T) -> Self {
+        let mut operation = Self::write(fd, addr, len, offset, user_data);
+        operation.opcode = OpCode::Writev;
+        operation
     }
 
     /// Construct a fsync operation.
