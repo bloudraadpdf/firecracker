@@ -105,9 +105,8 @@ where
             METRICS.ev_queue_event_fails.inc();
         }
 
-        // Guest's evq kick = TRANSPORT_RESET ack. Clear the gate and drain any RX the
-        // backend buffered while it was up. Assumes TRANSPORT_RESET is the only evq event
-        // we publish; new event types would need to disambiguate before clearing.
+        // A guest evq kick or the required CID reread acknowledges TRANSPORT_RESET.
+        // Drain RX buffered during reset. This is the only event type we publish.
         self.pending_event_ack = false;
         if self.backend.has_pending_rx() {
             match self.process_rx() {
