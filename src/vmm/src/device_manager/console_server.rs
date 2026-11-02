@@ -6,14 +6,15 @@
 use std::collections::{BTreeSet, HashMap};
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
-use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use event_manager::{EventOps, Events, MutEventSubscriber};
 use utils::time::TimerFd;
+use utils::unix_socket::SocketPath;
 use vmm_sys_util::epoll::EventSet;
 
 use super::console_optical::OpticalDevice;
@@ -32,40 +33,6 @@ struct Client {
     response: Vec<u8>,
     sent: usize,
     deadline: Instant,
-}
-
-#[derive(Debug)]
-struct SocketPath {
-    path: PathBuf,
-    device: u64,
-    inode: u64,
-}
-
-impl SocketPath {
-    fn capture(path: &Path) -> io::Result<Self> {
-        let path = std::env::current_dir()?.join(path);
-        let metadata = std::fs::symlink_metadata(&path)?;
-        if !metadata.file_type().is_socket() {
-            return Err(io::Error::other("console path is not a socket"));
-        }
-        Ok(Self {
-            path,
-            device: metadata.dev(),
-            inode: metadata.ino(),
-        })
-    }
-}
-
-impl Drop for SocketPath {
-    fn drop(&mut self) {
-        if std::fs::symlink_metadata(&self.path).is_ok_and(|metadata| {
-            metadata.file_type().is_socket()
-                && metadata.dev() == self.device
-                && metadata.ino() == self.inode
-        }) {
-            let _ = std::fs::remove_file(&self.path);
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -667,19 +634,19 @@ mod tests {
     #[test]
     fn socket_cleanup_preserves_replacement_and_removes_owned_socket() {
         let server = Fixture::new();
-        let path = server._socket_path.path.clone();
+        let path = server._socket_path.path().to_path_buf();
         assert!(path.exists());
         drop(server);
         assert!(!path.exists());
         let server = Fixture::new();
-        let path = server._socket_path.path.clone();
+        let path = server._socket_path.path().to_path_buf();
         std::fs::remove_file(&path).unwrap();
         std::fs::write(&path, b"replacement").unwrap();
         drop(server);
         assert_eq!(std::fs::read(&path).unwrap(), b"replacement");
         std::fs::remove_file(&path).unwrap();
         let server = Fixture::new();
-        let path = server._socket_path.path.clone();
+        let path = server._socket_path.path().to_path_buf();
         std::fs::remove_file(&path).unwrap();
         let replacement = UnixListener::bind(&path).unwrap();
         drop(server);
@@ -693,7 +660,7 @@ mod tests {
         use super::super::platform::PlatformRegistration;
         let mut events = crate::EventManager::new().unwrap();
         let fixture = Fixture::new();
-        let path = fixture._socket_path.path.clone();
+        let path = fixture._socket_path.path().to_path_buf();
         let server = Arc::new(Mutex::new(fixture.server));
         let weak = Arc::downgrade(&server);
         let fail_boot = |events: &mut crate::EventManager| -> io::Result<()> {
@@ -714,7 +681,7 @@ mod tests {
     #[test]
     fn failed_restore_before_registration_releases_socket() {
         let mut fixture = Fixture::new();
-        let path = fixture._socket_path.path.clone();
+        let path = fixture._socket_path.path().to_path_buf();
         fixture.restore_held(&[(0xff, false)]).unwrap_err();
         drop(fixture);
         let replacement = UnixListener::bind(&path).unwrap();
@@ -727,7 +694,7 @@ mod tests {
         use super::super::platform::PlatformRegistration;
         let mut events = crate::EventManager::new().unwrap();
         let fixture = Fixture::new();
-        let path = fixture._socket_path.path.clone();
+        let path = fixture._socket_path.path().to_path_buf();
         let server = Arc::new(Mutex::new(fixture.server));
         let weak = Arc::downgrade(&server);
         PlatformRegistration::new(&mut events, Some(&server))

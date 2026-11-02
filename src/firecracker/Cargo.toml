@@ -17,11 +17,13 @@ bench = false
 
 [features]
 windows = ["vmm/windows"]
+gui = ["windows", "dep:console"]
 tracing = ["log-instrument", "utils/tracing", "vmm/tracing"]
 fuzzing = ["vmm/fuzzing"]
 gdb = ["vmm/gdb"]
 
 [dependencies]
+console = { path = "../console", features = ["gui"], optional = true }
 displaydoc = "0.2.6"
 event-manager = "0.4.2"
 libc = "0.2.186"
