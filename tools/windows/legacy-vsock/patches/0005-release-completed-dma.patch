@@ -1,0 +1,20 @@
+From: Jacques Germishuys <jacques.germishuys@bloudraad.io>
+Subject: [PATCH] fix: release completed DMA before completing requests
+
+The deferred callback reference can keep a completed transaction alive.
+Release its DMA buffer references before completing the send request to
+prevent KMDF bugcheck 0x10D/3 after Windows 7 restore.
+
+Signed-off-by: Jacques Germishuys <jacques.germishuys@bloudraad.io>
+---
+diff --git a/VirtIO/WDF/Dma.c b/VirtIO/WDF/Dma.c
+index 17bc4bb..1024031 100644
+--- a/VirtIO/WDF/Dma.c
++++ b/VirtIO/WDF/Dma.c
+@@ -388,5 +388,6 @@ void VirtIOWdfDeviceDmaTxComplete(VirtIODevice *vdev, WDFDMATRANSACTION transact
+     NTSTATUS status;
+     DPrintf(1, "%s %p\n", __FUNCTION__, transaction);
+     WdfDmaTransactionDmaCompletedFinal(transaction, 0, &status);
++    WdfDmaTransactionRelease(transaction);
+     DerefTransaction(ctx);
+ }

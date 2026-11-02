@@ -1,0 +1,367 @@
+# Prepare a Windows test disk
+
+`prepare.rs` creates a private output directory, a sparse 64 GiB raw disk and a
+Windows client or Server answer file. For AMD64, `prepare-nt6.rs` adds that file
+and the signed storage and network drivers to the installation ISO; installation
+runs directly in Firecracker. The ARM64 profile stages files for later servicing
+and does not create bootable media. No QEMU binary or library is required.
+Existing output directories are rejected so preparation cannot overwrite a
+previous disk.
+
+The preparation tools do not enable VMM capabilities. To start a VM with the
+console, also build Firecracker with the optional `windows` capability as shown
+in the [VMM build instructions](../../docs/windows.md#build).
+
+## Build prerequisites
+
+Run the commands from the Firecracker repository root on Linux. Use upstream's
+Rustup toolchain from `rust-toolchain.toml`; it currently selects Rust 1.98.1.
+Put the Rustup proxies first on `PATH`, including when another Rust installation
+is present:
+
+```sh
+export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
+rustup show active-toolchain
+```
+
+For the standalone crates' formatting and Clippy checks, install the components:
+
+```sh
+rustup component add rustfmt clippy
+```
+
+For Windows probe builds, also install their target libraries:
+
+```sh
+rustup target add i686-pc-windows-msvc x86_64-pc-windows-msvc
+```
+
+The
+[upstream developer tool](../../CONTRIBUTING.md#contribution-quality-standards)
+provides the normal build and style checks. Each tool's README gives its build
+commands and additional dependencies.
+
+## Windows probe linking
+
+The Windows user-mode probes use Rust `core`, VC-LTL5 and YY-Thunks. They do not
+use Rust's Windows `std`. The distributed `*-pc-windows-msvc` standard libraries
+do not establish XP or Windows 7 support. Keep the compatibility libraries
+external; do not replace them with a generated CRT import library. Kernel
+drivers retain the separate WDK build and signing procedure.
+
+Download the following pinned inputs from their publishers. Check each SHA-256
+before extraction. VC-LTL5 is EPL-2.0; YY-Thunks is MIT. The Microsoft SDK and
+compiler libraries have their own Microsoft terms. Preserve the original notices
+when preparing or distributing these inputs.
+
+| Input                                                                                                                                                                                                                                                    | SHA-256                                                            |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| [VC-LTL5 v5.3.1, VC-LTL-Binary.7z](https://github.com/Chuyu-Team/VC-LTL5/releases/download/v5.3.1/VC-LTL-Binary.7z)                                                                                                                                      | `7a18799ed3aa84a225610a5447a56bc534c5c98ccb8dec05caba0e3f633431ad` |
+| [YY-Thunks v1.2.3, YY-Thunks-Lib.zip](https://github.com/Chuyu-Team/YY-Thunks/releases/download/v1.2.3/YY-Thunks-Lib.zip)                                                                                                                                | `8d2417cea1914a678f766c73fd458bb85dfd6057878f8d1d87ddcfc370a42ef9` |
+| [Windows SDK x86 10.0.19041.5](https://api.nuget.org/v3-flatcontainer/microsoft.windows.sdk.cpp.x86/10.0.19041.5/microsoft.windows.sdk.cpp.x86.10.0.19041.5.nupkg)                                                                                       | `7d7213f0a675877437c9b1ca4ab4fa8cbff9f999a3f0121d2763c17a9b26bb42` |
+| [Windows SDK x64 10.0.19041.5](https://api.nuget.org/v3-flatcontainer/microsoft.windows.sdk.cpp.x64/10.0.19041.5/microsoft.windows.sdk.cpp.x64.10.0.19041.5.nupkg)                                                                                       | `ee8b7bc43ed58d17be795c8062ad32e355847aadad7dc8096cc04ccd1f2fdc2e` |
+| [Microsoft VC x86 Desktop 14.44.35226](https://download.visualstudio.microsoft.com/download/pr/67cf767c-5e71-47c2-a54a-cd5631e28942/e4dc8ef4551d621501295d2175c890788368d8f8a218401c7c96405d31cb8e41/Microsoft.VC.14.44.17.14.CRT.x86.Desktop.base.vsix) | `e4dc8ef4551d621501295d2175c890788368d8f8a218401c7c96405d31cb8e41` |
+| [Microsoft VC x64 Desktop 14.44.35226](https://download.visualstudio.microsoft.com/download/pr/67cf767c-5e71-47c2-a54a-cd5631e28942/f01f701a7bcd9587a340898c851424f6a52bb913a70c185ff0d5bf0288c5831a/Microsoft.VC.14.44.17.14.CRT.x64.Desktop.base.vsix) | `f01f701a7bcd9587a340898c851424f6a52bb913a70c185ff0d5bf0288c5831a` |
+
+VC-LTL5's source revision is `cba9ab9bda943d1659b3d89aef9227f53423f0d5`;
+YY-Thunks' is `b41fb80b8d316581eec0959600aeb0e7339d0e5e`. Use YY's **library**
+archive with LLD. Upstream's object-file integration can produce duplicate
+symbols with LLD. The published `vc-ltl` Rust crate fixes its x86/x64 floor at
+Vista and does not include the XP libraries, so it does not replace these
+inputs.
+
+Extract each archive into the layout below, keeping filenames and case. Use
+`7z x ARCHIVE -oDIRECTORY` for the 7z, ZIP, NuGet and VSIX containers. Only the
+selected architecture's SDK package and VC package are needed for one build. The
+VC package's internal directory is `14.44.35207`.
+
+```text
+build/windows/compat/
+  vc-ltl/TargetPlatform/<CRT baseline>/lib/<Win32 or x64>/
+  yy-thunks/Lib/<API baseline>/<x86 or x64>/
+  sdk/<x86 or x64>/c/um/<x86 or x64>/
+  msvc/<x86 or x64>/Contents/VC/Tools/MSVC/14.44.35207/lib/<x86 or x64>/
+```
+
+YY's archive includes its licence. The VC binary archive omits it; retain the
+pinned source's
+[licence](https://github.com/Chuyu-Team/VC-LTL5/blob/cba9ab9bda943d1659b3d89aef9227f53423f0d5/LICENSE)
+and
+[CRT notices](https://github.com/Chuyu-Team/VC-LTL5/tree/cba9ab9bda943d1659b3d89aef9227f53423f0d5/Sources/ucrt/Licenses).
+Retain the SDK packages' licence metadata and
+[SDK terms](https://aka.ms/WinSDKLicenseURL), and the
+[Build Tools terms](https://go.microsoft.com/fwlink/?LinkId=2179911).
+
+Use one Bash session for the following setup and the probe's build command. For
+Windows 7 SP1 x64 and later x64 guests, select:
+
+```bash
+compat_root="$PWD/build/windows/compat"
+windows_arch=x64
+windows_target=x86_64-pc-windows-msvc
+windows_subsystem=6.01
+windows_yy_lib="$compat_root/yy-thunks/Lib/6.1.7600.0/x64"
+windows_vc_lib="$compat_root/vc-ltl/TargetPlatform/6.0.6000.0/lib/x64"
+windows_sdk_lib="$compat_root/sdk/x64/c/um/x64"
+windows_crt_lib="$compat_root/msvc/x64/Contents/VC/Tools/MSVC/14.44.35207/lib/x64"
+```
+
+For XP SP3 x86, select these values instead:
+
+```bash
+compat_root="$PWD/build/windows/compat"
+windows_arch=x86
+windows_target=i686-pc-windows-msvc
+windows_subsystem=5.01
+windows_yy_lib="$compat_root/yy-thunks/Lib/5.1.2600.0/x86"
+windows_vc_lib="$compat_root/vc-ltl/TargetPlatform/5.1.2600.0/lib/Win32"
+windows_sdk_lib="$compat_root/sdk/x86/c/um/x86"
+windows_crt_lib="$compat_root/msvc/x86/Contents/VC/Tools/MSVC/14.44.35207/lib/x86"
+```
+
+Prepare LLD's case-insensitive library lookup. Windows library filenames and
+embedded `/DEFAULTLIB` directives have inconsistent case; lowercase filenames
+alone are insufficient on Linux. This JSON is an LLVM VFS description of the
+external files, not a replacement library. Missing directories fail here.
+
+```bash
+windows_overlay="$compat_root/libraries-$windows_target.json"
+python3 - "$windows_yy_lib" "$windows_vc_lib" "$windows_sdk_lib" "$windows_crt_lib" \
+  > "$windows_overlay" <<'PY'
+import json
+import pathlib
+import sys
+
+roots = []
+for argument in sys.argv[1:]:
+    directory = pathlib.Path(argument).resolve(strict=True)
+    libraries = sorted(p for p in directory.iterdir() if p.suffix.lower() == ".lib")
+    if not libraries:
+        raise SystemExit(f"No import libraries in {directory}")
+    roots.append({"type": "directory", "name": str(directory), "contents": [
+        {"type": "file", "name": p.name, "external-contents": str(p)} for p in libraries
+    ]})
+json.dump({"version": 0, "case-sensitive": False, "roots": roots}, sys.stdout)
+PY
+rust_linker="$(rustc --print sysroot)/lib/rustlib/$(rustc --print host-tuple)/bin/rust-lld"
+test -x "$rust_linker"
+windows_rustflags=(
+  --target "$windows_target"
+  -C panic=abort -C opt-level=2 -C lto=fat -C target-feature=+crt-static
+  -C "linker=$rust_linker"
+  -C link-arg=/entry:mainCRTStartup
+  -C "link-arg=/subsystem:console,$windows_subsystem"
+  -C "link-arg=/vfsoverlay:$windows_overlay" -C link-arg=/Brepro
+  -L "native=$windows_yy_lib" -L "native=$windows_vc_lib"
+  -L "native=$windows_sdk_lib" -L "native=$windows_crt_lib"
+  -l static=libvcruntime -l static=libucrt -l static=libcpmt
+)
+```
+
+Ordinary import-library linkage lets YY supply its API fallbacks. Do not use
+`raw-dylib` or `/nodefaultlib` with this procedure. The Windows API declarations
+keep the system ABI; the executable entry uses the C ABI. Require successful PE
+import/header inspection and actual execution on each declared minimum OS after
+rebuilding. A successful link does not prove runtime compatibility.
+
+The selected YY binary release has no ARM64 libraries. Its source has an ARM64
+build path, but that payload and the native ARM64 probes still need separate
+qualification. Do not substitute x64 libraries or call x64 emulation a native
+ARM64 result.
+
+## Prepare an unattended installation
+
+Prerequisites: the repository's Rustup toolchain, `7z`, `genisoimage`,
+`sha256sum`, the matching pinned Windows ISO and virtio-win ISO, and the
+[graphical firmware](../../docs/windows-console.md). Check the selected image
+index against `sources/install.wim` before generating an answer file. Choose
+`server` for Server Core or Desktop Experience, or `client` for Windows clients.
+
+```sh
+mkdir -p build/windows
+rustc --edition 2024 -D warnings tools/windows/prepare.rs -o build/windows/prepare
+rustc --edition 2024 -D warnings tools/windows/prepare-nt6.rs -o build/windows/prepare-nt6
+build/windows/prepare server build/windows/server-core 1
+build/windows/prepare-nt6 server2025 windows-server-2025.iso virtio-win.iso \
+  build/windows/server-core-media build/windows/server-core/Autounattend.xml
+```
+
+For standard Windows 11 Enterprise Evaluation, use the matching client image
+index and the
+[secure firmware/media procedure](../../resources/firmware/cloudhv-secureboot/README.md#current-windows-installation-media):
+
+```sh
+build/windows/prepare client build/windows/windows11-enterprise 1
+build/windows/prepare-nt6 win11-enterprise-26h2 windows11-enterprise.iso virtio-win.iso \
+  build/windows/windows11-enterprise-media build/windows/windows11-enterprise/Autounattend.xml
+```
+
+For the pinned standard Windows 11 Pro 26H2 English AMD64 media, the verified
+Professional image is index 6:
+
+```sh
+build/windows/prepare client build/windows/windows11-pro-26h2 6
+build/windows/prepare-nt6 win11-pro-26h2 windows11-pro.iso virtio-win.iso \
+  build/windows/windows11-pro-26h2-media build/windows/windows11-pro-26h2/Autounattend.xml
+```
+
+The Pro profile retains the existing trust policy and 2023 boot-file recipe.
+When an answer file is supplied, only this profile selects the original
+`DVD_EX/EFI/en-US/efisys_noprompt_EX.bin` from boot.wim index 1, copied to the
+existing `efi/microsoft/boot/efisys_ex.bin` catalogue target. The alternate
+loader is accepted by the tested secure firmware, and Setup completes the
+[fresh Pro installation](../../docs/windows-validation.md#standard-windows-11-pro-installation).
+Graphical Pro and the other five profiles retain their previous boot-image
+selection. Microsoft's reference script selects `efisys_EX.bin`, not the
+no-prompt alternative. The Pro client answer file still shows the product-key
+page; select **I don't have a product key** to continue without activation. The
+source install.wim reference-count warning and boot-chain limits are recorded in
+the
+[secure media procedure](../../resources/firmware/cloudhv-secureboot/README.md#current-windows-installation-media).
+
+The client profile creates the local `Firecracker` account in Administrators.
+The server profile sets the built-in `Administrator` password. Neither profile
+enables automatic logon. These are Microsoft's supported
+[unattended account settings](https://learn.microsoft.com/en-us/windows-hardware/customize/desktop/unattend/microsoft-windows-shell-setup-useraccounts-localaccounts-localaccount);
+the client profile does not bypass Windows hardware requirements.
+
+Attach the generated `server2025-viostor.iso` or selected client ISO as the
+console's optical image and the corresponding `windows.raw` as the writable
+virtio disk, following the
+[direct installation guide](../../docs/windows-console.md). Setup reads the
+answer file from the same DVD as the drivers. The answer file erases disk 0,
+creates GPT partitions, installs the selected image and signed drivers, sets
+UTC, disables hibernation and enables EMS after installing the fallback EFI
+path. Use only the new disposable disk. Firecracker reset exits the process;
+restart with the same disk and stores to continue installation, then eject the
+ISO.
+
+The generated account password is in `account-password` and the answer file. The
+output directory is mode 0700 and those files are mode 0600. The rebuilt answer
+ISO also contains the password; keep its private output directory and do not
+distribute it.
+
+For graphical installations, omit the answer-file argument and choose the
+matching profile documented in the console guide. Both media types contain the
+same signed storage and network packages under `$WinPEDriver$`. Setup searches
+this directory, loads the matching PE drivers and adds them to the installed
+image. This uses Microsoft's
+[automatic driver discovery](https://learn.microsoft.com/en-us/troubleshoot/windows-client/setup-upgrade-and-drivers/limitations-dollar-sign-winpedriver-dollar-sign).
+No answer-file driver paths or configuration set is required. The ISO builder
+preserves source media and verifies every prepared file after re-extraction.
+Verify actual PE binding and installed-driver persistence during each new
+installation qualification.
+
+Test the NT6 media layout from the repository root with the pinned toolchain:
+
+```sh
+mkdir -p build/windows
+rustc --edition 2024 -D warnings --test tools/windows/prepare-nt6.rs \
+  -o build/windows/prepare-nt6-tests
+build/windows/prepare-nt6-tests --test-threads=1
+```
+
+The six tests include synthetic `7z` driver archives and ARM64 PE headers. They
+need `7z` and `sha256sum`, but no Windows ISO. They check selected driver bytes,
+automatic storage/network/input paths for each architecture with and without an
+answer file, profile pins, fallback-loader architecture and output cleanup.
+These standalone Rust tests are separate from the Cargo workspace checks. They
+do not qualify Windows Setup or installed-driver persistence.
+
+Test XP media readback from the repository root with the same pinned toolchain:
+
+```sh
+mkdir -p build/windows
+rustc --edition 2024 -D warnings --test tools/windows/prepare-xp.rs \
+  -o build/windows/prepare-xp-tests
+build/windows/prepare-xp-tests --test-threads=1
+```
+
+The six tests need `xorriso` and `sha256sum`, but no Windows ISO. They include a
+small synthetic ISO with the XP filename conventions, payload readback, and
+rejection of changed or missing OEM driver files. The existing loader, boot
+catalogue, directory bound and output cleanup checks remain. These checks do not
+qualify a fresh XP installation.
+
+A prepared disk must be fully shut down before offline access. Disable
+hibernation with `powercfg.exe /hibernate off`, then run `shutdown /s /t 0`.
+Never force offline writes to an NTFS volume reported as hibernated or unclean.
+
+The earlier QEMU-based preparation evidence remains historical. The revised
+single-DVD unattended procedures need fresh installation qualification for each
+selected edition; generating an answer file is not an installation result.
+
+## Evaluation activation
+
+Before long tests, connect the guest to the Internet and check its evaluation
+activation from an elevated command prompt:
+
+```bat
+cscript.exe //nologo C:\Windows\System32\slmgr.vbs /xpr
+```
+
+If activation is required, run
+`cscript.exe //nologo C:\Windows\System32\slmgr.vbs /ato`, then check `/xpr`
+again. These are
+[Microsoft's activation commands](https://learn.microsoft.com/en-us/windows-server/get-started/activation-slmgr-vbs-options).
+The preparation tool does not activate the installed guest.
+
+An unactivated or expired Windows 11 evaluation can
+[shut down every hour](https://www.microsoft.com/en-us/evalcenter/evaluate-windows-11-enterprise).
+The ARM TAP test encountered this shutdown after full restore; its Application
+log recorded WLMS events 100 and 101. A clean Firecracker exit is therefore
+insufficient evidence of workload success. Check all guest pass markers and the
+activation state. The activation-gated retry passed both TAP and CONNECT checks;
+see the [validation record](../../docs/windows-validation.md).
+
+## ARM64 installation
+
+`client-arm64` creates a sparse target and an answer file with ARM64 components.
+It enables EMS through the firmware SPCR table and leaves the PC COM1 override
+unset, following Microsoft's
+[UEFI EMS procedure](https://learn.microsoft.com/en-us/windows-hardware/drivers/devtest/boot-parameters-to-enable-ems-redirection#enabling-ems-on-a-computer-with-uefi-firmware).
+
+`win11-iot-arm64` stages the Toets Windows 11 IoT Enterprise LTSC 2024 ARM64
+media and matching `w11/ARM64` viostor, NetKVM, vioinput and viosock packages.
+The viosock package includes its native Winsock provider; staging does not
+install or register it. The pinned source is
+`X23-81950_26100.1742.240906-0331.ge_release_svc_refresh_CLIENT_ENTERPRISES_OEM_A64FRE_en-us.iso`,
+SHA-256 `f8f068cdc90c894a55d8c8530db7c193234ba57bb11d33b71383839ac41246b4`. Use
+an authorised copy of that exact source and the pinned virtio-win ISO. This
+profile does not select standard Windows 11 Pro or Enterprise ARM64 media.
+
+```sh
+build/windows/prepare client-arm64 build/windows/arm64 1
+build/windows/prepare-nt6 win11-iot-arm64 windows11-iot-arm64.iso virtio-win.iso \
+  build/windows/arm64-staging build/windows/arm64/Autounattend.xml
+```
+
+The result is `arm64-staging/tree/` and `files.sha256-sizes`. The tool verifies
+the source hashes and ARM64 fallback PE machine, then copies the driver packages
+and optional answer. It preserves the source `boot.wim`; it does not inject
+WinPE drivers, change boot policy, build an ISO or create a GPT/FAT installer.
+Do not pass the staged tree or original optical ISO as an ARM console device.
+
+ARM uses a read-only virtio installer disk. WinPE must contain its signed ARM64
+storage and input drivers before boot, because it cannot read external virtio
+media to load its own storage driver. Service the staged WIM using Microsoft's
+DISM in an existing AMD64 Windows technician environment with the matching ADK
+and WinPE add-on. Microsoft documents
+[ARM image servicing on AMD64](https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/arm64-device-manufacturing)
+and
+[WinPE driver injection](https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/winpe-mount-and-customize).
+Provision installed-OS drivers separately, preserve signed ARM boot files and
+handle FAT32's file-size limit. Prove the writable target's identity before
+using an answer that wipes DiskID 0.
+
+A direct Firecracker ARM64 installer and standard ARM64 Windows 11 remain
+unqualified. The [ARM64 guide](../../docs/windows-arm64.md) retains historical
+prepared-disk provenance and current host requirements. The AMD64 console and
+installation procedure do not establish ARM64 support.
+
+## XP display driver
+
+The [XP display miniport](display/README.md) supplies the experimental linear
+display driver, external WDK build procedure and normal installation steps. Its
+source and host unit tests are separate from the user-mode compatibility
+libraries above.

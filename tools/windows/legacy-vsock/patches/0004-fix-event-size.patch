@@ -1,0 +1,33 @@
+From 124d09620663a9ac62edbf9615091c32ec3a84f8 Mon Sep 17 00:00:00 2001
+From: Leidong Wang <leidwang@redhat.com>
+Date: Fri, 3 Apr 2026 14:48:49 +0800
+Subject: [PATCH] Fix critical event size validation bug
+
+This error will prevent user from connecting to the VM after
+migration, and restarting the VM will cause a BSOD.
+
+Signed-off-by: Leidong Wang <leidwang@redhat.com>
+---
+ viosock/sys/Evt.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/viosock/sys/Evt.c b/viosock/sys/Evt.c
+index 3c4d7ce0f..81364b91d 100644
+--- a/viosock/sys/Evt.c
++++ b/viosock/sys/Evt.c
+@@ -158,9 +158,13 @@ _IRQL_requires_max_(DISPATCH_LEVEL) VOID VIOSockEvtVqProcess(IN PDEVICE_CONTEXT
+         {
+             /* Drop short/long events */
+
+-            if (len != sizeof(pEvt))
++            if (len != sizeof(VIRTIO_VSOCK_EVENT))
+             {
+-                TraceEvents(TRACE_LEVEL_ERROR, DBG_HW_ACCESS, "Invalid event\n");
++                TraceEvents(TRACE_LEVEL_ERROR,
++                            DBG_HW_ACCESS,
++                            "Invalid event received, received %u bytes\n, expected %u bytes\n",
++                            len,
++                            sizeof(VIRTIO_VSOCK_EVENT));
+             }
+             else
+             {

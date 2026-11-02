@@ -1,0 +1,43 @@
+From a48f19c69e47f1200cbb8d867b69b6a1db227a20 Mon Sep 17 00:00:00 2001
+From: Sochin Jiang <jiangxiaoqing@virtaitech.com>
+Date: Fri, 28 Jul 2023 14:45:33 +0800
+Subject: [PATCH] viosock: fix one fatal recv data error bug
+
+This patch fixs one bug, that multiple recv calls always return
+the same data. From upper layer, it seems like Stream data pointer
+never moves. One simple multiple-recvs test case can reproduce this
+easily.
+
+Signed-off-by: Sochin Jiang <jiangxiaoqing@virtaitech.com>
+---
+ viosock/sys/Rx.c | 5 ++---
+ 1 file changed, 2 insertions(+), 3 deletions(-)
+
+diff --git a/viosock/sys/Rx.c b/viosock/sys/Rx.c
+index dd1df8088..31b74d2cb 100644
+--- a/viosock/sys/Rx.c
++++ b/viosock/sys/Rx.c
+@@ -1463,8 +1463,6 @@ VIOSockReadDequeueCb(
+         {
+             memcpy(pRequest->FreePtr, pCurrentCb->ReadPtr, pRequest->FreeBytes);
+
+-            pRequest->FreeBytes = 0;
+-
+             if (!(pRequest->Flags & MSG_PEEK))
+             {
+                 //update current CB data ptr
+@@ -1472,6 +1470,7 @@ VIOSockReadDequeueCb(
+                 pCurrentCb->BytesToRead -= pRequest->FreeBytes;
+                 VIOSockRxPktDec(pSocket, pRequest->FreeBytes);
+             }
++            pRequest->FreeBytes = 0;
+
+             break;
+         }
+@@ -1801,4 +1800,4 @@ VIOSockReadTimerFunc(
+     }
+
+     TraceEvents(TRACE_LEVEL_VERBOSE, DBG_READ, "<-- %s, status: 0x%08x, counter: %u\n", __FUNCTION__, status, lCounter);
+-}
+\ No newline at end of file
++}

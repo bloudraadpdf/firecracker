@@ -83,6 +83,45 @@ The current implementation relies on the
 
 ## Snapshot compatibility
 
+This fork uses format41.0.0. The AMD64 console can save one QXL adapter, including
+PCI and option-ROM state, a stopped virtual clock, shared boot VGA, private
+RAM/VRAM, protocol ROM, memory slots, queues, deferred releases and cursor trails.
+Restore validates host metadata before enabling its mappings. The boot VGA
+framebuffer is stored once. ATAPI saves pending unit attention and media events.
+The console saves its optical drive IDs/paths and the controller saves independent primary/secondary channel state. Restore
+validates the channel layout. ATAPI state stores optional medium identity/size
+and the tray position separately. An empty drive has no ISO identity or file;
+restore rejects substituting a medium for an empty saved drive, or the reverse.
+The format also contains optional virtio GPU state in both transport inventories,
+including queue progress, display-change events and the bounded renderer payload.
+AMD64 GPU transports also save their boot VGA
+registers, memory and BAR mappings; other transports have no VGA state. Console
+state records the selected display model and reuses the saved GPU instead of
+saving another VGA device. The snapshot reader permits at most 128 MiB, including
+GPU resources, scanout, backing entries and the VGA console.
+
+VMClock state is optional and records actual device
+presence; restore reconstructs the machine configuration from that presence
+without allocating or notifying an absent clock. The x86 PIT state is optional
+and records whether the timer exists; restore uses that saved hardware choice.
+The format also contains optional virtio-input state, the ARM64 console/security
+topology and the optional AMD64 VGA expansion ROM. The input device owns its
+pending frames, accepted and delivered keys, position and guest/pending lock
+LEDs. Console restore reuses that saved PCI backend. The AMD64 display saves two
+MMIO mappings and a typed optional ROM containing its bytes, mapping and PCI ROM
+BAR state; an absent ROM has no mapping or ROM BAR. The console's saved
+configuration also records the optional ROM path. Format29.0.0 through
+format40.0.0 files require their matching older binaries; format41 does not
+decode them. Snapshot state remains specific to its CPU architecture.
+
+The conventional PC event state also saves GPE0 status and enable bits. Its VM
+Generation ID notification uses that group's shared SCI and a GPE method,
+without a separate GED interrupt or allocation. Restore uses the saved complete
+PC hardware pair, validates its route before constructing devices, writes the
+new generation ID, then latches the event before vCPUs resume. Default Linux and
+ARM hardware retain the dedicated GED route. Both Cargo builds use the same
+format41 schema; no format34 decoder or migration is provided.
+
 ### Host kernel
 
 Snapshots can be saved and restored on the same kernel version without any
@@ -131,6 +170,17 @@ creating and restoring snapshots on hosts that have the same CPU model.
 
 Restoring from an Intel snapshot on AMD (or vice-versa) is not supported.
 
+On x86, a guest that exposes shadow stacks requires KVM support for the
+`IA32_U_CET` and `IA32_PL3_SSP` MSRs and `KVM_CAP_ONE_REG`. Firecracker saves the
+live shadow stack pointer with `KVM_REG_GUEST_SSP`, separately from the saved
+ring-transition pointer in `IA32_PL3_SSP`. An unavailable register or incomplete
+shadow stack state causes the snapshot operation to fail. A guest that hides
+shadow stacks does not require the live pointer register. The user CET control
+MSR is also saved when the guest exposes indirect branch tracking.
+
+Snapshot format 15 adds the live pointer field. Its state files are incompatible
+with format 14, including for guests that do not use CET.
+
 It is important to note that guest workloads can still execute instructions that
 are being [masked](../cpu_templates/cpu-templates.md) by CPUID and restoring and
 saving of such workloads will lead to undefined result. Firecracker retrieves
@@ -147,3 +197,17 @@ interface that enables creating from and saving to the microVM state.
 
 [1]: https://serde.rs
 [2]: https://github.com/SoftbearStudios/bitcode
+
+## Integrated Windows platform
+
+Snapshot format 44 combines the Windows platform with the kernel prefault
+ranges, inherited block-backing requirement and CET validation from
+`patch/v1.17.0-dev`. It accepts neither that branch's format15 files nor the
+Windows branch's earlier format43 files. Use each archive's matching binary;
+there is no implicit conversion.
+
+Snapshot format 45 rebases the fork onto upstream commit
+`1703ba371c47966c28e7208d7cf8f6202999481e`. It includes upstream's queue
+configuration and PCI root-port state, plus the fork's platform state.
+Formats 44 and earlier cannot be restored by this build. Create new snapshots
+from a cold boot; do not reuse an old snapshot with the new binary.

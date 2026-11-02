@@ -112,6 +112,15 @@ The Firecracker snapshot create/resume performance depends on the memory size,
 vCPU count and emulated devices count. The Firecracker CI runs snapshot tests on
 all [supported platforms](../../README.md#tested-platforms).
 
+On x86_64, snapshot format 13 records the physical ranges of the boot kernel's
+file-backed code and read-only ELF data. When KVM supports `KVM_PRE_FAULT_MEMORY`,
+restore prepares read-only stage-2 mappings for allocated tmpfs pages in those
+ranges before vCPU threads start. This preserves copy-on-write and sparse holes.
+It shifts kernel instruction and data faults into restore preparation; other memory pages
+remain demand-faulted. Disk, userfaultfd and non-ELF boot sources retain demand
+faults. Hosts without the capability and unsupported vCPU modes do the same.
+See the [KVM API](https://docs.kernel.org/virt/kvm/api.html#kvm-pre-fault-memory).
+
 ### Developer preview status
 
 Diff snapshots are still in developer preview while we are diving deep into how
@@ -162,6 +171,18 @@ the feature can be combined with guest_memfd support in Firecracker.
   This is to guarantee that the vCPU will continue receiving TSC interrupts
   after restoring from the snapshot even if an interrupt is lost when taking a
   snapshot.
+
+## Optional x86 PIT
+
+The x86 `machine-config` field `pit` defaults to `true`. Set it to `false` for
+guests that use the KVM clock and local APIC TSC-deadline timer. The host and
+effective guest CPU configuration must provide TSC, APIC, TSC-deadline, ARAT and
+the KVM clock. Unsupported configurations fail before execution. The guest must
+also enable and use those facilities.
+
+Snapshots store PIT state only when the device exists. Restore uses that saved
+choice, with no independent PIT override. Format 32 is incompatible with format
+31; create fresh snapshots when updating this fork.
 
 ## Snapshot versioning
 
@@ -463,6 +484,21 @@ hugetlbfs pages require the `Uffd` backend, so combining `2M` with `File`
 returns an error. With `Uffd`, the effectiveness of transparent huge pages may
 be limited.
 
+The `vmclock_restore_notification` field selects how Firecracker publishes the
+VMClock generation update. `Interrupt` is the default. `Disabled` advances the
+generation and completes the VMClock seqlock update without raising its
+interrupt. Use `Disabled` only when the guest observes the read-only mapped
+VMClock ABI. A guest that blocks on the VMClock device notification needs
+`Interrupt`.
+
+The `vmgenid_restore_notification` field selects whether Firecracker raises the
+VMGenID guest notification after writing the restored VM's fresh generation ID.
+`Interrupt` is the default. `Disabled` still writes the new 128-bit ID into the
+guest mapping, but does not raise its interrupt. Use `Disabled` only when the
+guest explicitly asks its VMGenID driver to process the changed ID before it
+consumes randomness or publishes readiness. Merely observing the changed ID is
+not sufficient: the guest must retain its normal VM-fork CSPRNG reseed path.
+
 When relying on the OS to handle page faults, the command below is also
 accepted. Note that `mem_file_path` field is currently under the deprecation
 policy. `mem_file_path` and `mem_backend` are mutually exclusive, therefore
@@ -511,6 +547,11 @@ to the new Firecracker process as they were to the original one.
     KVM dirty page tracking.
   - If `resume_vm` is set, the vm is automatically resumed if load is
     successful.
+  - The VMClock generation advances. Its interrupt follows the selected
+    `vmclock_restore_notification` mode.
+  - VMGenID receives a fresh generation ID. Its interrupt follows the selected
+    `vmgenid_restore_notification` mode; disabling it does not make the guest's
+    VM-fork CSPRNG reseed optional.
 - _on failure_: A specific error is reported and then the current Firecracker
   process is ended (as it might be in an invalid state).
 
@@ -632,6 +673,18 @@ to implement mechanisms for ensuring de-duplication of such state, where needed.
 
 ## Userspace notifications of loading snapshots
 
+VMClock is enabled by default. Set `"vmclock": false` in machine-config before
+boot to omit its device page allocation, interrupt and ACPI/FDT node. VM
+Generation ID remains separate and available. Snapshots retain the actual clock
+presence; restore cannot add or remove it. The `vmclock_restore_notification`
+selector has no effect when no clock was saved.
+
+On ACPI guests, VMClock exposes one memory resource. A separate Generic Event
+Device delivers its interrupt as a notification to the clock. Snapshots retain
+their original guest ACPI tables; restoring a snapshot does not replace them.
+Boot a fresh guest and recreate its snapshots to use the corrected clock
+notification path.
+
 VMClock device
 ([specification](https://uapi-group.org/specifications/specs/vmclock/)) is a
 device that enables efficient application clock synchronization against real
@@ -655,6 +708,11 @@ recreate state.
 
 Moreover, VMClock allows processes to call poll() on the VMClock device and get
 notified about changes through an event loop.
+
+The Tokoloshe fork assigns VMClock its own interrupt resource. The matching
+guest kernel handles that interrupt directly for both ACPI and device-tree
+guests. ACPI GED only handles VMGenID. The VMM and guest kernel must use this
+contract together; rebuild snapshots when changing the interrupt routing.
 
 For reference, the C code used in our tests is available
 [here](https://github.com/firecracker-microvm/firecracker/blob/main/tests/host_tools/vmclock.c).
@@ -715,5 +773,14 @@ For example, a snapshot taken on a m6i.metal host (Intel Ice Lake) running a
 5.10 host kernel can be restored on a different m6i.metal host running a 6.1
 host kernel (but not vice versa), but could not be restored on a m5n.metal host
 (Intel Cascade Lake).
+
+### Block flush failure
+
+Snapshot creation returns an error if an activated block device cannot drain its
+I/O or flush its backing file. Devices are prepared once, before transport and
+KVM state capture. No snapshot state or memory output is written after a
+preparation error. Preparation can have changed another device before the
+failure, including resetting vsock connections. A failed snapshot is not proof
+that the source's control connection remains usable.
 
 [man mincore]: https://man7.org/linux/man-pages/man2/mincore.2.html

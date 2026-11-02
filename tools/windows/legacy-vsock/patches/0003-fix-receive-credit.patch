@@ -1,0 +1,35 @@
+From ed92ff4314d01ccf8c6f52707803c363899ee017 Mon Sep 17 00:00:00 2001
+From: Sochin Jiang <jiangxiaoqing@virtaitech.com>
+Date: Thu, 3 Aug 2023 23:12:26 +0800
+Subject: [PATCH] viosock: make sure to get a correct computation
+
+Assign the corresponding RxCb's attribute to zero only after it is
+not used, otherwise some computational errors may cause unexpected
+behivor.
+
+Signed-off-by: Sochin Jiang <jiangxiaoqing@virtaitech.com>
+---
+ viosock/sys/Rx.c | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/viosock/sys/Rx.c b/viosock/sys/Rx.c
+index 31b74d2cb..cea7f2098 100644
+--- a/viosock/sys/Rx.c
++++ b/viosock/sys/Rx.c
+@@ -1433,8 +1433,6 @@ VIOSockReadDequeueCb(
+                 pCurrentItem = pCurrentItem->Blink;
+                 RemoveEntryList(&pCurrentCb->ListEntry);
+
+-                pCurrentCb->BytesToRead = 0;
+-
+                 if (VIOSockIsLoopbackCb(pCurrentCb))
+                 {
+                     status = WdfRequestUnmarkCancelable(pCurrentCb->Request);
+@@ -1457,6 +1455,7 @@ VIOSockReadDequeueCb(
+                     VIOSockRxCbPushLocked(pContext, pCurrentCb);
+                     VIOSockRxPktDec(pSocket, pCurrentCb->BytesToRead);
+                 }
++                pCurrentCb->BytesToRead = 0;
+             }
+         }
+         else //request buffer is not big enough

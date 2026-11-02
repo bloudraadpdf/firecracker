@@ -803,3 +803,56 @@ sudo env PYTHONPATH=tests HOME=$HOME ~/.local/bin/ipython3 -i tools/sandbox.py -
 > [!WARNING]
 >
 > **Notice this runs as root!**
+
+## Standalone tools and platform devices
+
+The normal build tests discover tracked standalone Rust tool workspaces.
+`test_tool_unittests` runs their unit tests and compiles their examples;
+`test_tool_clippy` checks their native GNU targets. The Apache-licensed variable
+helper is a separate Rust workspace. It uses RustCrypto for CMS/DER/X.509
+parsing and the existing AWS-LC backend for RSA verification.
+
+The development container builds pinned swtpm/libtpms 0.10.2 and installs
+`acpica-tools`. The variable helper needs the existing AWS-LC C compiler and
+assembly toolchain. Native test hosts need these libraries and tools, including
+swtpm 0.10.2 with libtpms 0.10.x. Ubuntu 24.04's packaged swtpm lacks the
+required checkpoint storage locking; use the development container on such
+hosts. The real swtpm checkpoint and ACPICA physical-presence tests run with the
+normal VMM unit suite; missing executables are test failures.
+
+Build this branch's development image on a Linux host before running these
+checks. The published default image does not contain the added tools.
+`build_devctr` creates the local `latest` tag; select it for subsequent commands
+in the same shell:
+
+```sh
+./tools/devtool build_devctr
+export DEVCTR_IMAGE_TAG=latest
+```
+
+`functional/test_platform_devices.py` restricts Hyper-V and PVH device cases to
+AMD64. The PVH cases compile the Apache-licensed fixture in `data/platform/` and
+create their own ROM and media bytes. They check jailed boot, guest-written
+display pixels, console restore, protected-service checkpoint restore,
+generation rejection and backend failure. Helpers use private state and
+group-restricted sockets inside bind mounts. Teardown stops VMMs and helpers
+before removing those mounts. No Windows media is needed. These fixtures do not
+qualify production firmware, Secure Boot or Windows; retain the separate
+[Windows validation matrix](../docs/windows-validation.md).
+
+### Optional Windows capability
+
+The normal Rust unit, example and benchmark checks cover default and `windows`
+builds. Clippy checks default and all features. Use
+`cargo build --features windows` to enable the optional platform. Default
+binaries keep the API fields and reject requests which need this capability.
+
+The platform module builds the Windows-enabled binary pair with the release
+profile when `--binary-dir` is absent. If you supply that option, use a release
+pair built with the `windows` feature; see the
+[build instructions](../docs/windows.md#build). Tests for default-build
+rejection and Linux snapshot exchange build a separate default release pair.
+Both variants retain the normal memory thresholds. Linux snapshot cases are
+selected on both AMD64 and ARM64. They cross the capability boundary in both
+directions and with both transports; Windows device state must fail in the
+default build.

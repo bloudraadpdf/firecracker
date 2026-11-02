@@ -1,0 +1,27 @@
+From 661fc34f1c64e442e459eeecef4cf132ed4a89cb Mon Sep 17 00:00:00 2001
+From: Martin Drab <martin.drab@virtuozzo.com>
+Date: Thu, 29 Sep 2022 07:11:19 -0700
+Subject: [PATCH] VIOSOCK: Fix VIOSockReadDequeueCb
+
+This routine is responsible for removing requests from socket's Read queue and their processing (e.g. filling their buffers with incoming data and completing them). At most one instance of this routine can be running at a time, which is ensured by interlocked operations on the lInProgress variable. However, not all return paths were covered -- if the Read queue was empty, the routine would just return without unlocking the variable. Such behavior pretty much ruins chance of getting the recv() call right.
+
+This fix unlocks the lInProgress also on this forgotten return path, inlucing emission of a trace event.
+---
+ viosock/sys/Rx.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/viosock/sys/Rx.c b/viosock/sys/Rx.c
+index 610b1f693..67901e817 100644
+--- a/viosock/sys/Rx.c
++++ b/viosock/sys/Rx.c
+@@ -1320,6 +1320,10 @@ VIOSockReadDequeueCb(
+
+     status = WdfIoQueueRetrieveNextRequest(pSocket->ReadQueue, &ReadRequest);
+     if (!NT_SUCCESS(status))
++    {
++        InterlockedExchange(&lInProgress, 0);
++        TraceEvents(TRACE_LEVEL_INFORMATION, DBG_READ, "The read queue is empty, exiting from VIOSockReadDequeueCb\n");
+         return FALSE;
++    }
+
+     pRequest = GetRequestRxContext(ReadRequest);
