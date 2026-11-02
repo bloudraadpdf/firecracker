@@ -139,7 +139,10 @@ impl Fadt {
     /// Configure ACPI-only fixed hardware with a 32-bit PM timer.
     pub fn set_pm_registers(&mut self, sci: u16, event: u32, control: u32, timer: u32) {
         self.dsdt = U32::new(u32::try_from(self.x_dsdt.get()).unwrap_or(0));
-        self.flags = U32::new((self.flags.get() & !(1 << FADT_F_HW_REDUCED_ACPI)) | (1 << 8));
+        self.flags = U32::new(
+            (self.flags.get() & !((1 << FADT_F_HW_REDUCED_ACPI) | (1 << FADT_F_PWR_BUTTON)))
+                | (1 << 8),
+        );
         self.sci_int = U16::new(sci);
         self.pm1a_evt_blk = U32::new(event);
         self.pm1a_cnt_blk = U32::new(control);
@@ -240,6 +243,18 @@ mod tests {
             table.x_gpe0_blk.as_bytes(),
             GenericAddressStructure::new(1, 16, 0, 1, 0x60c).as_bytes()
         );
+    }
+
+    #[test]
+    fn fixed_power_registers_declare_fixed_power_button() {
+        let mut table = Fadt::new(*b"TESTVM", *b"TESTFADT", 0);
+        table.set_flags(
+            (1 << FADT_F_HW_REDUCED_ACPI) | (1 << FADT_F_PWR_BUTTON) | (1 << FADT_F_SLP_BUTTON),
+        );
+        table.set_pm_registers(3, 0x602, 0x606, 0x608);
+        assert_eq!(table.flags.get(), (1 << FADT_F_SLP_BUTTON) | (1 << 8));
+        assert_eq!(table.pm1_evt_len, 4);
+        assert_eq!(table.sci_int.get(), 3);
     }
 
     #[test]

@@ -179,6 +179,8 @@ pub enum FcExitCode {
     GenericError = 1,
     /// Generic exit code error; not possible to occur if the program logic is sound.
     UnexpectedError = 2,
+    /// A configured PC guest requested a reboot; a supervisor may cold-start it.
+    GuestReboot = 3,
     /// Firecracker was shut down after intercepting a restricted system call.
     BadSyscall = 148,
     /// Firecracker was shut down after intercepting `SIGBUS`.
@@ -223,6 +225,9 @@ pub enum VmmError {
     MmioDeviceManager(device_manager::mmio::MmioError),
     /// Error getting the KVM dirty bitmap. {0}
     DirtyBitmap(kvm_ioctls::Error),
+    #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+    /// ACPI power event error: {0}
+    AcpiPower(io::Error),
     /// I8042 error: {0}
     I8042Error(devices::legacy::I8042DeviceError),
     #[cfg(target_arch = "aarch64")]
@@ -545,6 +550,40 @@ impl Vmm {
 
             Ok(())
         }
+    }
+
+    /// Notify the guest's fixed ACPI power button without forcing a VM exit.
+    #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+    pub fn send_power_button(&mut self) -> Result<(), VmmError> {
+        self.device_manager
+            .legacy_devices
+            .as_ref()
+            .and_then(|legacy| legacy.pc.as_ref())
+            .ok_or(VmmError::NotSupported)?
+            .acpi_power
+            .lock()
+            .expect("ACPI power lock was poisoned")
+            .notify_power_button()
+            .map_err(VmmError::AcpiPower)
+    }
+
+    #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+    fn guest_reset_requested(&self) -> bool {
+        let Some(legacy) = &self.device_manager.legacy_devices else {
+            return false;
+        };
+        let Some(pc) = &legacy.pc else {
+            return false;
+        };
+        pc.acpi_power
+            .lock()
+            .expect("ACPI power lock was poisoned")
+            .reset_requested()
+            || legacy
+                .i8042
+                .lock()
+                .expect("i8042 lock was poisoned")
+                .reset_requested()
     }
 
     /// Saves the state of a paused Microvm.
@@ -913,6 +952,11 @@ impl MutEventSubscriber for Vmm {
                                     }
                                 }
                             }
+                        }
+
+                        #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+                        if self.guest_reset_requested() {
+                            break 'exit_code FcExitCode::GuestReboot;
                         }
 
                         // No CPUs exited with error status code, report "Ok"

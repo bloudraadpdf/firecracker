@@ -133,6 +133,7 @@ impl Default for I8042State {
 #[derive(Debug)]
 pub struct I8042Device {
     reset_evt: EventFd,
+    reset_requested: bool,
     /// Keyboard interrupt (IRQ 1).
     pub kbd_interrupt_evt: EventFd,
     state: I8042State,
@@ -143,6 +144,7 @@ impl I8042Device {
     pub fn new(reset_evt: EventFd) -> io::Result<Self> {
         Ok(Self {
             reset_evt,
+            reset_requested: false,
             kbd_interrupt_evt: EventFd::new(libc::EFD_NONBLOCK)?,
             state: I8042State::default(),
         })
@@ -338,7 +340,13 @@ impl I8042Device {
         Ok(())
     }
 
-    fn reset(&self) -> Result<(), I8042Error> {
+    #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+    pub(crate) fn reset_requested(&self) -> bool {
+        self.reset_requested
+    }
+
+    fn reset(&mut self) -> Result<(), I8042Error> {
+        self.reset_requested = true;
         crate::logger::info!("Guest requested i8042 reset");
         self.reset_evt.write(1).map_err(I8042Error::Interrupt)?;
         METRICS.reset_count.inc();
@@ -770,15 +778,29 @@ mod tests {
     #[test]
     fn reset_paths_and_access_widths() {
         let mut dev = controller();
+        assert!(!dev.reset_requested);
         let mut bytes = [1, 2];
         dev.read(0, 0, &mut bytes);
         assert_eq!(bytes, [1, 2]);
         dev.write(0, 4, &[0xfe, 0]);
         dev.reset_evt.read().unwrap_err();
+        command(&mut dev, 0xff);
+        assert!(!dev.reset_requested);
         command(&mut dev, 0xfe);
+        assert!(dev.reset_requested);
         assert_eq!(dev.reset_evt.read().unwrap(), 1);
-        command(&mut dev, 0xd1);
-        data(&mut dev, 2);
-        assert_eq!(dev.reset_evt.read().unwrap(), 1);
+
+        let state = dev.save_state();
+        let mut restored = controller();
+        restored.restore_state(&state).unwrap();
+        assert!(!restored.reset_requested);
+        command(&mut restored, 0xd1);
+        data(&mut restored, 3);
+        assert!(!restored.reset_requested);
+        restored.reset_evt.read().unwrap_err();
+        command(&mut restored, 0xd1);
+        data(&mut restored, 2);
+        assert!(restored.reset_requested);
+        assert_eq!(restored.reset_evt.read().unwrap(), 1);
     }
 }

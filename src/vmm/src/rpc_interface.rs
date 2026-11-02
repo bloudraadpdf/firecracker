@@ -137,6 +137,9 @@ pub enum VmmAction {
     /// On x86_64 this injects CTRL+ALT+DEL through the i8042 keyboard device. On aarch64 this
     /// injects a virtual power-button press through the PL061 GPIO device.
     SendCtrlAltDel,
+    /// Signal the ACPI fixed power button; the guest chooses its shutdown policy.
+    #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+    SendPowerButton,
     /// Update the balloon size, after microVM start.
     UpdateBalloon(BalloonUpdateConfig),
     /// Update the balloon statistics polling interval, after microVM start.
@@ -545,7 +548,7 @@ impl<'a> PrebootApiController<'a> {
             | HotUnplugDevice(..)
             | SendCtrlAltDel => Err(VmmActionError::OperationNotSupportedPreBoot),
             #[cfg(all(feature = "windows", target_arch = "x86_64"))]
-            UpdateDisplay(_) | UpdateOpticalDrive(_) => {
+            UpdateDisplay(_) | UpdateOpticalDrive(_) | SendPowerButton => {
                 Err(VmmActionError::OperationNotSupportedPreBoot)
             }
         }
@@ -836,6 +839,8 @@ impl RuntimeApiController {
             ),
             Resume => self.resume(),
             SendCtrlAltDel => self.send_ctrl_alt_del(),
+            #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+            SendPowerButton => self.send_power_button(),
             UpdateBalloon(balloon_update) => self
                 .vmm
                 .lock()
@@ -978,6 +983,16 @@ impl RuntimeApiController {
             .lock()
             .expect("Poisoned lock")
             .send_ctrl_alt_del()
+            .map(|()| VmmData::Empty)
+            .map_err(VmmActionError::InternalVmm)
+    }
+
+    #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+    fn send_power_button(&mut self) -> Result<VmmData, VmmActionError> {
+        self.vmm
+            .lock()
+            .expect("Poisoned lock")
+            .send_power_button()
             .map(|()| VmmData::Empty)
             .map_err(VmmActionError::InternalVmm)
     }
@@ -1330,6 +1345,8 @@ mod tests {
             },
         )));
         check_unsupported(preboot_request(VmmAction::SendCtrlAltDel));
+        #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+        check_unsupported(preboot_request(VmmAction::SendPowerButton));
         check_unsupported(preboot_request(VmmAction::UpdateMemoryHotplugSize(
             MemoryHotplugSizeUpdate {
                 requested_size_mib: 0,
