@@ -25,12 +25,12 @@ fn io_error(error: impl std::fmt::Display) -> io::Error {
     io::Error::other(error.to_string())
 }
 
-pub(crate) fn allocate_mappings(
+pub(crate) fn allocate_mappings<const N: usize>(
     allocator: &mut AddressAllocator,
-    sizes: [u64; MAPPINGS],
-) -> io::Result<[u64; MAPPINGS]> {
+    sizes: [u64; N],
+) -> io::Result<[u64; N]> {
     let mut next = allocator.clone();
-    let mut mapped = [0; MAPPINGS];
+    let mut mapped = [0; N];
     for (base, size) in mapped.iter_mut().zip(sizes) {
         *base = next
             .allocate(size, size, AllocPolicy::FirstMatch)
@@ -236,7 +236,7 @@ impl VgaPci {
 }
 
 #[cfg(target_arch = "x86_64")]
-fn pio_port(base: u64, offset: u64, command: u32) -> Option<u16> {
+pub(crate) fn pio_port(base: u64, offset: u64, command: u32) -> Option<u16> {
     if command & 1 == 0 || !matches!(base, 0x3b0 | 0x1ce) {
         return None;
     }

@@ -6,6 +6,8 @@
 use super::DeviceManager;
 #[cfg(target_arch = "x86_64")]
 use super::VirtioDevices;
+#[cfg(target_arch = "x86_64")]
+use super::console_qxl::QxlConsole;
 use super::console_server::ConsoleServer;
 #[cfg(target_arch = "x86_64")]
 use super::console_usb::UsbDevice;
@@ -32,6 +34,8 @@ pub(crate) struct PlatformRegistration<'a> {
     tpm: Option<(SubscriberId, Arc<Mutex<super::tpm::TpmDevice>>)>,
     #[cfg(target_arch = "x86_64")]
     usb: Option<(SubscriberId, Arc<Mutex<UsbDevice>>)>,
+    #[cfg(target_arch = "x86_64")]
+    qxl: Option<(SubscriberId, Arc<Mutex<QxlConsole>>)>,
     #[cfg(any(target_arch = "aarch64", test))]
     input: Option<(SubscriberId, Arc<Mutex<dyn VirtioDevice>>)>,
     #[cfg(target_arch = "x86_64")]
@@ -58,6 +62,8 @@ impl<'a> PlatformRegistration<'a> {
             uefi_vars: None,
             #[cfg(target_arch = "x86_64")]
             usb: None,
+            #[cfg(target_arch = "x86_64")]
+            qxl: None,
             #[cfg(target_arch = "x86_64")]
             acpi_power: None,
             #[cfg(target_arch = "x86_64")]
@@ -98,6 +104,16 @@ impl<'a> PlatformRegistration<'a> {
             let id = self.events.add_subscriber(usb.clone());
             self.usb = Some((id, usb.clone()));
             usb.lock().unwrap().check_registered()?;
+        }
+        Ok(self)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn with_qxl(mut self, qxl: Option<&Arc<Mutex<QxlConsole>>>) -> io::Result<Self> {
+        if let Some(qxl) = qxl {
+            let id = self.events.add_subscriber(qxl.clone());
+            self.qxl = Some((id, qxl.clone()));
+            qxl.lock().unwrap().check_registered()?;
         }
         Ok(self)
     }
@@ -152,6 +168,7 @@ impl<'a> PlatformRegistration<'a> {
         #[cfg(target_arch = "x86_64")]
         {
             self.usb = None;
+            self.qxl = None;
         }
         #[cfg(any(target_arch = "aarch64", test))]
         {
@@ -186,6 +203,11 @@ impl Drop for PlatformRegistration<'_> {
         if let Some((id, usb)) = self.usb.take() {
             self.events.remove_subscriber(id).unwrap();
             usb.lock().unwrap().reset_registration();
+        }
+        #[cfg(target_arch = "x86_64")]
+        if let Some((id, qxl)) = self.qxl.take() {
+            self.events.remove_subscriber(id).unwrap();
+            qxl.lock().unwrap().reset_registration();
         }
         #[cfg(target_arch = "x86_64")]
         if let Some((id, group)) = self.intx.take() {
@@ -243,6 +265,9 @@ impl DeviceManager {
         #[cfg(target_arch = "x86_64")]
         let registration =
             registration.with_usb(self.console.as_ref().map(|console| &console.usb))?;
+        #[cfg(target_arch = "x86_64")]
+        let registration =
+            registration.with_qxl(self.console.as_ref().and_then(|console| console.qxl()))?;
         #[cfg(target_arch = "aarch64")]
         let registration = {
             let input = self.console.as_ref().and_then(|_| {
