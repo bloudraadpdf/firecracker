@@ -83,3 +83,10 @@ def test_validate_filter(seccompiler, bin_test_syscall, monkeypatch, tmp_path, t
                 # if we call it with unallowed args, it should exit 159
                 # 159 = 128 (abnormal termination) + 31 (SIGSYS)
                 assert outcome.returncode == 159
+
+            if syscall == "shutdown":
+                for how in [0, 2]:
+                    denied_args = allowed_args.copy()
+                    denied_args[1] = how
+                    denied_str = " ".join(str(x) for x in denied_args)
+                    assert utils.run_cmd(f"{cmd} {denied_str}").returncode == 159

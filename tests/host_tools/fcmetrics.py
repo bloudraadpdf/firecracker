@@ -298,6 +298,7 @@ def validate_fc_metrics(metrics):
             "killq_resync",
             "tx_flush_fails",
             "tx_write_fails",
+            "tx_shutdown_fails",
             "rx_read_fails",
         ],
         "entropy": [

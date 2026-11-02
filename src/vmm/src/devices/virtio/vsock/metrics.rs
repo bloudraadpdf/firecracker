@@ -92,6 +92,8 @@ pub(super) struct VsockDeviceMetrics {
     pub tx_flush_fails: SharedIncMetric,
     /// How many write fails have been seen.
     pub tx_write_fails: SharedIncMetric,
+    /// How many write-direction shutdown fails have been seen.
+    pub tx_shutdown_fails: SharedIncMetric,
     /// Number of times read() has failed.
     pub rx_read_fails: SharedIncMetric,
 }
@@ -120,6 +122,7 @@ impl VsockDeviceMetrics {
             killq_resync: SharedIncMetric::new(),
             tx_flush_fails: SharedIncMetric::new(),
             tx_write_fails: SharedIncMetric::new(),
+            tx_shutdown_fails: SharedIncMetric::new(),
             rx_read_fails: SharedIncMetric::new(),
         }
     }
