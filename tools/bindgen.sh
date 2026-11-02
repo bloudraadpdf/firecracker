@@ -81,7 +81,7 @@ fc-bindgen \
 
 info "BINDGEN virtio_ring.h"
 fc-bindgen \
-    --allowlist-var "VIRTIO_RING_F_EVENT_IDX" \
+    --allowlist-var "VIRTIO_RING_F_(INDIRECT_DESC|EVENT_IDX)" \
     "$INCLUDE/linux/virtio_ring.h" >src/vmm/src/devices/virtio/generated/virtio_ring.rs
 
 info "BINDGEN virtio_config.h"
