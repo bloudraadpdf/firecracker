@@ -15,7 +15,6 @@ use libc::EAGAIN;
 use vmm_sys_util::eventfd::EventFd;
 
 use super::NET_QUEUE_MAX_SIZE;
-use crate::devices::virtio::ActivateError;
 use crate::devices::virtio::device::{ActiveState, DeviceState, VirtioDevice, VirtioDeviceType};
 use crate::devices::virtio::generated::virtio_config::VIRTIO_F_VERSION_1;
 use crate::devices::virtio::generated::virtio_net::{
@@ -32,6 +31,7 @@ use crate::devices::virtio::net::{
 };
 use crate::devices::virtio::queue::{InvalidAvailIdx, Queue, QueueConfig};
 use crate::devices::virtio::transport::{VirtioInterrupt, VirtioInterruptType};
+use crate::devices::virtio::{ActivateError, PrepareSaveError};
 use crate::devices::{DeviceError, report_net_event_fail};
 use crate::dumbo::pdu::arp::ETH_IPV4_FRAME_LEN;
 use crate::dumbo::pdu::ethernet::{EthernetFrame, PAYLOAD_OFFSET};
@@ -1051,12 +1051,12 @@ impl VirtioDevice for Net {
     }
 
     /// Prepare saving state
-    fn prepare_save(&mut self) {
+    fn prepare_save(&mut self) -> Result<(), PrepareSaveError> {
         // We shouldn't be messing with the queue if the device is not activated.
         // Anyways, if it isn't there's nothing to prepare; we haven't parsed any
         // descriptors yet from it and we can't have a deferred frame.
         if !self.is_activated() {
-            return;
+            return Ok(());
         }
 
         // Give potential deferred RX frame to guest
@@ -1067,6 +1067,7 @@ impl VirtioDevice for Net {
         self.rx_buffer.iovec.clear();
         self.rx_buffer.used_bytes = 0;
         self.rx_buffer.used_descriptors = 0;
+        Ok(())
     }
 }
 

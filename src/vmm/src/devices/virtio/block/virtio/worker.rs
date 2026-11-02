@@ -71,7 +71,7 @@ enum ControlMsg {
 enum ControlResponse {
     DiskUpdated(Result<u64, VirtioBlockError>), // returns nsectors on success
     Reset(BlockResources),
-    Paused,
+    Paused(Result<(), VirtioBlockError>),
     QueueState(QueueState),
     DirtyCommitted,
 }
@@ -295,25 +295,15 @@ impl BlockWorker {
     }
 
     /// Prepare device for being snapshotted.
-    pub(crate) fn prepare_save(&mut self, flush_mode: FlushMode) {
-        // Fsync errors are non-fatal; other drain errors are broken invariants.
+    pub(crate) fn prepare_save(&mut self, flush_mode: FlushMode) -> Result<(), VirtioBlockError> {
         let result = match flush_mode {
             FlushMode::Drain => self.resources.disk.file_engine.drain(false),
             FlushMode::DrainAndFlush => self.resources.disk.file_engine.drain_and_flush(false),
         };
-        match result {
-            Ok(()) => {}
-            Err(BlockIoError::Async(async_io::AsyncIoError::SyncAll(err))) => {
-                error!("Failed to flush block data for snapshot: {:?}", err);
-            }
-            Err(BlockIoError::Sync(err)) => {
-                error!("Failed to flush block data for snapshot: {:?}", err);
-            }
-            Err(err) => panic!("Failed to drain block IO engine for snapshot: {err:?}"),
-        }
         if matches!(&self.resources.disk.file_engine, FileEngine::Async(_)) {
             self.process_async_completion_queue();
         }
+        result.map_err(VirtioBlockError::FileEngine)
     }
 
     /// Update the backing file and return the new sector count.
@@ -416,9 +406,9 @@ impl WorkerHandle {
     }
 
     /// Pause data-path processing after completing pending I/O.
-    pub(crate) fn pause(&self, flush_mode: FlushMode) {
+    pub(crate) fn pause(&self, flush_mode: FlushMode) -> Result<(), VirtioBlockError> {
         match self.request_response(ControlMsg::Pause(flush_mode)) {
-            ControlResponse::Paused => {}
+            ControlResponse::Paused(result) => result,
             response => panic!("Unexpected block worker pause response: {response:?}"),
         }
     }
@@ -586,22 +576,25 @@ impl ThreadedWorker {
     }
 
     fn pause_worker(&mut self, flush_mode: FlushMode, ops: &mut EventOps) {
-        match std::mem::replace(&mut self.state, WorkerState::Parked) {
+        let result = match std::mem::replace(&mut self.state, WorkerState::Parked) {
             WorkerState::Running(mut worker) => {
                 Self::unregister_runtime_events(&worker.resources, ops);
-                worker.prepare_save(flush_mode);
+                let result = worker.prepare_save(flush_mode);
                 self.state = WorkerState::Paused(worker);
+                result
             }
-            WorkerState::Paused(worker) => {
+            WorkerState::Paused(mut worker) => {
+                let result = worker.prepare_save(flush_mode);
                 self.state = WorkerState::Paused(worker);
+                result
             }
             state => {
                 self.state = state;
                 panic!("Pause requested while block worker is not active")
             }
-        }
+        };
 
-        self.reply(ControlResponse::Paused);
+        self.reply(ControlResponse::Paused(result));
     }
 
     fn send_queue_state(&self) {
@@ -785,7 +778,7 @@ mod tests {
 
         assert!(matches!(
             handle.from_worker.recv_timeout(RECV_TIMEOUT_SEC).unwrap(),
-            ControlResponse::Paused
+            ControlResponse::Paused(Ok(()))
         ));
         match handle.from_worker.recv_timeout(RECV_TIMEOUT_SEC).unwrap() {
             ControlResponse::QueueState(queue_state) => {
@@ -832,7 +825,7 @@ mod tests {
             handle.control_evt.write(1).unwrap();
             assert!(matches!(
                 handle.from_worker.recv_timeout(RECV_TIMEOUT_SEC).unwrap(),
-                ControlResponse::Paused
+                ControlResponse::Paused(Ok(()))
             ));
         };
         let queue_state = || {
