@@ -62,6 +62,9 @@ pub struct VmInfo {
     pub huge_pages: HugePageConfig,
     /// Number of PCIe hot-plug ports
     pub pcie_hotplug_ports: u8,
+    /// Page-aligned physical ranges of the boot kernel code and read-only data.
+    #[cfg(target_arch = "x86_64")]
+    pub kernel_prefault_ranges: Vec<std::ops::Range<u64>>,
 }
 
 impl From<&VmResources> for VmInfo {
@@ -73,6 +76,8 @@ impl From<&VmResources> for VmInfo {
             boot_source: value.boot_source.config.clone(),
             huge_pages: value.machine_config.huge_pages,
             pcie_hotplug_ports: value.machine_config.pcie_hotplug_ports,
+            #[cfg(target_arch = "x86_64")]
+            kernel_prefault_ranges: Vec::new(),
         }
     }
 }
@@ -87,6 +92,8 @@ impl From<&Vmm> for VmInfo {
             boot_source: value.boot_source_config.clone(),
             huge_pages: machine_config.huge_pages,
             pcie_hotplug_ports: machine_config.pcie_hotplug_ports,
+            #[cfg(target_arch = "x86_64")]
+            kernel_prefault_ranges: value.kernel_prefault_ranges.clone(),
         }
     }
 }
@@ -170,7 +177,7 @@ pub enum CreateSnapshotError {
 }
 
 /// Snapshot version
-pub const SNAPSHOT_VERSION: Version = Version::new(14, 0, 0);
+pub const SNAPSHOT_VERSION: Version = Version::new(15, 0, 0);
 
 /// Creates a Microvm snapshot.
 pub fn create_snapshot(
@@ -865,6 +872,8 @@ mod tests {
             kvm_state: Default::default(),
             vm_info: VmInfo {
                 mem_size_mib: 1u64,
+                #[cfg(target_arch = "x86_64")]
+                kernel_prefault_ranges: vec![0x1000..0x3000, 0x8000..0x9000],
                 ..Default::default()
             },
             #[cfg(target_arch = "aarch64")]

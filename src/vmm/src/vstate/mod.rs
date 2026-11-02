@@ -11,6 +11,8 @@ pub mod kvm;
 pub mod memory;
 /// Resolved ranges of guest memory.
 pub mod memory_slice;
+#[cfg(target_arch = "x86_64")]
+pub(crate) mod prefault;
 /// Resource manager for devices.
 pub mod resources;
 /// Module with Vcpu implementation.
