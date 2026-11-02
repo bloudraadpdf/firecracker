@@ -4,8 +4,8 @@
 #[cfg(target_arch = "x86_64")]
 use acpi_tables::{Aml, aml};
 
-use crate::devices::acpi::vmclock::{VmClock, VmClockError};
-use crate::devices::acpi::vmgenid::{VmGenId, VmGenIdError};
+use crate::devices::acpi::vmclock::{VmClock, VmClockError, VmClockRestoreNotification};
+use crate::devices::acpi::vmgenid::{VmGenId, VmGenIdError, VmGenIdRestoreNotification};
 use crate::vstate::memory::GuestMemoryMmap;
 use crate::vstate::vm::KvmVm;
 
@@ -81,19 +81,23 @@ impl ACPIDeviceManager {
         Ok(())
     }
 
-    pub fn do_post_restore_vmgenid(&self) -> Result<(), ACPIDeviceError> {
-        self.vmgenid().do_post_restore()?;
+    pub fn do_post_restore_vmgenid(
+        &self,
+        notification: VmGenIdRestoreNotification,
+    ) -> Result<(), ACPIDeviceError> {
+        self.vmgenid().do_post_restore(notification)?;
         Ok(())
     }
 
     pub fn do_post_restore_vmclock(
         &mut self,
         mem: &GuestMemoryMmap,
+        notification: VmClockRestoreNotification,
     ) -> Result<(), ACPIDeviceError> {
         self.vmclock
             .as_mut()
             .expect("Missing VMClock device")
-            .do_post_restore(mem)?;
+            .do_post_restore(mem, notification)?;
         Ok(())
     }
 }

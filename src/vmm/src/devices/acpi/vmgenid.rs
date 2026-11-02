@@ -17,6 +17,16 @@ use crate::vstate::resources::ResourceAllocator;
 /// Bytes of memory we allocate for VMGenID device
 pub const VMGENID_MEM_SIZE: u64 = 16;
 
+/// Selects whether restoring a VMGenID device raises its guest notification.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub enum VmGenIdRestoreNotification {
+    /// Raise the VMGenID interrupt after writing the new generation ID.
+    #[default]
+    Interrupt,
+    /// Write the new generation ID without raising its interrupt.
+    Disabled,
+}
+
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum VmGenIdError {
     /// Could not create EventFd: {0}
@@ -100,11 +110,16 @@ impl VmGenId {
     ///
     /// This will only have effect if we have updated the generation ID in guest memory, i.e. when
     /// re-creating the device after snapshot resumption.
-    pub fn do_post_restore(&self) -> Result<(), VmGenIdError> {
-        self.interrupt_evt
-            .trigger()
-            .map_err(VmGenIdError::NotifyGuest)?;
-        debug!("vmgenid: notifying guest about new generation ID");
+    pub fn do_post_restore(
+        &self,
+        notification: VmGenIdRestoreNotification,
+    ) -> Result<(), VmGenIdError> {
+        if notification == VmGenIdRestoreNotification::Interrupt {
+            self.interrupt_evt
+                .trigger()
+                .map_err(VmGenIdError::NotifyGuest)?;
+            debug!("vmgenid: notifying guest about new generation ID");
+        }
         Ok(())
     }
 
@@ -167,5 +182,48 @@ impl Aml for VmGenId {
             ],
         )
         .append_aml_bytes(v)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use vm_memory::{Bytes, GuestAddress};
+
+    use crate::arch;
+    use crate::devices::acpi::vmgenid::{VMGENID_MEM_SIZE, VmGenId, VmGenIdRestoreNotification};
+    use crate::snapshot::Persist;
+    use crate::test_utils::single_region_mem;
+    use crate::utils::u64_to_usize;
+    use crate::vstate::resources::ResourceAllocator;
+
+    const VMGENID_TEST_GUEST_ADDR: GuestAddress =
+        GuestAddress(arch::SYSTEM_MEM_START + arch::SYSTEM_MEM_SIZE - VMGENID_MEM_SIZE);
+
+    fn default_vmgenid() -> VmGenId {
+        VmGenId::new(&mut ResourceAllocator::new()).unwrap()
+    }
+
+    #[test]
+    fn test_device_restore_without_notification() {
+        let vmgenid = default_vmgenid();
+        let mem = single_region_mem(
+            u64_to_usize(arch::SYSTEM_MEM_START) + u64_to_usize(arch::SYSTEM_MEM_SIZE),
+        );
+        vmgenid.activate(&mem).unwrap();
+
+        let state = vmgenid.save();
+        let restored = VmGenId::restore((), &state).unwrap();
+        restored.activate(&mem).unwrap();
+        restored
+            .do_post_restore(VmGenIdRestoreNotification::Disabled)
+            .unwrap();
+
+        assert_eq!(
+            restored.interrupt_evt.read().unwrap_err().raw_os_error(),
+            Some(libc::EAGAIN)
+        );
+        let guest_data: u128 = mem.read_obj(VMGENID_TEST_GUEST_ADDR).unwrap();
+        assert_eq!(guest_data, restored.gen_id);
+        assert_ne!(guest_data, vmgenid.gen_id);
     }
 }

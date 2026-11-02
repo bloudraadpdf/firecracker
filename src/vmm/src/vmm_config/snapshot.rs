@@ -8,6 +8,9 @@ use std::path::PathBuf;
 /// For crates that depend on `vmm` we export.
 use serde::{Deserialize, Serialize};
 
+use crate::devices::acpi::vmclock::VmClockRestoreNotification;
+use crate::devices::acpi::vmgenid::VmGenIdRestoreNotification;
+
 use super::machine_config::HugePageConfig;
 
 /// The snapshot type options that are available when
@@ -124,6 +127,10 @@ pub struct LoadSnapshotParams {
     pub clock_realtime: bool,
     /// Selects the huge-page configuration to use for the restored microVM.
     pub huge_pages: SnapshotLoadHugePageConfig,
+    /// Selects how VMClock publishes its post-restore generation update.
+    pub vmclock_restore_notification: VmClockRestoreNotification,
+    /// Selects whether VMGenID raises its post-restore guest notification.
+    pub vmgenid_restore_notification: VmGenIdRestoreNotification,
 }
 
 /// Stores the configuration for loading a snapshot that is provided by the user.
@@ -162,6 +169,12 @@ pub struct LoadSnapshotConfig {
     /// Selects the huge-page configuration to use for the restored microVM.
     #[serde(default)]
     pub huge_pages: SnapshotLoadHugePageConfig,
+    /// Selects how VMClock publishes its post-restore generation update.
+    #[serde(default)]
+    pub vmclock_restore_notification: VmClockRestoreNotification,
+    /// Selects whether VMGenID raises its post-restore guest notification.
+    #[serde(default)]
+    pub vmgenid_restore_notification: VmGenIdRestoreNotification,
 }
 
 /// Stores the configuration used for managing snapshot memory.

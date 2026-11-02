@@ -113,6 +113,8 @@ fn parse_put_snapshot_load(body: &Body) -> Result<ParsedRequest, RequestError> {
         vsock_override: snapshot_config.vsock_override,
         clock_realtime: snapshot_config.clock_realtime,
         huge_pages: snapshot_config.huge_pages,
+        vmclock_restore_notification: snapshot_config.vmclock_restore_notification,
+        vmgenid_restore_notification: snapshot_config.vmgenid_restore_notification,
     };
 
     // Construct the `ParsedRequest` object.
@@ -128,6 +130,8 @@ fn parse_put_snapshot_load(body: &Body) -> Result<ParsedRequest, RequestError> {
 
 #[cfg(test)]
 mod tests {
+    use vmm::devices::acpi::vmclock::VmClockRestoreNotification;
+    use vmm::devices::acpi::vmgenid::VmGenIdRestoreNotification;
     use vmm::vmm_config::snapshot::{
         MemBackendConfig, MemBackendType, NetworkOverride, SnapshotLoadHugePageConfig,
     };
@@ -201,7 +205,9 @@ mod tests {
                 "backend_path": "bar",
                 "backend_type": "File"
             },
-            "huge_pages": "2M"
+            "huge_pages": "2M",
+            "vmclock_restore_notification": "Disabled",
+            "vmgenid_restore_notification": "Disabled"
         }"#;
         let expected_config = LoadSnapshotParams {
             snapshot_path: PathBuf::from("foo"),
@@ -215,6 +221,8 @@ mod tests {
             vsock_override: None,
             clock_realtime: false,
             huge_pages: SnapshotLoadHugePageConfig::Hugetlbfs2M,
+            vmclock_restore_notification: VmClockRestoreNotification::Disabled,
+            vmgenid_restore_notification: VmGenIdRestoreNotification::Disabled,
         };
         let mut parsed_request = parse_put_snapshot(&Body::new(body), Some("load")).unwrap();
         assert!(
@@ -248,6 +256,8 @@ mod tests {
             vsock_override: None,
             clock_realtime: false,
             huge_pages: SnapshotLoadHugePageConfig::Snapshot,
+            vmclock_restore_notification: Default::default(),
+            vmgenid_restore_notification: Default::default(),
         };
         let mut parsed_request = parse_put_snapshot(&Body::new(body), Some("load")).unwrap();
         assert!(
@@ -282,6 +292,8 @@ mod tests {
             vsock_override: None,
             clock_realtime: false,
             huge_pages: SnapshotLoadHugePageConfig::Snapshot,
+            vmclock_restore_notification: Default::default(),
+            vmgenid_restore_notification: Default::default(),
         };
         let mut parsed_request = parse_put_snapshot(&Body::new(body), Some("load")).unwrap();
         assert!(
@@ -324,6 +336,8 @@ mod tests {
             vsock_override: None,
             clock_realtime: false,
             huge_pages: SnapshotLoadHugePageConfig::Snapshot,
+            vmclock_restore_notification: Default::default(),
+            vmgenid_restore_notification: Default::default(),
         };
         let mut parsed_request = parse_put_snapshot(&Body::new(body), Some("load")).unwrap();
         assert!(
@@ -354,6 +368,8 @@ mod tests {
             vsock_override: None,
             clock_realtime: false,
             huge_pages: SnapshotLoadHugePageConfig::Snapshot,
+            vmclock_restore_notification: Default::default(),
+            vmgenid_restore_notification: Default::default(),
         };
         let parsed_request = parse_put_snapshot(&Body::new(body), Some("load")).unwrap();
         assert_eq!(

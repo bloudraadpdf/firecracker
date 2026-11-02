@@ -29,6 +29,8 @@ use vmm_sys_util::eventfd::EventFd;
 
 use crate::EventManager;
 use crate::device_manager::acpi::ACPIDeviceError;
+use crate::devices::acpi::vmclock::VmClockRestoreNotification;
+use crate::devices::acpi::vmgenid::VmGenIdRestoreNotification;
 #[cfg(target_arch = "x86_64")]
 use crate::devices::legacy::I8042Device;
 use crate::devices::legacy::SerialDevice;
@@ -781,6 +783,8 @@ pub struct DeviceRestoreArgs<'a> {
     pub vm_resources: &'a mut VmResources,
     pub instance_id: &'a str,
     pub blk_worker_filter: Option<Arc<BpfProgram>>,
+    pub vmgenid_notification: VmGenIdRestoreNotification,
+    pub vmclock_notification: VmClockRestoreNotification,
 }
 
 impl std::fmt::Debug for DeviceRestoreArgs<'_> {
@@ -843,7 +847,14 @@ impl<'a> Persist<'a> for DeviceManager {
                 .map_err(DeviceManagerPersistError::MmioRestore)?;
 
         // Restore ACPI devices
-        let acpi_devices = ACPIDeviceManager::restore(constructor_args.vm, &state.acpi_state)?;
+        let acpi_devices = ACPIDeviceManager::restore(
+            persist::ACPIDeviceRestoreArgs {
+                vm: constructor_args.vm,
+                vmgenid_notification: constructor_args.vmgenid_notification,
+                vmclock_notification: constructor_args.vmclock_notification,
+            },
+            &state.acpi_state,
+        )?;
 
         let virtio_devices = match &state.virtio_state {
             VirtioDevicesState::Pci(pci_state) => {
