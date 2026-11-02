@@ -1,0 +1,478 @@
+# Guest driver safety boundary
+
+The crate builds unsigned miniport and display images. Package
+and native driver qualification are incomplete.
+
+## Windows ABI
+
+`videoport.rs` uses Microsoft's documented VideoPort interfaces. Windows
+`BOOLEAN` is `u8`, `BOOL` is `i32`, `ULONG` is `u32`, and `ULONG_PTR` is `usize`.
+Calls and callbacks use `extern "system"`: stdcall on x86 and the Windows x64
+ABI on x64. The physical address argument uses the 64-bit integer representation
+of `PHYSICAL_ADDRESS`. Unused callback slots remain raw pointers and must be
+null when the miniport does not supply those callbacks.
+
+Compile-time assertions check the structure sizes and key offsets separately
+for x86 and x64. The vendor reference drivers also initialise 84-byte and
+144-byte initialisation records respectively; the x86 callbacks pop their
+arguments. These checks support the declarations but do not prove native
+execution of the Rust replacement.
+
+All VideoPort calls are unsafe. Callers must provide live, correctly sized
+buffers, satisfy the function's documented IRQL, and retain allocations and
+callbacks for as long as Windows can use them. The request packet can alias its
+input and output buffers; consume input before writing output. Do not create
+overlapping Rust references for those buffers.
+
+These are kernel interfaces. Do not substitute user-mode GDI imports, a CRT,
+VC-LTL or YY-Thunks for kernel imports. Raw DLL imports remove SDK import
+libraries from the build; they do not remove the Windows ABI contract.
+
+## Shared rings
+
+`ring.rs` requires a live mapping, consistent cache attributes and one
+serialised guest endpoint for each ring. The command and cursor endpoints own
+their producer fields; the release endpoint owns its consumer fields. The host
+owns the other endpoint. Ring headers use four-byte-aligned volatile access;
+packed payloads use byte access. Fences preserve publication and notification
+ordering.
+
+The constructors check mapping length, alignment and capacity. Operations check
+counter distance. A full or empty result arms a notification before rechecking
+the counters. The caller must perform the indicated host notification. Stop all
+endpoint access before reset or unmap, and create new endpoints after reset.
+
+## Addresses and modes
+
+`slots.rs` computes integer addresses only. It does not dereference them or
+extend a mapping's lifetime. Its results still require a live mapping before
+they can become pointers. A decoded buffer must match both slot and generation
+and fit wholly inside the slot.
+
+`modes.rs` parses an immutable byte snapshot. A caller must not form an ordinary
+Rust slice over device memory that changes during the borrow. Mode requests
+validate the aligned framebuffer size before they change state.
+
+## Miniport resources
+
+`DeviceResources::discover` requires a live VideoPort device extension and
+PASSIVE_LEVEL. The extension must outlive every mapping and event. Stop all
+interrupts, DPCs and display-driver access before resource destruction, which
+also requires PASSIVE_LEVEL. Resource ownership does not itself stop callbacks.
+
+Each successful mapping or event allocation has one owner. Early returns drop
+the owners already constructed, including a successful but short mapping.
+Memory access stays within the requested BAR length even if Windows returns
+a larger mapping. `Mapping::address` returns a raw pointer; it does not permit
+access after unmap. I/O port pointers use wrapping arithmetic because they are
+opaque port addresses, not Rust memory allocations.
+
+`ModePool` owns a stable VideoPort allocation containing an immutable mode-table
+snapshot. Its internal mode-state lifetime is erased to `'static`; that state
+and its borrowed slice must never be exposed or moved out. Public methods
+return values or iterators tied to the owner borrow. Destruction drops state
+before freeing the allocation. Construction errors retain the allocation guard
+until all temporary mode-table borrows have ended. All access and destruction
+require PASSIVE_LEVEL, and the device extension must remain live until then.
+
+Uncommitted resource claims must be destroyed within HwVidFindAdapter.
+`commit_discovery` is called only after every fallible setup operation succeeds,
+immediately before publishing the adapter. The claim guard is the final field
+to drop, so mappings and events are released before a failed claim is returned.
+Configuration data is copied from its raw OS pointer; no shared Rust borrow
+spans calls that can update that record.
+
+## Callback state
+
+The extension publishes its initialised Adapter through a release/acquire
+ready flag. ISR and DPC callbacks borrow the Adapter immutably and access only
+resident mappings and event handles. Paged mode storage sits in UnsafeCell and
+is accessed only under VideoPort's documented request serialisation. Callbacks
+must not retain their Rust references after return.
+
+Display requests may alias their input and output buffers. Dispatch copies all
+required input before constructing an output slice. The buffers must not alias
+the request record or adapter state. Interface records are encoded field by
+field, including explicit padding initialisation.
+
+The packed shared RAM slot and surface fields can be only four-byte aligned.
+Treat their raw u64 pointers as packed data; do not form aligned Rust u64
+references. Slot registration writes individual volatile bytes and publishes
+them before I/O. The shared interrupt fields are aligned u32 values.
+
+The SYS entry wrapper delegates directly to the registered miniport code.
+Panic handling calls KeBugCheckEx with the RPNC convention and source location;
+it cannot unwind through the Windows boundary. Compiler memcpy/memset calls
+resolve to Rust ABI wrappers. Their full ranges must be valid and meet the
+VideoPort memory routines' IRQL/residency requirements. Copy ranges must not
+overlap. Long ranges use ULONG-sized chunks without truncating size_t.
+
+Framework teardown behaviour and native fault paths remain qualification work.
+Linking and checking the PE images do not prove that Windows loads, unloads
+or correctly dispatches the Rust driver.
+
+## Kernel code generation
+
+The x86 build applies LLVM's `noimplicitfloat` attribute to every function.
+This prevents integer operations, copies and initialisation from introducing
+SIMD or floating-point register use in interrupt handlers. It preserves the
+target ABI; disabling SSE2 on Rust's standard x86 MSVC target does not.
+Do not introduce explicit floating-point, vector operations or SIMD intrinsics:
+the attribute does not prohibit them. Inspect the linked image's executable
+sections after compiler or driver changes, including code from `core`.
+
+Windows x64 preserves SSE state for kernel callbacks; its standard target needs
+no such attribute. Neither target enables AVX. These constraints follow
+[Microsoft's kernel floating-point rules](https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/using-floating-point-or-mmx-in-a-wdm-driver)
+and the [LLVM attribute definition](https://llvm.org/docs/LangRef.html#function-attributes).
+
+## Display arena
+
+The arena constructor requires one exclusively managed, live BAR range.
+Allocator metadata occupies free blocks; guest and host payload access must
+never reach those blocks. Allocation tokens are not copyable and retain their
+mapping identity and complete reserved extent, including small tails. Release
+consumes a token, or returns it unchanged for a different arena. Free-list
+splitting and coalescing preserve alignment and bounds.
+
+Raw payload pointers do not extend mapping lifetimes or prove host completion.
+End all host and guest payload access before releasing its token. Stop all
+users and release all tokens before reset or unmap; do not construct another
+arena over memory with live tokens. Calls require external serialisation with
+the display allocation semaphore. There is no implicit token deallocation.
+
+## GDI mode buffer
+
+Mode queries require a live miniport handle in a serialised, passive-level GDI
+callback. The engine owns its zeroed allocation through destruction at
+PASSIVE_LEVEL. Synchronous IOCTLs run before any reads of their output buffers;
+reported byte counts and multiplication bounds are checked before iteration.
+Record reads are unaligned copies of the integer-only miniport ABI.
+
+`DrvGetModes` borrows the caller's output only after the miniport queries finish.
+That output must be writable for its reported capacity and must not alias
+callback-owned state. Its checked extent fits both `ULONG` and `isize` before
+the Rust slice is formed. Iterators cannot outlive their owned mode buffer.
+
+## Display output pool
+
+The pool exclusively owns disjoint main/video arenas. Its private node headers
+are separate from every payload range exposed to guest or host users. A resource
+token owns one counted reference; retaining, attaching and releasing references
+requires the mutable pool borrow. A final release moves all allocation tokens
+off the node before freeing the storage containing it. Constructors initialise
+every header field and payload byte. Tokens from another pool are returned
+without node access or ownership loss.
+
+Output tokens represent unpublished builders only. Publication consumes the
+token; failure removes its temporary pending registration and returns the token.
+The command ring belongs to the same device and slot generation. Payload writes
+must finish before submission, and host ownership lasts until release. A safe
+builder slice borrows both the token and pool, preventing submission or
+cancellation while that slice remains live. Resource pointers remain raw:
+callers must prove exclusive payload access before forming references.
+
+Release-ring publication must establish host completion. Only live pending
+nodes resolve an opaque release ID. Read the completed payload's packed next
+ID with volatile access; validate the next live ID before freeing the current
+output. Remove nodes before moving their owned references and allocation tokens.
+Budget limits retain the next ID without releasing its output. Corrupt chains
+leave unreleased allocations live for device-stop recovery.
+
+`discard_pending` requires proof that the device/host has stopped all reads and
+writes, including delayed completion writes. Neither a timeout nor an invalid
+release ID supplies that proof. It clears only pending outputs; caller-owned
+builders and cache references must also be released before mapping destruction.
+`Pool::is_empty()` covers both output and resource allocations. Dropping tokens
+or the pool never implicitly frees memory potentially in use by the host.
+
+## Surface states
+
+Only `Surface<Prepared>` exposes a safe mutable pixel slice. It owns the sole
+resource reference and has not been submitted. Publication consumes that state,
+so a pixel borrow cannot remain live across submission. Failure cancels the
+temporary command and returns the prepared owner unchanged. `Surface<Active>`
+does not expose a safe mutable slice; its raw pixel pointer needs GDI/hardware
+synchronisation before access.
+
+Both create and destroy commands retain the surface resource through their own
+host completion. Successful destruction drops the active reference; a failed
+publication returns that owner. The device-stop discard path requires the same
+proof as pending-output discard. Allocated surface slots must describe the
+correct live video mapping; encoding validates the complete pixel extent.
+
+The PDev surface table reserves nonzero IDs below the advertised surface count.
+Creation cannot reuse a live ID, and a destroy must be published before that ID
+can be reused. Creation, drawing and destruction must share the same command
+ordering and mapping generation. Mappings remain live through all completions.
+
+## GDI bitmap ownership
+
+A GDI draw area's handle owns its locked `SURFOBJ`. Drop unlocks that object
+before deleting the handle. Failed creation/association/locking retains the
+construction guard until it deletes any successfully allocated bitmap. GDI
+access and destruction occur at PASSIVE_LEVEL in serialised display callbacks.
+
+The secondary-surface constructor borrows the active surface through draw-area
+destruction. The internal raw constructor requires a complete, live, writable
+pixel mapping matching its checked layout. It must not outlive that allocation.
+Neither constructor proves CPU/hardware synchronisation: callers must end
+overlapping host/guest writes before GDI accesses pixel storage. Exposed surface
+objects remain raw pointers and must not be retained after the owner drops.
+
+Device-bitmap construction requires a stable, initialised driver context and
+only registered hooks. The context must support deletion even during failed
+construction. After handoff, GDI owns the bitmap; its deletion callback ends
+the driver's context lifetime. Private helper bitmaps remain driver-owned.
+
+`native_bitmap` keeps each callback context in a stable heap object. The bitmap
+handle is destroyed before that context. Primary bitmaps retain their original
+binding; only secondary bitmaps use `EngModifySurface`. A handed-off handle is
+not deleted again by the Rust owner.
+
+Video-to-RAM migration requires completed host writes and stopped GDI/CPU users.
+It copies the complete checked extent before changing the GDI binding. The old
+video reference remains owned until hardware quiescence permits detach; a failed
+change retains the original bitmap. Detach ends the old mapping dependency.
+Restoration publishes the copied video surface before making GDI opaque again.
+If that change fails, the RAM bitmap remains live and the candidate is destroyed
+on the same FIFO. A failed compensating destroy returns its video owner for
+retry. Forward notification flags on failure as well as success. Never release
+these owners or unmap their arenas merely because a wait timed out.
+
+PDev palettes own their `EngCreatePalette` handles through GDI device teardown.
+Their raw handles in `DEVINFO` do not extend that lifetime. Native record
+encoding writes only named fields, clears padding and preserves short output
+buffers. Field constructors supply valid initial values, including null raw
+pointers and nested arrays; native struct padding is never copied to Windows.
+Thin pointer fields copy their native representation directly, preserving
+provenance through the ABI record. Converting them to integer byte arrays loses
+the provenance needed when a decoded pointer is used. The native record format
+is for supported little-endian Windows targets, not a pointer serialisation API.
+
+## Display mappings
+
+`MappedDevice` runs mode selection, interface query and video-map IOCTLs in the
+serialised hardware-enable path. It must remain live through every dependent
+pool, ring, bitmap and host command. Destroy those users before its video-map
+guard issues the unmap request, while the miniport handle remains live.
+
+The interface validator checks integer geometry without dereferencing reported
+addresses. Primary pixels and I/O pages fit the registered allocation slot;
+control records occupy a separate RAM header. Packed slot-control u64 fields
+can be four-byte aligned and must not become aligned Rust references. ROM and
+event addresses retain the trusted miniport mapping contract.
+
+Framebuffer validation rejects overlap with main RAM, its control header and
+the ROM view, plus reported physical aliasing with main RAM. It does not prove
+the existence or cache attributes of a kernel mapping. Native constructors
+require those properties and their lifetimes from the miniport. Region getters
+return raw pointers and do not extend mapping lifetimes.
+
+## Control completion
+
+Create one `Control` for each physical adapter after reset has stopped earlier
+commands. Keep it shared across PDevs under exclusive adapter access; `&mut`
+covers header writes, event clear, port issue and wait. This also excludes
+miniport power and mode transitions. The mapped device outlives the channel.
+
+Native writes use volatile bytes because shared slot fields can be unaligned.
+The port instruction follows a memory fence. The completion event is the live
+nonpaged synchronization event created by VideoPort, not an EngMapEvent handle.
+The GDI wait runs at PASSIVE_LEVEL. A signalled result proves completion only
+when the monotonic elapsed time is less than the timeout. Invalid counters or
+an elapsed timeout fail the channel, regardless of the Boolean wait result.
+
+A failed wait latches the channel failed without issuing further operations.
+Neither failure nor Drop stops hardware. Keep all host-visible allocations,
+slots and mappings until explicit quiescence; a new channel must not clear a
+late completion from the previous channel. Successful destroy completion only
+releases the affected host use, not unrelated outstanding commands. The unsafe
+issue contract requires live surface IDs, bounded rectangles, the adapter's
+video BAR for slot registration and a live monitor-config allocation.
+
+## Cursor resources
+
+`Bitmap` accepts an immutable byte slice with checked logical row bounds and
+signed stride. Native callers must first obtain a valid CPU-readable bitmap;
+do not borrow device memory or uninitialised GDI padding as an ordinary slice.
+Shape conversion copies only the defined row bytes into a fresh sole-reference
+resource before any output can reference it. Immutable shape APIs then prevent
+guest writes while the host reads the payload.
+
+A shape-set output retains its own resource reference. Releasing a cache entry
+does not end that reference, and failed publication cancels only the output.
+The shared submit helper accepts a fresh builder from its own pool; surface and
+cursor callers supply its first resource. Host release must follow all reads
+of the shape, including its chunk, before that reference is reclaimed. Keep
+pool mappings live through all releases. Nonzero cursor IDs must identify the
+same shape bytes for their entire host-cache lifetime.
+
+## Native hardware session
+
+`Hardware` borrows the mapped device and takes the sole control channel, guest
+ring endpoints and arenas for its generation. Keep one session per physical
+adapter under exclusive access across PDevs, modes and power callbacks. It is
+not a per-PDev lock. The enclosing native device owner must enforce this rule.
+The primary area stays outside both allocators. The layout must match the mode
+selected when the mapped device was created.
+
+Before activation, no old command, token or CPU pixel user may remain. A slot
+generation is read only after its add command completes. A failed activation,
+completion wait or release chain retains mappings and stops session operations.
+No destructor sends hardware commands or treats a timeout as quiescence.
+
+Stop new GDI/CPU submissions and preserve live bitmap contents before shutdown.
+Legacy shutdown resets through the miniport, invalidating old rings/slots;
+later revisions drain completed outputs before video-slot removal. Explicit
+reset can recover unknown outstanding work only when its completed miniport
+operation proves all old reads and delayed release writes have stopped. It
+discards pending output references while cache/surface tokens remain owned.
+Never reuse a stopped session; query a fresh interface for the next generation.
+
+The primary draw area borrows the session exclusively through GDI unlock and
+bitmap deletion. It synchronises prior host work before exposing CPU pixels.
+After CPU writes, drop that area and issue the corresponding update before
+depending on host display contents. Unmap additionally requires all cache,
+surface and builder tokens released and every GDI/CPU user stopped; the
+session's `can_unmap` check covers its state and pool only.
+
+## Opaque PDev handles
+
+`Object<T>` places a callback value at a checked aligned address inside a fresh
+allocation. Pointer adjustment uses `with_addr`, retaining the original heap
+provenance. Neither object moves nor opaque-handle transfer move that value.
+The callback framework owns a transferred handle until its single recovery;
+all borrowed handles and interior users must end before recovery/destruction.
+The destructor drops the full value before releasing its original heap pointer.
+Failed placement leaves both the value and allocation with the caller.
+
+`pdev` validates non-null, bounded, disjoint capability outputs before any
+allocation or output write. It borrows only the known native record extents;
+unknown output tails stay untouched. GDI supplies the complete declared
+DEVMODEW input. Mode selection copies its request before output writes, so
+input/output overlap does not leave an overlapping Rust borrow.
+
+PDev palette ownership lasts through every published DEVINFO handle. The
+instance-count token drops after palette destruction, including failed setup.
+Driver shutdown additionally requires GDI to stop all callbacks and users;
+the count alone does not prove that an in-progress callback has finished.
+
+The shared GDI semaphore serialises instance creation/destruction across PDevs
+and remains live through their final callbacks. Its guard stays on its acquiring
+thread. GDI semaphore acquisition can be recursive: it must not by itself
+justify aliased mutable Rust references during reentrant GDI calls. Mutable
+hardware attachment uses a driver-wide atomic lease inside the GDI semaphore.
+Recursive hardware entry fails before borrowing any attachment. All session,
+mode and power users must enter through this lease; the GDI semaphore alone
+does not justify mutable references.
+
+PDevs form an intrusive list under the driver lock. Nodes are stable heap
+values and are unlinked before destruction. Adapter ownership is checked by
+miniport handle before mapping or changing its mode. A stopped, empty session
+is destroyed before another PDev can take ownership. Its primary GDI bitmap
+can remain live until later surface disable; it has no pixel mapping borrow.
+
+Each session owns its mapped device in a separate stable `Object` allocation.
+Its private Hardware borrow has an erased lifetime and must never escape the
+session. Field order destroys hardware before the mapping. The PDev retains
+the entire session before activation; activation failures cannot drop mappings.
+Shutdown or explicit reset can remove it only after `can_unmap` succeeds and
+the caller has stopped every external GDI/CPU user. Surface disable performs
+no hardware command. PDev destruction refuses an attached surface and keeps
+its ownership/list node; teardown ordering must be resolved before DLL unload.
+
+The display DLL registers native lifecycle, mode-assertion, rendering and
+pointer entry points. Keep the advertised hooks consistent with its DDI table.
+Linking does not qualify native execution; retain separate guest test results.
+
+## Primary raster access
+
+Raster ownership lookup uses retained primary HSURF handles. It never casts a
+foreign DHSURF. Read only the initialised kind and handle fields of input
+SURFOBJs; opaque device surfaces need not expose bitmap pixel fields. Complete
+all lookups before borrowing sessions. Duplicate handles share one locked CPU
+view, preserving same-surface overlap handling and avoiding mutable aliases.
+
+The hardware lease retains each distinct PDev, mapping and primary through its
+CPU view. Synchronise host writes before creating the view. Derive its hardware
+borrow through the same retained raw pointer used after view deletion. No
+closure may retain a surface pointer. Delete every draw area before using its
+hardware again. Update dirty destinations even if GDI returns failure; a failed
+operation can already have changed pixels. Source-only views do not publish a
+destination update. Any failed hardware update retains the existing session.
+
+ROP4 operand selection excludes unused source and mask pointers before surface
+inspection. Null masks remain valid for GDI's implicit brush-mask path. The
+native raster path currently supports standard bitmaps and owned primaries;
+secondary/foreign opaque surfaces are rejected, not reinterpreted. CPU writes
+rely on Firecracker capturing the shared primary framebuffer directly. Final
+callback registration is in `driver/display.rs`; native qualification must
+identify the exact binaries and each tested operation.
+
+Accelerated text and path callbacks enumerate documented GDI raster glyphs and
+cosmetic path records into owned, initialised allocations before publication.
+Brush realisation must finish before the hardware lease: it can re-enter GDI.
+The host retains each captured resource until its release record returns.
+Unsupported cases forward the retained GDI records synchronously through scoped
+CPU bitmap views and publish the destination update even after partial failure.
+No opaque record is retained after its callback. Kernel export checks establish
+import availability only, not operation or callback correctness.
+
+The display does not advertise `GCAPS_ASYNCMOVE`: pointer and raster callbacks
+share the hardware lease. GDI must serialise pointer movement with drawing;
+the driver does not claim concurrent cursor submission while that lease is held.
+
+## Compiler memory operations
+
+The display memory helpers must not call themselves through compiler-generated
+copy or fill intrinsics. Aligned word accesses and byte tails use volatile
+operations for this reason. Copying uses `MaybeUninit` to preserve padding
+without requiring it to contain an initialised integer. Comparison requires
+initialised input bytes. The caller retains both complete ranges; only memmove
+permits overlap. These helpers use integer operations only.
+
+## Retained image cache
+
+The native cache metadata is a GDI allocation, separate from shared image
+payloads. Initialise all typed entries before creating slices; retain the
+allocation and mapping lifetime through every cache operation. Hash buckets,
+free-list links and LRU links are private to the hardware lease. Cache references
+and published-output references release independently through the same pool.
+Clear the cache on stop/reset before testing whether the pool can be unmapped.
+A cache hit must validate pool identity and the current slot generation, then
+compare all defined pixel bytes before reuse. No host command may modify an
+image payload.
+
+## Indexed image and palette ownership
+
+Capture XLATEOBJ vectors before the hardware lease, since GDI can initialise
+its translation table. Retain the complete GDI record while reading its count
+and vector; reject device colour transforms, CMYK and out-of-range counts. Copy
+the entries into owned memory and retain no GDI table pointer after the callback.
+
+An indexed image owns its bitmap and a typed Palette reference. Palette matching
+compares colour values, not only a GDI identity. Validate every used pixel index
+against the palette count. A published drawable retains both resources. Retain
+or attachment failure cancels the entire unpublished drawable. Paired release
+validates both pool owners before changing either reference count. Palette and
+bitmap cache eviction can occur before completion, but final freeing requires
+the host's release of every resource reference.
+
+QUIC uses bounded caller-owned pixel, model, correlation and stream buffers.
+The native compression path allocates these through GDI at PASSIVE_LEVEL and
+initialises each aligned model before it creates typed references. The output
+budget is smaller than the raw image; a full budget or allocation failure uses
+the raw path. One retained display resource owns the compressed descriptor,
+chunk and stream through host release. Host ROM validation precedes the
+volatile compression-setting read.
+
+Secondary metadata stays in its stable PDev across primary detach and mode
+changes. Hardware entry excludes every registry/session borrow and GDI
+re-entry. CPU views drop before the lease; duplicates use one view per native
+handle. Bitmap deletion searches retained context handles without dereferencing
+an untrusted DHSURF. Failed queue operations return their owners; all published
+commands, including compensating destruction, receive notification. Only a
+completed hardware stop/reset permits old video ownership to detach. Registry
+destruction requires all GDI bitmap deletions to have completed. Direct discard
+checks pool ownership before it drops GDI views and then releases arena memory.
