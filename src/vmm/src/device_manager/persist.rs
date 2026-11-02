@@ -783,7 +783,14 @@ mod tests {
         let mut device_manager = default_device_manager();
         let mut cmdline = Cmdline::new(4096).unwrap();
         device_manager
-            .attach_legacy_devices_aarch64(&vm, &mut event_manager, &mut cmdline, None, None)
+            .attach_legacy_devices_aarch64(
+                &vm,
+                &mut event_manager,
+                &mut cmdline,
+                crate::arch::BootProtocol::LinuxBoot,
+                None,
+                None,
+            )
             .unwrap();
 
         // Configure some PL061 registers so we can verify they survive a snapshot round-trip.
@@ -1016,7 +1023,8 @@ mod tests {
   "boot-source": {{
     "kernel_image_path": "",
     "initrd_path": null,
-    "boot_args": null
+    "boot_args": null,
+    "firmware": null
   }},
   "cpu-config": null,
   "logger": null,

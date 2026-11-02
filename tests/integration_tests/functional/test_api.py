@@ -1598,6 +1598,7 @@ def test_get_full_config_after_restoring_snapshot(microvm_factory, uvm_configure
         ),
         "initrd_path": None,
         "boot_args": default_boot_args(uvm_configured.pci_enabled),
+        "firmware": None,
     }
 
     # no ipv4_address or imds_compat specified during PUT /mmds/config so we expect the default
@@ -1645,6 +1646,7 @@ def test_get_full_config(uvm):
         "boot_args": "",
         "kernel_image_path": f"/{test_microvm.kernel_file.name}",
         "initrd_path": None,
+        "firmware": None,
     }
     expected_cfg["drives"] = [
         {

@@ -202,7 +202,7 @@ impl PciDevices {
         self.pci_segment.attach_root_ports(vm)
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", feature = "windows"))]
     pub(crate) fn append_aml_bytes(
         &self,
         dsdt_data: &mut Vec<u8>,
@@ -964,7 +964,8 @@ mod tests {
   "boot-source": {{
     "kernel_image_path": "",
     "initrd_path": null,
-    "boot_args": null
+    "boot_args": null,
+    "firmware": null
   }},
   "cpu-config": null,
   "logger": null,

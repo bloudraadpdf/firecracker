@@ -1,7 +1,6 @@
 // Copyright 2024 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-#[cfg(target_arch = "x86_64")]
 use acpi_tables::{Aml, aml};
 
 use crate::devices::acpi::vmclock::{VmClock, VmClockError, VmClockRestoreNotification};
@@ -102,7 +101,6 @@ impl ACPIDeviceManager {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
 impl Aml for ACPIDeviceManager {
     fn append_aml_bytes(&self, v: &mut Vec<u8>) -> Result<(), aml::AmlError> {
         // AML for [`VmGenId`] device.

@@ -6,6 +6,10 @@
 // found in the THIRD-PARTY file.
 
 //! Implements legacy devices (UART, RTC etc).
+#[cfg(target_arch = "x86_64")]
+pub mod acpi;
+#[cfg(target_arch = "x86_64")]
+pub mod cmos;
 #[cfg(target_arch = "aarch64")]
 pub mod gpio_pl061;
 mod i8042;

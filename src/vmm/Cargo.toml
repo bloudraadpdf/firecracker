@@ -16,6 +16,7 @@ gdb = ["arrayvec", "gdbstub", "gdbstub_arch"]
 fuzzing = []
 
 [dependencies]
+uuid = "1.23.2"
 
 acpi_tables = { path = "../acpi-tables" }
 arrayvec = { version = "0.7.6", optional = true }

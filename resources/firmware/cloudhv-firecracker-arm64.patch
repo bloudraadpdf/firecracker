@@ -1,0 +1,305 @@
+diff --git a/ArmVirtPkg/ArmVirt.dsc.inc b/ArmVirtPkg/ArmVirt.dsc.inc
+index 20319de0c2f..c83ef9cd155 100644
+--- a/ArmVirtPkg/ArmVirt.dsc.inc
++++ b/ArmVirtPkg/ArmVirt.dsc.inc
+@@ -76,8 +76,12 @@ DEFINE FD_SIZE_IN_MB    = 3
+   GptLib|MdeModulePkg/Library/GptLib/GptLib.inf
+ !if $(TARGET) == RELEASE
+   DebugLib|MdePkg/Library/BaseDebugLibNull/BaseDebugLibNull.inf
++!else
++!if $(PLAT_CLOUD_HV) == TRUE
++  DebugLib|MdePkg/Library/BaseDebugLibSerialPort/BaseDebugLibSerialPort.inf
+ !else
+   DebugLib|ArmVirtPkg/Library/DebugLibFdtPL011Uart/DebugLibFdtPL011UartRam.inf
++!endif
+ !endif
+   DebugPrintErrorLevelLib|MdePkg/Library/BaseDebugPrintErrorLevelLib/BaseDebugPrintErrorLevelLib.inf
+
+@@ -163,7 +167,11 @@ DEFINE FD_SIZE_IN_MB    = 3
+   TimeBaseLib|EmbeddedPkg/Library/TimeBaseLib/TimeBaseLib.inf
+   # ARM PL011 UART Driver
+   PL011UartLib|ArmPlatformPkg/Library/PL011UartLib/PL011UartLib.inf
++!if $(PLAT_CLOUD_HV) == TRUE
++  SerialPortLib|MdeModulePkg/Library/BaseSerialPortLib16550/BaseSerialPortLib16550.inf
++!else
+   SerialPortLib|ArmVirtPkg/Library/FdtPL011SerialPortLib/FdtPL011SerialPortLib.inf
++!endif
+   FdtSerialPortAddressLib|OvmfPkg/Library/FdtSerialPortAddressLib/FdtSerialPortAddressLib.inf
+
+   PeCoffExtraActionLib|ArmPkg/Library/DebugPeCoffExtraActionLib/DebugPeCoffExtraActionLib.inf
+@@ -239,13 +247,21 @@ DEFINE FD_SIZE_IN_MB    = 3
+   BaseMemoryLib|MdePkg/Library/BaseMemoryLib/BaseMemoryLib.inf
+
+   DebugAgentLib|ArmPkg/Library/DebugAgentSymbolsBaseLib/DebugAgentSymbolsBaseLib.inf
++!if $(PLAT_CLOUD_HV) == TRUE
++  SerialPortLib|MdeModulePkg/Library/BaseSerialPortLib16550/BaseSerialPortLib16550.inf
++!else
+   SerialPortLib|ArmVirtPkg/Library/FdtPL011SerialPortLib/EarlyFdtPL011SerialPortLib.inf
++!endif
+   HobLib|MdePkg/Library/PeiHobLib/PeiHobLib.inf
+   PeiServicesLib|MdePkg/Library/PeiServicesLib/PeiServicesLib.inf
+   PeiServicesTablePointerLib|ArmPkg/Library/PeiServicesTablePointerLib/PeiServicesTablePointerLib.inf
+   MemoryAllocationLib|MdePkg/Library/PeiMemoryAllocationLib/PeiMemoryAllocationLib.inf
+ !if $(TARGET) != RELEASE
++!if $(PLAT_CLOUD_HV) == TRUE
++  DebugLib|MdePkg/Library/BaseDebugLibSerialPort/BaseDebugLibSerialPort.inf
++!else
+   DebugLib|ArmVirtPkg/Library/DebugLibFdtPL011Uart/DebugLibFdtPL011UartFlash.inf
++!endif
+ !endif
+
+   ArmCcaInitPeiLib|ArmVirtPkg/Library/ArmCcaInitPeiLibNull/ArmCcaInitPeiLibNull.inf
+@@ -263,10 +279,18 @@ DEFINE FD_SIZE_IN_MB    = 3
+   ExtractGuidedSectionLib|MdePkg/Library/PeiExtractGuidedSectionLib/PeiExtractGuidedSectionLib.inf
+
+   PeiServicesTablePointerLib|ArmPkg/Library/PeiServicesTablePointerLib/PeiServicesTablePointerLib.inf
++!if $(PLAT_CLOUD_HV) == TRUE
++  SerialPortLib|MdeModulePkg/Library/BaseSerialPortLib16550/BaseSerialPortLib16550.inf
++!else
+   SerialPortLib|ArmVirtPkg/Library/FdtPL011SerialPortLib/EarlyFdtPL011SerialPortLib.inf
++!endif
+ !if $(TARGET) != RELEASE
++!if $(PLAT_CLOUD_HV) == TRUE
++  DebugLib|MdePkg/Library/BaseDebugLibSerialPort/BaseDebugLibSerialPort.inf
++!else
+   DebugLib|ArmVirtPkg/Library/DebugLibFdtPL011Uart/DebugLibFdtPL011UartFlash.inf
+ !endif
++!endif
+
+ [LibraryClasses.common.PEIM]
+   PcdLib|MdePkg/Library/PeiPcdLib/PeiPcdLib.inf
+@@ -281,10 +305,18 @@ DEFINE FD_SIZE_IN_MB    = 3
+   ExtractGuidedSectionLib|MdePkg/Library/PeiExtractGuidedSectionLib/PeiExtractGuidedSectionLib.inf
+
+   PeiServicesTablePointerLib|ArmPkg/Library/PeiServicesTablePointerLib/PeiServicesTablePointerLib.inf
++!if $(PLAT_CLOUD_HV) == TRUE
++  SerialPortLib|MdeModulePkg/Library/BaseSerialPortLib16550/BaseSerialPortLib16550.inf
++!else
+   SerialPortLib|ArmVirtPkg/Library/FdtPL011SerialPortLib/EarlyFdtPL011SerialPortLib.inf
++!endif
+ !if $(TARGET) != RELEASE
++!if $(PLAT_CLOUD_HV) == TRUE
++  DebugLib|MdePkg/Library/BaseDebugLibSerialPort/BaseDebugLibSerialPort.inf
++!else
+   DebugLib|ArmVirtPkg/Library/DebugLibFdtPL011Uart/DebugLibFdtPL011UartFlash.inf
+ !endif
++!endif
+
+ [LibraryClasses.common.UEFI_DRIVER]
+   # resolve RngLib via RngDxe's EFI_RNG_PROTOCOL for UEFI_DRIVER type drivers such as TlsDxe
+@@ -314,7 +346,11 @@ DEFINE FD_SIZE_IN_MB    = 3
+   MemoryAllocationLib|MdePkg/Library/UefiMemoryAllocationLib/UefiMemoryAllocationLib.inf
+   MapMmioLib|OvmfPkg/Library/MapMmioLib/MapMmioLib.inf
+ !if $(TARGET) != RELEASE
++!if $(PLAT_CLOUD_HV) == TRUE
++  DebugLib|MdePkg/Library/BaseDebugLibSerialPort/BaseDebugLibSerialPort.inf
++!else
+   DebugLib|ArmVirtPkg/Library/DebugLibFdtPL011Uart/DxeRuntimeDebugLibFdtPL011Uart.inf
++!endif
+ !endif
+   VariablePolicyLib|MdeModulePkg/Library/VariablePolicyLib/VariablePolicyLibRuntimeDxe.inf
+
+@@ -691,6 +727,7 @@ DEFINE FD_SIZE_IN_MB    = 3
+   }
+   MdeModulePkg/Bus/Pci/PciBusDxe/PciBusDxe.inf {
+     <LibraryClasses>
++      PciExpressLib|OvmfPkg/Library/BaseCachingPciExpressLib/BaseCachingPciExpressLib.inf
+       NULL|OvmfPkg/Fdt/FdtPciPcdProducerLib/FdtPciPcdProducerLib.inf
+   }
+   OvmfPkg/PciHotPlugInitDxe/PciHotPlugInit.inf
+diff --git a/ArmVirtPkg/ArmVirtCloudHv.dsc b/ArmVirtPkg/ArmVirtCloudHv.dsc
+index 5f260b94173..b68582d10eb 100644
+--- a/ArmVirtPkg/ArmVirtCloudHv.dsc
++++ b/ArmVirtPkg/ArmVirtCloudHv.dsc
+@@ -44,6 +44,8 @@
+ !include ArmVirtPkg/ArmVirt.dsc.inc
+
+ [LibraryClasses.common]
++  PciExpressLib|MdePkg/Library/BasePciExpressLib/BasePciExpressLib.inf
++  PlatformHookLib|MdeModulePkg/Library/BasePlatformHookLibNull/BasePlatformHookLibNull.inf
+   ArmPlatformLib|ArmPlatformPkg/Library/ArmPlatformLibNull/ArmPlatformLibNull.inf
+
+   QemuLoadImageLib|OvmfPkg/Library/GenericQemuLoadImageLib/GenericQemuLoadImageLib.inf
+@@ -83,18 +85,25 @@
+   gEfiMdeModulePkgTokenSpaceGuid.PcdTurnOffUsbLegacySupport|TRUE
+
+ [PcdsFixedAtBuild.common]
+-  gArmPlatformTokenSpaceGuid.PcdCPUCoresStackBase|0x4007c000
++  gEfiMdeModulePkgTokenSpaceGuid.PcdSerialUseMmio|TRUE
++  gEfiMdeModulePkgTokenSpaceGuid.PcdSerialRegisterBase|0x40002000
++  gEfiMdeModulePkgTokenSpaceGuid.PcdSerialRegisterAccessWidth|8
++  gEfiMdeModulePkgTokenSpaceGuid.PcdSerialRegisterStride|1
++  gEfiMdeModulePkgTokenSpaceGuid.PcdSerialClockRate|1843200
++  gEfiMdeModulePkgTokenSpaceGuid.PcdSerialBaudRate|115200
++  gEfiMdeModulePkgTokenSpaceGuid.PcdSerialUseHardwareFlowControl|FALSE
++  gArmPlatformTokenSpaceGuid.PcdCPUCoresStackBase|0x8007c000
+   gEfiMdeModulePkgTokenSpaceGuid.PcdEmuVariableNvStoreReserved|0
+   gEfiMdeModulePkgTokenSpaceGuid.PcdMaxVariableSize|0x2000
+   gEfiMdeModulePkgTokenSpaceGuid.PcdMaxAuthVariableSize|0x2800
+
+   # Rsdp base address in Cloud Hypervisor
+-  gArmVirtTokenSpaceGuid.PcdCloudHvAcpiRsdpBaseAddress|0x40200000
++  gArmVirtTokenSpaceGuid.PcdCloudHvAcpiRsdpBaseAddress|0x801F0000
+
+   # Smbios base address in Cloud Hypervisor. Must match the aarch64 SMBIOS
+   # staging address used by cloud-hypervisor
+   # ABI between cloud-hypervisor and firmware.
+-  gUefiOvmfPkgTokenSpaceGuid.PcdCloudHvSmbiosBaseAddress|0x403F0000
++  gUefiOvmfPkgTokenSpaceGuid.PcdCloudHvSmbiosBaseAddress|0x801E0000
+
+   #
+   # ARM PrimeCell
+@@ -110,10 +119,10 @@
+   gUefiOvmfPkgTokenSpaceGuid.PcdTerminalTypeGuidBuffer|{0x80, 0x6d, 0x91, 0x7d, 0xb1, 0x5b, 0x8c, 0x45, 0xa4, 0x8f, 0xe2, 0x5f, 0xdd, 0x51, 0xef, 0x94}
+
+   # System Memory Base -- fixed at 0x4000_0000
+-  gArmTokenSpaceGuid.PcdSystemMemoryBase|0x40000000
++  gArmTokenSpaceGuid.PcdSystemMemoryBase|0x80000000
+
+   # initial location of the device tree blob passed by Cloud Hypervisor -- base of DRAM
+-  gUefiOvmfPkgTokenSpaceGuid.PcdDeviceTreeInitialBaseAddress|0x40000000
++  gUefiOvmfPkgTokenSpaceGuid.PcdDeviceTreeInitialBaseAddress|0x80000000
+
+   gEfiMdeModulePkgTokenSpaceGuid.PcdBootManagerMenuFile|{ 0x21, 0xaa, 0x2c, 0x46, 0x14, 0x76, 0x03, 0x45, 0x83, 0x6e, 0x8a, 0xb6, 0xf4, 0x66, 0x23, 0x31 }
+
+@@ -215,7 +224,10 @@
+   #
+   # PCI support
+   #
+-  MdeModulePkg/Bus/Pci/PciHostBridgeDxe/PciHostBridgeDxe.inf
++  MdeModulePkg/Bus/Pci/PciHostBridgeDxe/PciHostBridgeDxe.inf {
++    <LibraryClasses>
++      PciExpressLib|OvmfPkg/Library/BaseCachingPciExpressLib/BaseCachingPciExpressLib.inf
++  }
+
+   #
+   # QEMU kernel loader
+diff --git a/ArmVirtPkg/ArmVirtCloudHv.fdf b/ArmVirtPkg/ArmVirtCloudHv.fdf
+index 5f6929d3fb6..3004728b0d8 100644
+--- a/ArmVirtPkg/ArmVirtCloudHv.fdf
++++ b/ArmVirtPkg/ArmVirtCloudHv.fdf
+@@ -27,7 +27,7 @@
+ !endif
+
+ [FD.CLOUDHV_EFI]
+-BaseAddress   = 0x00000000|gArmTokenSpaceGuid.PcdFdBaseAddress  # cloud-hypervisor assigns 0 - 0x8000000 for a BootROM
++BaseAddress   = 0x80200000|gArmTokenSpaceGuid.PcdFdBaseAddress  # cloud-hypervisor assigns 0 - 0x8000000 for a BootROM
+ Size          = $(FD_SIZE)|gArmTokenSpaceGuid.PcdFdSize         # The size in bytes of the FLASH Device
+ ErasePolarity = 1
+
+diff --git a/ArmVirtPkg/Library/ArmVirtPciHostBridgeUtilityLib/ArmVirtPciHostBridgeUtilityLib.c b/ArmVirtPkg/Library/ArmVirtPciHostBridgeUtilityLib/ArmVirtPciHostBridgeUtilityLib.c
+index 55295c1029e..f2bc1889a9c 100644
+--- a/ArmVirtPkg/Library/ArmVirtPciHostBridgeUtilityLib/ArmVirtPciHostBridgeUtilityLib.c
++++ b/ArmVirtPkg/Library/ArmVirtPciHostBridgeUtilityLib/ArmVirtPciHostBridgeUtilityLib.c
+@@ -16,6 +16,7 @@
+ #include <Library/PciHostBridgeLib.h>
+ #include <Library/PciHostBridgeUtilityLib.h>
+ #include <Library/PciLib.h>
++#include <Library/PcdLib.h>
+
+ #pragma pack(1)
+ typedef struct {
+@@ -115,7 +116,7 @@ PciHostBridgeUtilityGetRootBridges (
+
+   mRootBridge.DmaAbove4G            = DmaAbove4G;
+   mRootBridge.NoExtendedConfigSpace = NoExtendedConfigSpace;
+-  mRootBridge.ResourceAssigned      = FALSE;
++  mRootBridge.ResourceAssigned      = PcdGetBool (PcdPciDisableBusEnumeration);
+
+   mRootBridge.AllocationAttributes = AllocationAttributes;
+
+diff --git a/ArmVirtPkg/Library/ArmVirtPciHostBridgeUtilityLib/ArmVirtPciHostBridgeUtilityLib.inf b/ArmVirtPkg/Library/ArmVirtPciHostBridgeUtilityLib/ArmVirtPciHostBridgeUtilityLib.inf
+index 3f6f6193b97..0d477e670cb 100644
+--- a/ArmVirtPkg/Library/ArmVirtPciHostBridgeUtilityLib/ArmVirtPciHostBridgeUtilityLib.inf
++++ b/ArmVirtPkg/Library/ArmVirtPciHostBridgeUtilityLib/ArmVirtPciHostBridgeUtilityLib.inf
+@@ -37,3 +37,7 @@
+   DevicePathLib
+   MemoryAllocationLib
+   PciLib
++  PcdLib
++
++[Pcd]
++  gEfiMdeModulePkgTokenSpaceGuid.PcdPciDisableBusEnumeration ## CONSUMES
+diff --git a/ArmVirtPkg/Library/CloudHvVirtMemInfoLib/CloudHvVirtMemInfoLib.c b/ArmVirtPkg/Library/CloudHvVirtMemInfoLib/CloudHvVirtMemInfoLib.c
+index 9c3672ba824..a5e45e75de4 100644
+--- a/ArmVirtPkg/Library/CloudHvVirtMemInfoLib/CloudHvVirtMemInfoLib.c
++++ b/ArmVirtPkg/Library/CloudHvVirtMemInfoLib/CloudHvVirtMemInfoLib.c
+@@ -148,10 +148,10 @@ CloudHvVirtMemInfoPeiLibConstructor (
+
+   PcdStatus = PcdSet64S (PcdSystemMemorySize, FirMemNodeSize);
+   ASSERT_RETURN_ERROR (PcdStatus);
+-  ASSERT (
+-    (((UINT64)PcdGet64 (PcdFdBaseAddress) +
+-      (UINT64)PcdGet32 (PcdFdSize)) <= FirMemNodeBase) ||
+-    ((UINT64)PcdGet64 (PcdFdBaseAddress) >= (FirMemNodeBase + FirMemNodeSize))
++  BuildMemoryAllocationHob (
++    FixedPcdGet64 (PcdSystemMemoryBase),
++    PcdGet64 (PcdFdBaseAddress) + PcdGet32 (PcdFdSize) - FixedPcdGet64 (PcdSystemMemoryBase),
++    EfiReservedMemoryType
+     );
+
+   return RETURN_SUCCESS;
+diff --git a/ArmVirtPkg/Library/CloudHvVirtMemInfoLib/CloudHvVirtMemInfoLib.h b/ArmVirtPkg/Library/CloudHvVirtMemInfoLib/CloudHvVirtMemInfoLib.h
+index 54eecc34c5d..8f56620888f 100644
+--- a/ArmVirtPkg/Library/CloudHvVirtMemInfoLib/CloudHvVirtMemInfoLib.h
++++ b/ArmVirtPkg/Library/CloudHvVirtMemInfoLib/CloudHvVirtMemInfoLib.h
+@@ -30,10 +30,10 @@ typedef struct {
+ // cover any of the NOR flash banks or PCI resource windows.
+ //
+ #define MACH_VIRT_PERIPH_BASE  0x00400000
+-#define MACH_VIRT_PERIPH_SIZE  0x0FC00000
++#define MACH_VIRT_PERIPH_SIZE  0x7FC00000
+
+ //
+ // The top of the 64M memory region under 4GB reserved for device
+ //
+-#define TOP_32BIT_DEVICE_BASE  0xFC000000
+-#define TOP_32BIT_DEVICE_SIZE  0x04000000
++#define TOP_32BIT_DEVICE_BASE  0x4000000000
++#define TOP_32BIT_DEVICE_SIZE  0x4000000000
+diff --git a/OvmfPkg/Fdt/FdtPciPcdProducerLib/FdtPciPcdProducerLib.c b/OvmfPkg/Fdt/FdtPciPcdProducerLib/FdtPciPcdProducerLib.c
+index a3b09e547fb..1b9476edc92 100644
+--- a/OvmfPkg/Fdt/FdtPciPcdProducerLib/FdtPciPcdProducerLib.c
++++ b/OvmfPkg/Fdt/FdtPciPcdProducerLib/FdtPciPcdProducerLib.c
+@@ -96,6 +96,10 @@ FdtPciPcdProducerLibConstructor (
+   RETURN_STATUS        RetStatus;
+   UINT64               IoTranslation;
+   RETURN_STATUS        PcdStatus;
++  BOOLEAN              ProbeOnly;
++  INT32                Chosen;
++  CONST UINT32         *ProbeOnlyProperty;
++  UINT32               ProbeOnlySize;
+
+   PciExpressBaseAddress = PcdGet64 (PcdPciExpressBaseAddress);
+   if (PciExpressBaseAddress != MAX_UINT64) {
+@@ -116,6 +120,21 @@ FdtPciPcdProducerLibConstructor (
+                   );
+   ASSERT_EFI_ERROR (Status);
+
++  ProbeOnly = FALSE;
++  Status = FdtClient->GetOrInsertChosenNode (FdtClient, &Chosen);
++  if (!EFI_ERROR (Status)) {
++    Status = FdtClient->GetNodeProperty (
++                          FdtClient,
++                          Chosen,
++                          "linux,pci-probe-only",
++                          (CONST VOID **)&ProbeOnlyProperty,
++                          &ProbeOnlySize
++                          );
++    if (!EFI_ERROR (Status) && (ProbeOnlySize == sizeof (UINT32))) {
++      ProbeOnly = SwapBytes32 (ReadUnaligned32 (ProbeOnlyProperty)) != 0;
++    }
++  }
++
+   PciExpressBaseAddress = 0;
+   Status                = FdtClient->FindCompatibleNode (
+                                        FdtClient,
+@@ -135,7 +154,7 @@ FdtPciPcdProducerLibConstructor (
+     if (!EFI_ERROR (Status) && (RegSize == 2 * sizeof (UINT64))) {
+       PciExpressBaseAddress = SwapBytes64 (*Reg);
+
+-      PcdStatus = PcdSetBoolS (PcdPciDisableBusEnumeration, FALSE);
++      PcdStatus = PcdSetBoolS (PcdPciDisableBusEnumeration, ProbeOnly);
+       ASSERT_RETURN_ERROR (PcdStatus);
+
+       IoTranslation = 0;

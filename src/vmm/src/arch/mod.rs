@@ -10,6 +10,9 @@ use vm_memory::GuestAddress;
 use crate::logger::warn;
 use crate::utils::Version;
 
+#[cfg(feature = "windows")]
+pub(crate) mod smbios;
+
 /// Module for aarch64 related functionality.
 #[cfg(target_arch = "aarch64")]
 pub mod aarch64;
@@ -132,6 +135,9 @@ pub enum BootProtocol {
     #[cfg(target_arch = "x86_64")]
     /// PVH boot protocol (x86/HVM direct boot ABI)
     PvhBoot,
+    #[cfg(target_arch = "aarch64")]
+    /// EDK II firmware with a fixed platform memory handoff.
+    FirmwareBoot,
 }
 
 impl fmt::Display for BootProtocol {
@@ -140,6 +146,8 @@ impl fmt::Display for BootProtocol {
             BootProtocol::LinuxBoot => write!(f, "Linux 64-bit boot protocol"),
             #[cfg(target_arch = "x86_64")]
             BootProtocol::PvhBoot => write!(f, "PVH boot protocol"),
+            #[cfg(target_arch = "aarch64")]
+            BootProtocol::FirmwareBoot => write!(f, "Arm firmware boot protocol"),
         }
     }
 }

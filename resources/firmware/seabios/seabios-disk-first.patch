@@ -1,0 +1,14 @@
+diff --git a/src/boot.c b/src/boot.c
+--- a/src/boot.c
++++ b/src/boot.c
+@@ -458,8 +458,8 @@ static int CheckFloppySig = 1;
+ #define DEFAULT_PRIO           9999
+ 
+ static int DefaultFloppyPrio = 101;
+-static int DefaultCDPrio     = 102;
+-static int DefaultHDPrio     = 103;
++static int DefaultCDPrio     = CONFIG_COREBOOT ? 103 : 102;
++static int DefaultHDPrio     = CONFIG_COREBOOT ? 102 : 103;
+ static int DefaultBEVPrio    = 104;
+ 
+ void

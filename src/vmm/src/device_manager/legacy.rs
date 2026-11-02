@@ -11,6 +11,10 @@ use std::sync::{Arc, Mutex};
 use acpi_tables::aml::AmlError;
 use acpi_tables::{Aml, aml};
 
+#[cfg(feature = "windows")]
+use crate::devices::legacy::acpi::{AcpiPower, PORT_COUNT, POWER_PORT, SCI_GSI};
+#[cfg(feature = "windows")]
+use crate::devices::legacy::cmos::{CMOS_PORT, RTC_GSI, Rtc};
 use crate::devices::legacy::{I8042Device, SerialDevice};
 use crate::vstate::bus::BusError;
 use crate::vstate::vm::KvmVm;
@@ -22,16 +26,41 @@ pub enum LegacyDeviceError {
     BusError(BusError),
     /// Failed to create EventFd: {0}
     EventFd(std::io::Error),
+    /// Failed to reserve a legacy interrupt: {0}
+    ResourceAllocator(vm_allocator::Error),
 }
 
-/// The `PortIODeviceManager` is a wrapper that is used for registering legacy devices
-/// on an I/O Bus. It currently manages the uart and i8042 devices.
+/// Registers serial, i8042 and ACPI power/timer devices on the I/O bus.
 #[derive(Debug)]
 pub struct PortIODeviceManager {
     // BusDevice::Serial
     pub stdio_serial: Arc<Mutex<SerialDevice>>,
     // BusDevice::I8042Device
     pub i8042: Arc<Mutex<I8042Device>>,
+    /// Conventional PC power and RTC hardware, when selected.
+    #[cfg(feature = "windows")]
+    pub pc: Option<PcDevices>,
+}
+
+/// Conventional PC fixed power and real-time clock devices.
+#[derive(Debug)]
+#[cfg(feature = "windows")]
+pub struct PcDevices {
+    /// ACPI fixed power registers and PM timer.
+    pub acpi_power: Arc<Mutex<AcpiPower>>,
+    /// PC calendar and interrupt scheduler.
+    pub cmos: Arc<Mutex<Rtc>>,
+}
+
+#[cfg(feature = "windows")]
+impl PcDevices {
+    /// Create devices without mapping or subscribing them.
+    pub fn new(exit_evt: &vmm_sys_util::eventfd::EventFd) -> std::io::Result<Self> {
+        Ok(Self {
+            acpi_power: Arc::new(Mutex::new(AcpiPower::new(exit_evt.try_clone()?)?)),
+            cmos: Arc::new(Mutex::new(Rtc::new()?)),
+        })
+    }
 }
 
 impl PortIODeviceManager {
@@ -51,9 +80,50 @@ impl PortIODeviceManager {
     /// i8042 keyboard data register size.
     const I8042_KDB_DATA_REGISTER_SIZE: u64 = 0x5;
 
+    #[cfg(test)]
+    pub(crate) fn for_tests(pc_enabled: bool) -> Self {
+        use vmm_sys_util::eventfd::EventFd;
+
+        use crate::devices::legacy::serial::{SerialOut, SerialOutInner};
+
+        assert!(!pc_enabled || cfg!(feature = "windows"));
+        Self {
+            stdio_serial: Arc::new(Mutex::new(
+                SerialDevice::new(None, SerialOut::new(SerialOutInner::Sink, None), None).unwrap(),
+            )),
+            i8042: Arc::new(Mutex::new(
+                I8042Device::new(EventFd::new(libc::EFD_NONBLOCK).unwrap()).unwrap(),
+            )),
+            #[cfg(feature = "windows")]
+            pc: pc_enabled
+                .then(|| PcDevices::new(&EventFd::new(libc::EFD_NONBLOCK).unwrap()).unwrap()),
+        }
+    }
+
     /// Register supported legacy devices.
     pub fn register_devices(&mut self, vm: &KvmVm) -> Result<(), LegacyDeviceError> {
         let io_bus = &vm.pio_bus;
+        #[cfg(feature = "windows")]
+        if let Some(pc) = &self.pc {
+            vm.resource_allocator()
+                .gsi_legacy_allocator
+                .allocate_id_at(RTC_GSI)?;
+            io_bus.insert(
+                pc.acpi_power.clone(),
+                POWER_PORT,
+                PORT_COUNT.try_into().unwrap(),
+            )?;
+            let power = pc.acpi_power.lock().expect("Poisoned lock");
+            vm.register_level_irq(&power.sci_evt, &power.resample_evt, SCI_GSI)
+                .map_err(|e| {
+                    LegacyDeviceError::EventFd(std::io::Error::from_raw_os_error(e.errno()))
+                })?;
+            io_bus.insert(pc.cmos.clone(), CMOS_PORT, 2)?;
+            vm.register_irq(&pc.cmos.lock().expect("Poisoned lock").irq_evt, RTC_GSI)
+                .map_err(|e| {
+                    LegacyDeviceError::EventFd(std::io::Error::from_raw_os_error(e.errno()))
+                })?;
+        }
         io_bus.insert(
             self.stdio_serial.clone(),
             Self::SERIAL_PORT_ADDRESS,
@@ -84,10 +154,53 @@ impl PortIODeviceManager {
         Ok(())
     }
 
-    pub(crate) fn append_aml_bytes(bytes: &mut Vec<u8>) -> Result<(), AmlError> {
+    pub(crate) fn append_aml_bytes(
+        &self,
+        bytes: &mut Vec<u8>,
+        scope: crate::acpi::DeviceScope,
+    ) -> Result<(), AmlError> {
+        #[cfg(feature = "windows")]
+        if self.pc.is_some() {
+            aml::Device::new(
+                scope.device_path("PRES")?,
+                vec![
+                    &aml::Name::new("_HID".try_into()?, &aml::EisaName::new("PNP0C02")?)?,
+                    &aml::Name::new("_UID".try_into()?, &"POWER")?,
+                    &aml::Name::new(
+                        "_CRS".try_into()?,
+                        &aml::ResourceTemplate::new(vec![&aml::Io::new(
+                            POWER_PORT.try_into().unwrap(),
+                            POWER_PORT.try_into().unwrap(),
+                            1,
+                            PORT_COUNT.try_into().unwrap(),
+                        )]),
+                    )?,
+                ],
+            )
+            .append_aml_bytes(bytes)?;
+            aml::Device::new(
+                scope.device_path("RTC0")?,
+                vec![
+                    &aml::Name::new("_HID".try_into()?, &aml::EisaName::new("PNP0B00")?)?,
+                    &aml::Name::new(
+                        "_CRS".try_into()?,
+                        &aml::ResourceTemplate::new(vec![
+                            &aml::Io::new(
+                                CMOS_PORT.try_into().unwrap(),
+                                CMOS_PORT.try_into().unwrap(),
+                                1,
+                                2,
+                            ),
+                            &aml::Interrupt::new(true, true, false, false, RTC_GSI),
+                        ]),
+                    )?,
+                ],
+            )
+            .append_aml_bytes(bytes)?;
+        }
         // Setup COM1
         aml::Device::new(
-            "_SB_.COM1".try_into()?,
+            scope.device_path("COM1")?,
             vec![
                 &aml::Name::new("_HID".try_into()?, &aml::EisaName::new("PNP0501")?)?,
                 &aml::Name::new("_UID".try_into()?, &0u8)?,
@@ -109,7 +222,7 @@ impl PortIODeviceManager {
         .append_aml_bytes(bytes)?;
         // Setup i8042
         aml::Device::new(
-            "_SB_.PS2_".try_into()?,
+            scope.device_path("PS2_")?,
             vec![
                 &aml::Name::new("_HID".try_into()?, &aml::EisaName::new("PNP0303")?)?,
                 &aml::Method::new(
@@ -143,35 +256,83 @@ impl PortIODeviceManager {
 }
 
 #[cfg(test)]
-mod tests {
-    use libc::EFD_NONBLOCK;
-    use vm_superio::Serial;
-    use vmm_sys_util::eventfd::EventFd;
-
+#[cfg(not(feature = "windows"))]
+mod default_tests {
     use super::*;
-    use crate::devices::legacy::serial::{SerialOut, SerialOutInner};
-    use crate::devices::legacy::{EventFdTrigger, SerialEventsWrapper};
     use crate::vstate::vm::tests::setup_vm_with_memory;
+
+    #[test]
+    fn reset_and_ctrl_alt_del_remain_available() {
+        let mut vm = setup_vm_with_memory(0x1000);
+        vm.setup_irqchip(true).unwrap();
+        let mut devices = PortIODeviceManager::for_tests(false);
+        devices.i8042 = Arc::new(Mutex::new(
+            I8042Device::new(vm.vcpus_exit_evt().try_clone().unwrap()).unwrap(),
+        ));
+        devices.register_devices(&vm).unwrap();
+        vm.set_gsi_routes().unwrap();
+        let mut keyboard = devices.i8042.lock().unwrap();
+        keyboard.trigger_ctrl_alt_del().unwrap();
+        drop(keyboard);
+        for expected in [
+            0x14, 0x11, 0xe0, 0x71, 0xe0, 0xf0, 0x71, 0xf0, 0x11, 0xf0, 0x14,
+        ] {
+            let mut byte = [0];
+            vm.pio_bus.read(0x60, &mut byte).unwrap();
+            assert_eq!(byte, [expected]);
+        }
+        assert!(vm.pio_bus.write(0x64, &[0xfe]).unwrap().is_none());
+        assert_eq!(vm.vcpus_exit_evt().read().unwrap(), 1);
+        assert!(vm.pio_bus.read(0x70, &mut [0]).is_err());
+        assert!(vm.pio_bus.read(0x600, &mut [0]).is_err());
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "windows")]
+mod tests {
+    use super::*;
+    use crate::vstate::vm::tests::setup_vm_with_memory;
+
+    #[test]
+    fn power_reservation_has_unique_id() {
+        let mut bytes = Vec::new();
+        PortIODeviceManager::for_tests(true)
+            .append_aml_bytes(&mut bytes, crate::acpi::DeviceScope::SystemBus)
+            .unwrap();
+        let end = bytes.windows(4).position(|name| name == b"RTC0").unwrap();
+        let uid = b"\x08_UID\x0dPOWER\0";
+        assert!(bytes[..end].windows(uid.len()).any(|entry| entry == uid));
+    }
 
     #[test]
     fn test_register_legacy_devices() {
         let mut vm = setup_vm_with_memory(0x1000);
         vm.setup_irqchip(true).unwrap();
-        let mut ldm = PortIODeviceManager {
-            stdio_serial: Arc::new(Mutex::new(SerialDevice {
-                serial: Serial::with_events(
-                    EventFdTrigger::new(EventFd::new(EFD_NONBLOCK).unwrap()),
-                    SerialEventsWrapper {
-                        buffer_ready_event_fd: None,
-                    },
-                    SerialOut::new(SerialOutInner::Sink, None),
-                ),
-                input: None,
-            })),
-            i8042: Arc::new(Mutex::new(
-                I8042Device::new(EventFd::new(libc::EFD_NONBLOCK).unwrap()).unwrap(),
-            )),
-        };
+        let mut ldm = PortIODeviceManager::for_tests(true);
         ldm.register_devices(&vm).unwrap();
+        vm.set_gsi_routes().unwrap();
+        ldm.pc
+            .as_ref()
+            .unwrap()
+            .cmos
+            .lock()
+            .unwrap()
+            .irq_evt
+            .write(1)
+            .unwrap();
+        let mut pic = kvm_bindings::kvm_irqchip {
+            chip_id: kvm_bindings::KVM_IRQCHIP_PIC_SLAVE,
+            ..Default::default()
+        };
+        for _ in 0..100 {
+            vm.fd().get_irqchip(&mut pic).unwrap();
+            // SAFETY: KVM returned the slave PIC selected above.
+            if unsafe { pic.chip.pic.irr } & 1 != 0 {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        panic!("RTC IRQ 8 did not reach the slave PIC");
     }
 }

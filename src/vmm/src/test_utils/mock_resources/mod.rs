@@ -42,6 +42,7 @@ pub struct MockBootSourceConfig(BootSourceConfig);
 impl MockBootSourceConfig {
     pub fn new() -> MockBootSourceConfig {
         MockBootSourceConfig(BootSourceConfig {
+            firmware: None,
             kernel_image_path: kernel_image_path(None),
             initrd_path: None,
             boot_args: None,

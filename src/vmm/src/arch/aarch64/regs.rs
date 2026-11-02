@@ -90,6 +90,10 @@ arm64_sys_reg!(ID_AA64ISAR0_EL1, 3, 0, 0, 6, 0);
 arm64_sys_reg!(ID_AA64ISAR1_EL1, 3, 0, 0, 6, 1);
 arm64_sys_reg!(ID_AA64MMFR2_EL1, 3, 0, 0, 7, 2);
 
+// Performance monitor event counter selector.
+#[cfg(test)]
+arm64_sys_reg!(PMSELR_EL0, 3, 3, 9, 12, 5);
+
 // Cache Level ID Register
 // https://developer.arm.com/documentation/ddi0595/2021-12/AArch64-Registers/CLIDR-EL1--Cache-Level-ID-Register
 arm64_sys_reg!(CLIDR_EL1, 3, 1, 0, 0, 1);

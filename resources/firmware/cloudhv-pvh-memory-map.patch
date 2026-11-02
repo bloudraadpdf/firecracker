@@ -1,0 +1,156 @@
+--- a/OvmfPkg/Library/PlatformInitLib/MemDetect.c
++++ b/OvmfPkg/Library/PlatformInitLib/MemDetect.c
+@@ -205,7 +205,18 @@
+ 
+   switch (E820Entry->Type) {
+     case EfiAcpiAddressRangeMemory:
+-      if (End <= PlatformInfoHob->LowMemory) {
++      if (PlatformInfoHob->HostBridgeDevId == CLOUDHV_DEVICE_ID) {
++        // Retain every usable PVH interval, including holes in low memory.
++        if (Base > MAX_UINT64 - EFI_PAGE_MASK) {
++          break;
++        }
++
++        Base = ALIGN_VALUE (Base, (UINT64)EFI_PAGE_SIZE);
++        End &= ~(UINT64)EFI_PAGE_MASK;
++        if (Base < End) {
++          PlatformAddMemoryRangeHob (Base, End);
++        }
++      } else if (End <= PlatformInfoHob->LowMemory) {
+         // nothing, handled by PlatformGetLowMemoryCB()
+       } else {
+         //
+@@ -221,6 +232,15 @@
+ 
+       break;
+     case EfiAcpiAddressRangeReserved:
++      if (PlatformInfoHob->HostBridgeDevId == CLOUDHV_DEVICE_ID) {
++        if (End > MAX_UINT64 - EFI_PAGE_MASK) {
++          CpuDeadLoop ();
++        }
++
++        Base &= ~(UINT64)EFI_PAGE_MASK;
++        End = ALIGN_VALUE (End, (UINT64)EFI_PAGE_SIZE);
++      }
++
+       BuildResourceDescriptorHob (EFI_RESOURCE_MEMORY_RESERVED, 0, Base, End - Base);
+       DEBUG ((DEBUG_INFO, "%a: Reserved [0x%Lx, 0x%Lx)\n", __func__, Base, End));
+       break;
+@@ -312,9 +332,11 @@
+ {
+   UINT32                 *PVHResetVectorData;
+   struct hvm_start_info  *pvh_start_info;
++  UINT32                Index;
++  UINT32                Other;
+ 
+   PVHResetVectorData = (VOID *)(UINTN)PcdGet32 (PcdXenPvhStartOfDayStructPtr);
+-  if (PVHResetVectorData == 0) {
++  if ((PVHResetVectorData == NULL) || (PVHResetVectorData[0] == 0)) {
+     return EFI_NOT_FOUND;
+   }
+ 
+@@ -323,6 +345,44 @@
+   *Entries = (struct hvm_memmap_table_entry *)(UINTN)pvh_start_info->memmap_paddr;
+   *Count   = pvh_start_info->memmap_entries;
+ 
++  // Validate before either size discovery or HOB publication consumes the map.
++  if ((*Count == 0) || (*Count > 128) || (*Entries == NULL) ||
++      (pvh_start_info->memmap_paddr > MAX_UINT64 - *Count * sizeof (**Entries))) {
++    CpuDeadLoop ();
++  }
++
++  for (Index = 0; Index < *Count; Index++) {
++    UINT64  End;
++
++    if (((*Entries)[Index].size == 0) ||
++        ((*Entries)[Index].addr > MAX_UINT64 - (*Entries)[Index].size)) {
++      CpuDeadLoop ();
++    }
++
++    End = (*Entries)[Index].addr + (*Entries)[Index].size;
++    if (((*Entries)[Index].type != XEN_HVM_MEMMAP_TYPE_RAM) &&
++        (End > MAX_UINT64 - EFI_PAGE_MASK)) {
++      CpuDeadLoop ();
++    }
++
++    for (Other = 0; Other < Index; Other++) {
++      // Reserved resource HOBs must remain disjoint after outward page alignment.
++      if (((*Entries)[Index].type != XEN_HVM_MEMMAP_TYPE_RAM) &&
++          ((*Entries)[Other].type != XEN_HVM_MEMMAP_TYPE_RAM) &&
++          (((*Entries)[Index].addr & ~(UINT64)EFI_PAGE_MASK) <
++           ALIGN_VALUE ((*Entries)[Other].addr + (*Entries)[Other].size, (UINT64)EFI_PAGE_SIZE)) &&
++          (((*Entries)[Other].addr & ~(UINT64)EFI_PAGE_MASK) <
++           ALIGN_VALUE (End, (UINT64)EFI_PAGE_SIZE))) {
++        CpuDeadLoop ();
++      }
++
++      if (((*Entries)[Index].addr < (*Entries)[Other].addr + (*Entries)[Other].size) &&
++          ((*Entries)[Other].addr < End)) {
++        CpuDeadLoop ();
++      }
++    }
++  }
++
+   return EFI_SUCCESS;
+ }
+ 
+@@ -348,10 +408,16 @@
+   for (Loop = 0; Loop < MemmapEntriesCount; Loop++) {
+     Entry = Memmap + Loop;
+ 
+-    if (Entry->type == XEN_HVM_MEMMAP_TYPE_RAM) {
++    if ((PlatformInfoHob->HostBridgeDevId == CLOUDHV_DEVICE_ID) ||
++        (Entry->type == XEN_HVM_MEMMAP_TYPE_RAM)) {
+       E820Entry.BaseAddr = Entry->addr;
+       E820Entry.Length   = Entry->size;
+       E820Entry.Type     = Entry->type;
++      if ((PlatformInfoHob->HostBridgeDevId == CLOUDHV_DEVICE_ID) &&
++          (Entry->type != XEN_HVM_MEMMAP_TYPE_RAM)) {
++        E820Entry.Type = EfiAcpiAddressRangeReserved;
++      }
++
+       Callback (&E820Entry, PlatformInfoHob);
+     }
+   }
+@@ -437,7 +503,9 @@
+   HighestAddress = 0;
+ 
+   Status = GetPvhMemmapEntries (&Memmap, &MemmapEntriesCount);
+-  ASSERT_EFI_ERROR (Status);
++  if (EFI_ERROR (Status)) {
++    CpuDeadLoop ();
++  }
+ 
+   for (Loop = 0; Loop < MemmapEntriesCount; Loop++) {
+     Entry    = Memmap + Loop;
+@@ -1282,7 +1350,9 @@
+   // allocation HOBs, and to honor preexistent memory allocation HOBs when
+   // looking for an area to borrow.
+   //
+-  QemuInitializeRamBelow1gb (PlatformInfoHob);
++  if (PlatformInfoHob->HostBridgeDevId != CLOUDHV_DEVICE_ID) {
++    QemuInitializeRamBelow1gb (PlatformInfoHob);
++  }
+ 
+   if (PlatformInfoHob->HostBridgeDevId == CLOUDHV_DEVICE_ID) {
+     BuildMemoryAllocationHob (0, EFI_PAGE_SIZE, EfiReservedMemoryType);
+@@ -1305,7 +1375,7 @@
+     // Create gEfiSmmSmramMemoryGuid HOB
+     //
+     CreateSmmSmramMemoryHob (TsegBase, TsegSize);
+-  } else {
++  } else if (PlatformInfoHob->HostBridgeDevId != CLOUDHV_DEVICE_ID) {
+     PlatformAddMemoryRangeHob (BASE_1MB, PlatformInfoHob->LowMemory);
+   }
+ 
+@@ -1317,6 +1387,10 @@
+     //
+     Status = PlatformScanE820 (PlatformAddHobCB, PlatformInfoHob);
+     if (EFI_ERROR (Status)) {
++      if (PlatformInfoHob->HostBridgeDevId == CLOUDHV_DEVICE_ID) {
++        CpuDeadLoop ();
++      }
++
+       UpperMemorySize = PlatformGetSystemMemorySizeAbove4gb ();
+       if (UpperMemorySize != 0) {
+         PlatformAddMemoryBaseSizeHob (BASE_4GB, UpperMemorySize);

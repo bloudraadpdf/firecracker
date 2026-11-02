@@ -269,6 +269,13 @@ mod tests {
         use crate::snapshot::Persist;
 
         #[test]
+        #[cfg(target_arch = "x86_64")]
+        fn rtc_irq_is_available_without_pc_timer_device() {
+            let mut allocator = ResourceAllocator::new();
+            allocator.gsi_legacy_allocator.allocate_id_at(8).unwrap();
+        }
+
+        #[test]
         fn test_allocate_irq() {
             let mut allocator = ResourceAllocator::new();
             // asking for 0 IRQs should return us an empty vector

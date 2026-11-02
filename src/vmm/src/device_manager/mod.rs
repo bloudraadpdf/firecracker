@@ -13,6 +13,8 @@ use acpi::ACPIDeviceManager;
 #[cfg(target_arch = "x86_64")]
 use acpi_tables::Aml;
 use event_manager::{MutEventSubscriber, SubscriberOps};
+#[cfg(all(target_arch = "x86_64", feature = "windows"))]
+use legacy::PcDevices;
 #[cfg(target_arch = "x86_64")]
 use legacy::{LegacyDeviceError, PortIODeviceManager};
 use linux_loader::loader::Cmdline;
@@ -75,10 +77,14 @@ pub mod mmio;
 pub mod pci_mngr;
 /// Device managers (de)serialization support.
 pub mod persist;
+#[cfg(all(target_arch = "x86_64", feature = "windows"))]
+mod platform;
 
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 /// Error while creating a new [`DeviceManager`]
 pub enum DeviceManagerCreateError {
+    /// Unsupported build configuration: {0}
+    WindowsFeature(#[from] crate::vmm_config::WindowsFeatureDisabled),
     /// Error with EventFd: {0}
     EventFd(#[from] std::io::Error),
     #[cfg(target_arch = "x86_64")]
@@ -211,7 +217,11 @@ impl DeviceManager {
         serial_output: Option<&crate::devices::legacy::serial::SerialOutput>,
         serial_state: Option<&serial::SerialState>,
         serial_rate_limiter: Option<TokenBucket>,
+        pc_enabled: bool,
     ) -> Result<PortIODeviceManager, DeviceManagerCreateError> {
+        if pc_enabled {
+            crate::vmm_config::require_windows_support()?;
+        }
         // Create serial device
         let serial = Self::setup_serial_device(
             event_manager,
@@ -229,6 +239,11 @@ impl DeviceManager {
         let mut legacy_devices = PortIODeviceManager {
             stdio_serial: serial,
             i8042,
+            #[cfg(feature = "windows")]
+            pc: pc_enabled
+                .then(|| PcDevices::new(vcpus_exit_evt))
+                .transpose()
+                .map_err(DeviceManagerCreateError::EventFd)?,
         };
         legacy_devices.register_devices(vm)?;
         Ok(legacy_devices)
@@ -245,6 +260,7 @@ impl DeviceManager {
         pci_enabled: bool,
         pcie_hotplug_ports: u8,
         blk_worker_filter: Option<Arc<BpfProgram>>,
+        pc_enabled: bool,
     ) -> Result<Self, DeviceManagerCreateError> {
         #[cfg(target_arch = "x86_64")]
         let legacy_devices = Self::create_legacy_devices(
@@ -254,6 +270,7 @@ impl DeviceManager {
             serial_output,
             None,
             serial_rate_limiter,
+            pc_enabled,
         )?;
 
         Ok(DeviceManager {
@@ -372,10 +389,11 @@ impl DeviceManager {
         vm: &KvmVm,
         event_manager: &mut EventManager,
         cmdline: &mut Cmdline,
+        protocol: crate::arch::BootProtocol,
         serial_out_path: Option<&crate::devices::legacy::serial::SerialOutput>,
         serial_rate_limiter: Option<TokenBucket>,
     ) -> Result<(), AttachDeviceError> {
-        // Serial device setup.
+        // Firmware exposes this UART through SPCR, independently of Linux boot arguments.
         let cmdline_contains_console = cmdline
             .as_cstring()
             .map_err(|_| AttachDeviceError::Cmdline)?
@@ -383,7 +401,7 @@ impl DeviceManager {
             .map_err(|_| AttachDeviceError::Cmdline)?
             .contains("console=");
 
-        if cmdline_contains_console {
+        if cmdline_contains_console || protocol == crate::arch::BootProtocol::FirmwareBoot {
             let serial = Self::setup_serial_device(
                 event_manager,
                 serial_out_path,
@@ -392,8 +410,10 @@ impl DeviceManager {
             )?;
             self.mmio_platform_devices
                 .register_mmio_serial(vm, serial, None)?;
-            self.mmio_platform_devices
-                .add_mmio_serial_to_cmdline(cmdline)?;
+            if protocol == crate::arch::BootProtocol::LinuxBoot {
+                self.mmio_platform_devices
+                    .add_mmio_serial_to_cmdline(cmdline)?;
+            }
         }
 
         let rtc = Arc::new(Mutex::new(RTCDevice::new()));
@@ -723,6 +743,24 @@ pub struct DevicesState {
     pub acpi_state: persist::ACPIDeviceManagerState,
     /// Serial device state
     pub serial_state: Option<persist::SerialState>,
+    /// Firmware RTC registers and wall-clock adjustment.
+    #[cfg(target_arch = "x86_64")]
+    pub cmos_state: Option<crate::devices::legacy::cmos::Cmos>,
+    /// Conventional ACPI timer and PM1 registers.
+    #[cfg(target_arch = "x86_64")]
+    pub power_state: Option<crate::devices::legacy::acpi::AcpiPowerState>,
+}
+
+impl DevicesState {
+    pub(crate) fn validate_windows_support(
+        &self,
+    ) -> Result<(), crate::vmm_config::WindowsFeatureDisabled> {
+        #[cfg(target_arch = "x86_64")]
+        if self.cmos_state.is_some() || self.power_state.is_some() {
+            crate::vmm_config::require_windows_support()?;
+        }
+        Ok(())
+    }
 }
 
 /// Errors for (de)serialization of the devices.
@@ -769,6 +807,11 @@ pub enum DevicePersistError {
 /// Errors for (de)serialization of the device manager.
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum DeviceManagerPersistError {
+    /// Unsupported build configuration: {0}
+    WindowsFeature(#[from] crate::vmm_config::WindowsFeatureDisabled),
+    /// PC timer snapshot must contain both RTC and ACPI power state.
+    #[cfg(target_arch = "x86_64")]
+    IncompletePcState,
     /// Error restoring MMIO devices: {0}
     MmioRestore(DevicePersistError),
     /// Error restoring ACPI devices: {0}
@@ -804,6 +847,26 @@ impl std::fmt::Debug for DeviceRestoreArgs<'_> {
     }
 }
 
+impl DeviceManager {
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) fn has_pc_devices(&self) -> bool {
+        #[cfg(feature = "windows")]
+        {
+            self.pc_devices().is_some()
+        }
+        #[cfg(not(feature = "windows"))]
+        {
+            false
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[cfg(feature = "windows")]
+    pub(crate) fn pc_devices(&self) -> Option<&PcDevices> {
+        self.legacy_devices.as_ref()?.pc.as_ref()
+    }
+}
+
 impl<'a> Persist<'a> for DeviceManager {
     type State = DevicesState;
     type ConstructorArgs = DeviceRestoreArgs<'a>;
@@ -816,6 +879,18 @@ impl<'a> Persist<'a> for DeviceManager {
         };
 
         DevicesState {
+            #[cfg(all(target_arch = "x86_64", feature = "windows"))]
+            cmos_state: self
+                .pc_devices()
+                .map(|pc| pc.cmos.lock().expect("Poisoned lock").save()),
+            #[cfg(all(target_arch = "x86_64", not(feature = "windows")))]
+            cmos_state: None,
+            #[cfg(all(target_arch = "x86_64", feature = "windows"))]
+            power_state: self
+                .pc_devices()
+                .map(|pc| pc.acpi_power.lock().expect("Poisoned lock").save()),
+            #[cfg(all(target_arch = "x86_64", not(feature = "windows")))]
+            power_state: None,
             virtio_state,
             mmio_platform_state: self.mmio_platform_devices.save(),
             acpi_state: self.acpi_devices.save(),
@@ -827,6 +902,13 @@ impl<'a> Persist<'a> for DeviceManager {
         constructor_args: Self::ConstructorArgs,
         state: &Self::State,
     ) -> Result<Self, Self::Error> {
+        state.validate_windows_support()?;
+        #[cfg(target_arch = "x86_64")]
+        let pc_enabled = match (&state.cmos_state, &state.power_state) {
+            (Some(_), Some(_)) => true,
+            (None, None) => false,
+            _ => return Err(DeviceManagerPersistError::IncompletePcState),
+        };
         // Setup legacy devices in case of x86
         #[cfg(target_arch = "x86_64")]
         let serial_state: Option<vm_superio::serial::SerialState> =
@@ -839,7 +921,35 @@ impl<'a> Persist<'a> for DeviceManager {
             constructor_args.vm_resources.serial_output.as_ref(),
             serial_state.as_ref(),
             constructor_args.vm_resources.serial_rate_limiter(),
+            pc_enabled,
         )?;
+
+        #[cfg(target_arch = "x86_64")]
+        #[cfg(feature = "windows")]
+        if let Some(cmos) = &state.cmos_state {
+            legacy_devices
+                .pc
+                .as_ref()
+                .unwrap()
+                .cmos
+                .lock()
+                .expect("Poisoned lock")
+                .restore(cmos);
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        #[cfg(feature = "windows")]
+        if let Some(power) = &state.power_state {
+            legacy_devices
+                .pc
+                .as_ref()
+                .unwrap()
+                .acpi_power
+                .lock()
+                .expect("Poisoned lock")
+                .restore(power)
+                .map_err(DeviceManagerCreateError::EventFd)?;
+        }
 
         // Restore MMIO platform devices
         let platform_ctor_args = MMIOPlatformDevicesConstructorArgs {
@@ -932,14 +1042,7 @@ pub(crate) mod tests {
         let virtio_devices = VirtioDevices::Mmio(MMIOVirtioDevices::new());
 
         #[cfg(target_arch = "x86_64")]
-        let legacy_devices = PortIODeviceManager {
-            stdio_serial: Arc::new(Mutex::new(
-                SerialDevice::new(None, SerialOut::new(SerialOutInner::Sink, None), None).unwrap(),
-            )),
-            i8042: Arc::new(Mutex::new(
-                I8042Device::new(EventFd::new(libc::EFD_NONBLOCK).unwrap()).unwrap(),
-            )),
-        };
+        let legacy_devices = PortIODeviceManager::for_tests(false);
 
         DeviceManager {
             mmio_platform_devices,
@@ -949,6 +1052,141 @@ pub(crate) mod tests {
             virtio_devices,
             blk_worker_filter: None,
         }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[cfg(feature = "windows")]
+    pub(crate) fn default_device_manager_with_pc() -> DeviceManager {
+        let mut manager = default_device_manager();
+        let exit = EventFd::new(libc::EFD_NONBLOCK).unwrap();
+        manager.legacy_devices.as_mut().unwrap().pc = Some(PcDevices::new(&exit).unwrap());
+        manager
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    #[cfg(feature = "windows")]
+    fn pc_timer_restore_follows_saved_devices() {
+        for present in [false, true] {
+            let mut source =
+                crate::vstate::vm::tests::setup_vm_with_memory(crate::utils::mib_to_bytes(128));
+            source.setup_irqchip(true).unwrap();
+            let source = Arc::new(source);
+            let mut events = EventManager::new().unwrap();
+            let mut manager = DeviceManager::new(
+                &mut events,
+                source.vcpus_exit_evt(),
+                &source,
+                None,
+                None,
+                false,
+                0,
+                None,
+                present,
+            )
+            .unwrap();
+            manager.attach_vmgenid_device(&source).unwrap();
+            manager.attach_vmclock_device(&source).unwrap();
+            let mut state = manager.save();
+            let allocation = source.resource_allocator().save();
+            drop(manager);
+            drop(source);
+            drop(events);
+
+            let mut target =
+                crate::vstate::vm::tests::setup_vm_with_memory(crate::utils::mib_to_bytes(128));
+            target.setup_irqchip(true).unwrap();
+            let target = Arc::new(target);
+            *target.resource_allocator() = ResourceAllocator::restore((), &allocation).unwrap();
+            let mut events = EventManager::new().unwrap();
+            let mut resources = VmResources::default();
+            // Deliberately disagree with saved topology, without opening a boot image.
+            resources.boot_source.config.firmware =
+                (!present).then_some(crate::vmm_config::boot_source::FirmwareConfig::SeaBios);
+            let mut restore = |state: &DevicesState| {
+                DeviceManager::restore(
+                    DeviceRestoreArgs {
+                        mem: target.guest_memory(),
+                        vm: &target,
+                        event_manager: &mut events,
+                        vcpus_exit_evt: target.vcpus_exit_evt(),
+                        vm_resources: &mut resources,
+                        instance_id: "pc-restore",
+                        blk_worker_filter: None,
+                        vmgenid_notification: Default::default(),
+                        vmclock_notification: Default::default(),
+                    },
+                    state,
+                )
+            };
+            if present {
+                let cmos = state.cmos_state.take();
+                assert!(matches!(
+                    restore(&state),
+                    Err(DeviceManagerPersistError::IncompletePcState)
+                ));
+                state.cmos_state = cmos;
+                let power = state.power_state.take();
+                assert!(matches!(
+                    restore(&state),
+                    Err(DeviceManagerPersistError::IncompletePcState)
+                ));
+                state.power_state = power;
+                assert!(
+                    !target
+                        .resource_allocator()
+                        .gsi_legacy_allocator
+                        .is_allocated(8)
+                );
+            }
+            let restored = restore(&state).unwrap();
+            assert_eq!(restored.pc_devices().is_some(), present);
+            assert_eq!(restored.save().power_state.is_some(), present);
+            assert_eq!(restored.save().cmos_state.is_some(), present);
+            assert_eq!(
+                target
+                    .resource_allocator()
+                    .gsi_legacy_allocator
+                    .is_allocated(8),
+                present
+            );
+            assert_eq!(target.pio_bus.read(0x70, &mut [0]).is_ok(), present);
+            assert_eq!(target.pio_bus.read(0x600, &mut [0]).is_ok(), present);
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[cfg(feature = "windows")]
+    pub(crate) fn assert_legacy_registration_failure(
+        manager: DeviceManager,
+        conflict: event_manager::Events,
+        message: &str,
+    ) {
+        use crate::devices::legacy::cmos::Rtc;
+
+        let mut events = EventManager::new().unwrap();
+        let legacy = manager.pc_devices().unwrap();
+        let power = Arc::downgrade(&legacy.acpi_power);
+        let rtc = Arc::downgrade(&legacy.cmos);
+        let owner = events.add_subscriber(Arc::new(Mutex::new(Rtc::new().unwrap())));
+        events.event_ops(owner).unwrap().add(conflict).unwrap();
+        let error = manager
+            .register_platform_devices(&mut events)
+            .map(|_| ())
+            .unwrap_err();
+        assert!(error.to_string().contains(message));
+        legacy
+            .acpi_power
+            .lock()
+            .unwrap()
+            .check_registered()
+            .unwrap_err();
+        legacy.cmos.lock().unwrap().check_registered().unwrap_err();
+        events.event_ops(owner).unwrap().remove(conflict).unwrap();
+        drop(manager);
+        assert!(power.upgrade().is_none());
+        assert!(rtc.upgrade().is_none());
+        events.remove_subscriber(owner).unwrap();
     }
 
     pub(crate) fn default_device_manager_with_pci(
@@ -986,73 +1224,53 @@ pub(crate) mod tests {
     #[cfg(target_arch = "aarch64")]
     #[test]
     fn test_attach_legacy_serial() {
-        let mut vmm = default_vmm();
-        assert!(vmm.device_manager.mmio_platform_devices.rtc.is_none());
-        assert!(vmm.device_manager.mmio_platform_devices.serial.is_none());
-        assert!(
-            vmm.device_manager
-                .mmio_platform_devices
-                .gpio_pl061
-                .is_none()
-        );
+        use crate::arch::BootProtocol::{FirmwareBoot, LinuxBoot};
 
-        let mut cmdline = Cmdline::new(4096).unwrap();
-        let mut event_manager = EventManager::new().unwrap();
-        vmm.device_manager
-            .attach_legacy_devices_aarch64(
-                vmm.vm.as_kvm().unwrap(),
-                &mut event_manager,
-                &mut cmdline,
-                None,
-                None,
-            )
-            .unwrap();
-        assert!(vmm.device_manager.mmio_platform_devices.rtc.is_some());
-        assert!(vmm.device_manager.mmio_platform_devices.serial.is_none());
-        assert!(
+        for (protocol, arguments, serial) in [
+            (LinuxBoot, "", false),
+            (
+                LinuxBoot,
+                crate::vmm_config::boot_source::DEFAULT_KERNEL_CMDLINE,
+                false,
+            ),
+            (LinuxBoot, "console=/dev/blah", true),
+            (FirmwareBoot, "", true),
+            (
+                FirmwareBoot,
+                crate::vmm_config::boot_source::DEFAULT_KERNEL_CMDLINE,
+                true,
+            ),
+            (FirmwareBoot, "console=/dev/blah", true),
+        ] {
+            let mut vmm = default_vmm();
+            assert!(vmm.device_manager.mmio_platform_devices.rtc.is_none());
+            assert!(vmm.device_manager.mmio_platform_devices.serial.is_none());
+            let mut cmdline = crate::vmm_config::boot_source::build_cmdline(arguments).unwrap();
+            let mut event_manager = EventManager::new().unwrap();
             vmm.device_manager
-                .mmio_platform_devices
-                .gpio_pl061
-                .is_some()
-        );
-
-        let mut vmm = default_vmm();
-        cmdline.insert("console", "/dev/blah").unwrap();
-        vmm.device_manager
-            .attach_legacy_devices_aarch64(
-                vmm.vm.as_kvm().unwrap(),
-                &mut event_manager,
-                &mut cmdline,
-                None,
-                None,
-            )
-            .unwrap();
-        assert!(vmm.device_manager.mmio_platform_devices.rtc.is_some());
-        assert!(vmm.device_manager.mmio_platform_devices.serial.is_some());
-        assert!(
-            vmm.device_manager
-                .mmio_platform_devices
-                .gpio_pl061
-                .is_some()
-        );
-
-        assert!(
-            cmdline
-                .as_cstring()
-                .unwrap()
-                .into_string()
-                .unwrap()
-                .contains(&format!(
+                .attach_legacy_devices_aarch64(
+                    vmm.vm.as_kvm().unwrap(),
+                    &mut event_manager,
+                    &mut cmdline,
+                    protocol,
+                    None,
+                    None,
+                )
+                .unwrap();
+            let devices = &vmm.device_manager.mmio_platform_devices;
+            assert!(devices.rtc.is_some());
+            assert!(devices.gpio_pl061.is_some());
+            assert_eq!(devices.serial.is_some(), serial);
+            let command_line = cmdline.as_cstring().unwrap().into_string().unwrap();
+            if protocol == LinuxBoot && serial {
+                assert!(command_line.contains(&format!(
                     "earlycon=uart,mmio,0x{:08x}",
-                    vmm.device_manager
-                        .mmio_platform_devices
-                        .serial
-                        .as_ref()
-                        .unwrap()
-                        .resources
-                        .addr
-                ))
-        );
+                    devices.serial.as_ref().unwrap().resources.addr
+                )));
+            } else {
+                assert_eq!(command_line, arguments);
+            }
+        }
     }
 
     pub(crate) fn make_hotplug_block_cfg(
