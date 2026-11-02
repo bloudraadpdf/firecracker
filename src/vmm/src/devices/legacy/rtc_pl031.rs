@@ -91,17 +91,21 @@ impl std::ops::DerefMut for RTCDevice {
 // Implements Bus functions for AMBA PL031 RTC device
 impl RTCDevice {
     pub fn bus_read(&mut self, offset: u64, data: &mut [u8]) {
-        if let (Ok(offset), 4) = (u16::try_from(offset), data.len()) {
-            // read() function from RTC implementation expects a slice of
-            // len 4, and we just validated that this is the data length
-            self.read(offset, data.try_into().unwrap())
-        } else {
-            warn!(
-                "Found invalid data offset/length while trying to read from the RTC: {}, {}",
-                offset,
-                data.len()
-            );
-            METRICS.error_count.inc();
+        match (u16::try_from(offset), data.len()) {
+            (Ok(offset), 4) => self.read(offset, data.try_into().unwrap()),
+            (Ok(offset @ 0xfe0..=0xffc), 1) if offset.is_multiple_of(4) => {
+                let mut word = [0; 4];
+                self.read(offset, &mut word);
+                data[0] = word[0];
+            }
+            _ => {
+                warn!(
+                    "Found invalid data offset/length while trying to read from the RTC: {}, {}",
+                    offset,
+                    data.len()
+                );
+                METRICS.error_count.inc();
+            }
         }
     }
 
@@ -144,6 +148,25 @@ mod tests {
 
     use super::*;
     use crate::logger::IncMetric;
+
+    #[test]
+    fn test_uefi_identification_byte_reads() {
+        let mut rtc = RTCDevice::new();
+        for (offset, expected) in [
+            (0xff0, 0x0d),
+            (0xff4, 0xf0),
+            (0xff8, 0x05),
+            (0xffc, 0xb1),
+            (0xfe0, 0x31),
+            (0xfe4, 0x10),
+            (0xfe8, 0x04),
+            (0xfec, 0x00),
+        ] {
+            let mut byte = [0xff];
+            rtc.bus_read(offset, &mut byte);
+            assert_eq!(byte[0], expected, "PL031 identity at {offset:#x}");
+        }
+    }
 
     #[test]
     fn test_rtc_device() {
