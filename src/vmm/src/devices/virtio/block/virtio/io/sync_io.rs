@@ -2,14 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fs::File;
-use std::io::{ErrorKind, Seek, SeekFrom, Write};
+use std::io::{ErrorKind, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::FileTypeExt;
 
-use vm_memory::{
-    GuestMemoryBackend, GuestMemoryError, ReadVolatile, VolatileMemoryError, VolatileSlice,
-    WriteVolatile,
-};
+use vm_memory::{GuestMemoryBackend, GuestMemoryError, VolatileMemoryError, VolatileSlice};
 
 use crate::vstate::memory::{Bitmap, GuestAddress, GuestMemoryMmap};
 
@@ -102,9 +99,14 @@ impl SyncFileEngine {
         addr: GuestAddress,
         count: u32,
     ) -> Result<u32, SyncIoError> {
-        self.file
-            .seek(SeekFrom::Start(offset))
-            .map_err(SyncIoError::Seek)?;
+        let offset = libc::off_t::try_from(offset)
+            .map_err(|e| SyncIoError::Seek(std::io::Error::new(ErrorKind::InvalidInput, e)))?;
+        offset.checked_add(i64::from(count)).ok_or_else(|| {
+            SyncIoError::Seek(std::io::Error::new(
+                ErrorKind::InvalidInput,
+                "file offset overflow",
+            ))
+        })?;
         let slice = mem
             .get_slice(addr, count as usize)
             .map_err(SyncIoError::Transfer)?;
@@ -121,9 +123,23 @@ impl SyncFileEngine {
             if unmarked.is_empty() {
                 break Ok(());
             }
-            // `unmarked` carries no bitmap, so vm-memory marks nothing; see above.
-            #[expect(clippy::disallowed_methods)]
-            match self.file.read_volatile(&mut unmarked) {
+            let position = offset + i64::try_from(filled).unwrap();
+            let guard = unmarked.ptr_guard_mut();
+            // SAFETY: the guard retains the checked writable guest range for this syscall.
+            let result = unsafe {
+                libc::pread(
+                    self.file.as_raw_fd(),
+                    guard.as_ptr().cast(),
+                    unmarked.len(),
+                    position,
+                )
+            };
+            let result = if result < 0 {
+                Err(VolatileMemoryError::IOError(std::io::Error::last_os_error()))
+            } else {
+                Ok(usize::try_from(result).unwrap())
+            };
+            match result {
                 Ok(0) => {
                     break Err(VolatileMemoryError::IOError(std::io::Error::new(
                         ErrorKind::UnexpectedEof,
@@ -151,12 +167,53 @@ impl SyncFileEngine {
         addr: GuestAddress,
         count: u32,
     ) -> Result<u32, SyncIoError> {
-        self.file
-            .seek(SeekFrom::Start(offset))
-            .map_err(SyncIoError::Seek)?;
-        mem.get_slice(addr, count as usize)
-            .and_then(|slice| Ok(self.file.write_all_volatile(&slice)?))
+        let offset = libc::off_t::try_from(offset)
+            .map_err(|e| SyncIoError::Seek(std::io::Error::new(ErrorKind::InvalidInput, e)))?;
+        offset.checked_add(i64::from(count)).ok_or_else(|| {
+            SyncIoError::Seek(std::io::Error::new(
+                ErrorKind::InvalidInput,
+                "file offset overflow",
+            ))
+        })?;
+        let slice = mem
+            .get_slice(addr, count as usize)
             .map_err(SyncIoError::Transfer)?;
+        let mut written = 0;
+        while written < slice.len() {
+            let position = offset + i64::try_from(written).unwrap();
+            let remaining = slice
+                .offset(written)
+                .map_err(|e| SyncIoError::Transfer(e.into()))?;
+            let guard = remaining.ptr_guard();
+            // SAFETY: the guard retains the checked readable guest range for this syscall.
+            let result = unsafe {
+                libc::pwrite(
+                    self.file.as_raw_fd(),
+                    guard.as_ptr().cast(),
+                    remaining.len(),
+                    position,
+                )
+            };
+            if result < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(SyncIoError::Transfer(
+                    VolatileMemoryError::IOError(err).into(),
+                ));
+            }
+            if result == 0 {
+                return Err(SyncIoError::Transfer(
+                    VolatileMemoryError::IOError(std::io::Error::new(
+                        ErrorKind::WriteZero,
+                        "failed to write whole buffer",
+                    ))
+                    .into(),
+                ));
+            }
+            written += usize::try_from(result).unwrap();
+        }
         Ok(count)
     }
 
@@ -179,6 +236,57 @@ mod tests {
     use vmm_sys_util::tempfile::TempFile;
 
     use super::file_discard_range;
+
+    #[test]
+    fn overflowing_range_fails_before_modifying_memory_or_file() {
+        use super::{SyncFileEngine, SyncIoError};
+        use crate::devices::virtio::test_utils::default_mem;
+        use crate::vstate::memory::{Bytes, GuestAddress};
+
+        let file = TempFile::new().unwrap().into_file();
+        let mut engine = SyncFileEngine::from_file(file.try_clone().unwrap());
+        let mem = default_mem();
+        mem.write_slice(b"unchanged", GuestAddress(0)).unwrap();
+        let offset = i64::MAX as u64 - 3;
+        assert!(matches!(
+            engine.read(offset, &mem, GuestAddress(0), 9),
+            Err(SyncIoError::Seek(_))
+        ));
+        assert!(matches!(
+            engine.write(offset, &mem, GuestAddress(0), 9),
+            Err(SyncIoError::Seek(_))
+        ));
+        let mut bytes = [0; 9];
+        mem.read_slice(&mut bytes, GuestAddress(0)).unwrap();
+        assert_eq!(&bytes, b"unchanged");
+        assert_eq!(file.metadata().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn cloned_descriptors_keep_their_shared_cursor() {
+        use super::SyncFileEngine;
+        use crate::devices::virtio::test_utils::default_mem;
+        use crate::vstate::memory::{Bytes, GuestAddress};
+
+        let mut file = TempFile::new().unwrap().into_file();
+        file.set_len(4096).unwrap();
+        file.seek(SeekFrom::Start(77)).unwrap();
+        let mut first = SyncFileEngine::from_file(file.try_clone().unwrap());
+        let mut second = SyncFileEngine::from_file(file.try_clone().unwrap());
+        let mem = default_mem();
+        mem.write_slice(b"first", GuestAddress(0)).unwrap();
+        mem.write_slice(b"other", GuestAddress(64)).unwrap();
+        first.write(512, &mem, GuestAddress(0), 5).unwrap();
+        second.write(1024, &mem, GuestAddress(64), 5).unwrap();
+        first.read(1024, &mem, GuestAddress(128), 5).unwrap();
+        second.read(512, &mem, GuestAddress(192), 5).unwrap();
+        let mut observed = [0; 5];
+        mem.read_slice(&mut observed, GuestAddress(128)).unwrap();
+        assert_eq!(&observed, b"other");
+        mem.read_slice(&mut observed, GuestAddress(192)).unwrap();
+        assert_eq!(&observed, b"first");
+        assert_eq!(file.stream_position().unwrap(), 77);
+    }
 
     #[test]
     fn test_discard_regular_file() {

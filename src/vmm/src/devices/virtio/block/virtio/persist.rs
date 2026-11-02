@@ -65,6 +65,7 @@ pub struct VirtioBlockState {
     cache_type: CacheType,
     root_device: bool,
     disk_path: String,
+    inherited: bool,
     pub virtio_state: VirtioDeviceState,
     rate_limiter_state: RateLimiterState,
     file_engine_type: FileEngineTypeState,
@@ -101,6 +102,7 @@ impl Persist<'_> for VirtioBlock {
             cache_type: self.config.cache_type,
             root_device: self.config.is_root_device,
             disk_path: self.config.path_on_host.clone(),
+            inherited: self.inherited,
             virtio_state,
             rate_limiter_state: self.lock_rate_limiter().save(),
             file_engine_type: FileEngineTypeState::from(self.file_engine_type()),
@@ -115,6 +117,9 @@ impl Persist<'_> for VirtioBlock {
         constructor_args: Self::ConstructorArgs,
         state: &Self::State,
     ) -> Result<Self, Self::Error> {
+        if state.inherited != constructor_args.backing.is_some() {
+            return Err(VirtioBlockError::Config);
+        }
         let is_read_only = state.virtio_state.avail_features & (1u64 << VIRTIO_BLK_F_RO) != 0;
         let rate_limiter = RateLimiter::restore((), &state.rate_limiter_state)
             .map_err(VirtioBlockError::RateLimiter)?;
@@ -160,6 +165,12 @@ impl Persist<'_> for VirtioBlock {
                     &state.disk_path,
                     is_read_only,
                     state.file_engine_type.into(),
+                    constructor_args
+                        .backing
+                        .as_ref()
+                        .map(std::fs::File::try_clone)
+                        .transpose()
+                        .map_err(|e| VirtioBlockError::BackingFile(e, state.disk_path.clone()))?,
                 )?,
                 is_io_engine_throttled: false,
             });
@@ -180,6 +191,7 @@ impl Persist<'_> for VirtioBlock {
             config_space,
             activate_evt: EventFd::new(libc::EFD_NONBLOCK).map_err(VirtioBlockError::EventFd)?,
 
+            inherited: state.inherited,
             config,
             rate_limiter: Arc::new(Mutex::new(rate_limiter)),
             state: BlockRuntimeState::Configuring(resources, Vec::new()),
@@ -202,6 +214,70 @@ mod tests {
     use crate::vstate::memory::GuestAddress;
 
     #[test]
+    fn inherited_backing_survives_unlink_and_snapshot_without_path_fallback() {
+        use std::os::unix::fs::FileExt;
+        let fixture = TempFile::new().unwrap();
+        fixture.as_file().set_len(4096).unwrap();
+        fixture
+            .as_file()
+            .write_all_at(b"retained-volume", 0)
+            .unwrap();
+        let source = fixture.as_file().try_clone().unwrap();
+        let path = fixture.as_path().to_str().unwrap().to_owned();
+        drop(fixture);
+        assert!(!std::path::Path::new(&path).exists());
+        let config = VirtioBlockConfig {
+            drive_id: "volume".to_owned(),
+            discard: false,
+            num_queues: None,
+            path_on_host: path.clone(),
+            is_root_device: false,
+            partuuid: None,
+            is_read_only: false,
+            cache_type: CacheType::Writeback,
+            rate_limiter: None,
+            file_engine_type: FileEngineType::Sync,
+            blk_size: None,
+            topology: None,
+        };
+        let mut block = VirtioBlock::new(config, Some(source.try_clone().unwrap())).unwrap();
+        assert_eq!(block.resources()[0].disk.nsectors, 8);
+        assert!(block.update_disk_image(path.clone()).is_err());
+        let state = block.save();
+        drop(block);
+        let bytes = bitcode::serialize(&state).unwrap();
+        let state = bitcode::deserialize(&bytes).unwrap();
+        assert!(matches!(
+            VirtioBlock::restore(
+                BlockConstructorArgs {
+                    mem: default_mem(),
+                    backing: None,
+                },
+                &state
+            ),
+            Err(VirtioBlockError::Config)
+        ));
+        let restored = VirtioBlock::restore(
+            BlockConstructorArgs {
+                mem: default_mem(),
+                backing: Some(source.try_clone().unwrap()),
+            },
+            &state,
+        )
+        .unwrap();
+        let mut observed = [0; 15];
+        restored.resources()[0]
+            .disk
+            .file_engine
+            .file()
+            .read_exact_at(&mut observed, 0)
+            .unwrap();
+        assert_eq!(&observed, b"retained-volume");
+        assert!(restored.inherited);
+        assert_eq!(restored.config.path_on_host, path);
+    }
+
+    #[test]
     fn test_cache_semantic_ser() {
         // We create the backing file here so that it exists for the whole lifetime of the test.
         let f = TempFile::new().unwrap();
@@ -222,7 +298,7 @@ mod tests {
             topology: None,
         };
 
-        let block = VirtioBlock::new(config).unwrap();
+        let block = VirtioBlock::new(config, None).unwrap();
 
         // Save the block device.
         let block_state = block.save();
@@ -267,7 +343,7 @@ mod tests {
             topology: None,
         };
 
-        let block = VirtioBlock::new(config).unwrap();
+        let block = VirtioBlock::new(config, None).unwrap();
         let guest_mem = default_mem();
 
         // Save the block device.
@@ -276,8 +352,14 @@ mod tests {
 
         // Restore the block device.
         let restored_state = bitcode::deserialize(&serialized_data).unwrap();
-        let restored_block =
-            VirtioBlock::restore(BlockConstructorArgs { mem: guest_mem }, &restored_state).unwrap();
+        let restored_block = VirtioBlock::restore(
+            BlockConstructorArgs {
+                mem: guest_mem,
+                backing: None,
+            },
+            &restored_state,
+        )
+        .unwrap();
 
         // Test that virtio specific fields are the same.
         assert_eq!(restored_block.device_type(), VirtioDeviceType::Block);
@@ -318,7 +400,8 @@ mod tests {
             let serialized = bitcode::serialize(&state).unwrap();
             let restored_state = bitcode::deserialize(&serialized).unwrap();
             let restored =
-                VirtioBlock::restore(BlockConstructorArgs { mem }, &restored_state).unwrap();
+                VirtioBlock::restore(BlockConstructorArgs { mem, backing: None }, &restored_state)
+                    .unwrap();
 
             assert_eq!(state.num_queues, NonZeroU16::new(1));
             assert!(state.virtio_state.activated);
@@ -338,7 +421,7 @@ mod tests {
             let disk_path = disk.as_path().to_str().unwrap().to_owned();
             let mut config = default_config(disk_path, engine);
             config.num_queues = NonZeroU16::new(2);
-            let mut block = VirtioBlock::new(config).unwrap();
+            let mut block = VirtioBlock::new(config, None).unwrap();
             block.spawn_worker(Arc::new(vec![])).unwrap();
             let mem = default_mem();
             let vq = VirtQueue::new(GuestAddress(0), &mem, BLOCK_QUEUE_SIZE);
@@ -356,7 +439,8 @@ mod tests {
             let serialized = bitcode::serialize(&state).unwrap();
             let restored_state = bitcode::deserialize(&serialized).unwrap();
             let restored =
-                VirtioBlock::restore(BlockConstructorArgs { mem }, &restored_state).unwrap();
+                VirtioBlock::restore(BlockConstructorArgs { mem, backing: None }, &restored_state)
+                    .unwrap();
 
             assert_eq!(state.virtio_state.queues.len(), 2);
             assert_eq!(restored.num_queues(), 2);

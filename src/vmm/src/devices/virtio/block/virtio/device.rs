@@ -99,8 +99,17 @@ impl DiskProperties {
         disk_image_path: &str,
         is_disk_read_only: bool,
         file_engine_type: FileEngineType,
+        backing: Option<File>,
     ) -> Result<Self, VirtioBlockError> {
-        let mut disk_image = Self::open_file(disk_image_path, is_disk_read_only)?;
+        let mut disk_image = match backing {
+            Some(file) => {
+                utils::inherited::block(&file, is_disk_read_only).map_err(|error| {
+                    VirtioBlockError::BackingFile(error, disk_image_path.to_owned())
+                })?;
+                file
+            }
+            None => Self::open_file(disk_image_path, is_disk_read_only)?,
+        };
         let disk_size = Self::file_size(disk_image_path, &mut disk_image)?;
         let image_id = Self::build_disk_image_id(&disk_image);
 
@@ -391,6 +400,7 @@ pub struct VirtioBlock {
     pub activate_evt: EventFd,
 
     pub(crate) config: VirtioBlockConfig,
+    pub(crate) inherited: bool,
     pub(crate) rate_limiter: Arc<Mutex<RateLimiter>>,
     pub(crate) state: BlockRuntimeState,
     pub metrics: Arc<BlockDeviceMetrics>,
@@ -449,7 +459,10 @@ impl VirtioBlock {
     /// Create a new virtio block device that operates on the given file.
     ///
     /// The given file must be seekable and sizable.
-    pub fn new(mut config: VirtioBlockConfig) -> Result<VirtioBlock, VirtioBlockError> {
+    pub fn new(
+        mut config: VirtioBlockConfig,
+        backing: Option<File>,
+    ) -> Result<VirtioBlock, VirtioBlockError> {
         if config.discard && config.is_read_only {
             return Err(VirtioBlockError::DiscardReadOnlyUnsupported);
         }
@@ -471,6 +484,13 @@ impl VirtioBlock {
                     &config.path_on_host,
                     config.is_read_only,
                     config.file_engine_type,
+                    backing
+                        .as_ref()
+                        .map(File::try_clone)
+                        .transpose()
+                        .map_err(|e| {
+                            VirtioBlockError::BackingFile(e, config.path_on_host.clone())
+                        })?,
                 )?,
                 is_io_engine_throttled: false,
             });
@@ -536,6 +556,7 @@ impl VirtioBlock {
             config_space,
             activate_evt: EventFd::new(libc::EFD_NONBLOCK).map_err(VirtioBlockError::EventFd)?,
 
+            inherited: backing.is_some(),
             config,
             rate_limiter: Arc::new(Mutex::new(rate_limiter)),
             state: BlockRuntimeState::Configuring(resources, Vec::new()),
@@ -634,6 +655,9 @@ impl VirtioBlock {
 
     /// Update the backing file and the config space of the block device.
     pub fn update_disk_image(&mut self, disk_image_path: String) -> Result<(), VirtioBlockError> {
+        if self.inherited {
+            return Err(VirtioBlockError::Config);
+        }
         let config_path = disk_image_path.clone();
         let read_only = self.config.is_read_only;
         let nsectors = match &mut self.state {
@@ -1175,14 +1199,14 @@ mod tests {
 
         for engine in [FileEngineType::Sync, FileEngineType::Async] {
             let disk_properties =
-                DiskProperties::new(f.as_path().to_str().unwrap(), true, engine).unwrap();
+                DiskProperties::new(f.as_path().to_str().unwrap(), true, engine, None).unwrap();
 
             assert_eq!(size, u64::from(SECTOR_SIZE) * num_sectors);
             assert_eq!(disk_properties.nsectors, num_sectors);
             // Testing `backing_file.virtio_block_disk_image_id()` implies
             // duplicating that logic in tests, so skipping it.
 
-            let res = DiskProperties::new("invalid-disk-path", true, engine);
+            let res = DiskProperties::new("invalid-disk-path", true, engine, None);
             assert!(
                 matches!(res, Err(VirtioBlockError::BackingFile(_, _))),
                 "{:?}",
@@ -1241,7 +1265,7 @@ mod tests {
             topology: None,
         };
 
-        let mut block = VirtioBlock::new(config).unwrap();
+        let mut block = VirtioBlock::new(config, None).unwrap();
         assert_eq!(
             block.avail_features & (1u64 << VIRTIO_BLK_F_DISCARD),
             1u64 << VIRTIO_BLK_F_DISCARD
@@ -1270,7 +1294,7 @@ mod tests {
             topology: None,
         };
         assert!(matches!(
-            VirtioBlock::new(async_config),
+            VirtioBlock::new(async_config, None),
             Err(VirtioBlockError::DiscardAsyncUnsupported)
         ));
 
@@ -1291,7 +1315,7 @@ mod tests {
             topology: None,
         };
         assert!(matches!(
-            VirtioBlock::new(read_only_config),
+            VirtioBlock::new(read_only_config, None),
             Err(VirtioBlockError::DiscardReadOnlyUnsupported)
         ));
     }
@@ -1315,7 +1339,7 @@ mod tests {
             topology: None,
         };
 
-        let mut block = VirtioBlock::new(config).unwrap();
+        let mut block = VirtioBlock::new(config, None).unwrap();
         let mem = default_mem();
         let interrupt = default_interrupt();
         let vq = VirtQueue::new(GuestAddress(0), &mem, 16);

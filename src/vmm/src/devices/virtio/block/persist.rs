@@ -27,4 +27,5 @@ impl BlockState {
 #[derive(Debug)]
 pub struct BlockConstructorArgs {
     pub mem: GuestMemoryMmap,
+    pub backing: Option<std::fs::File>,
 }

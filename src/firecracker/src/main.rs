@@ -193,6 +193,12 @@ fn main_exec() -> Result<(), MainError> {
     let mut arg_parser =
         ArgParser::new()
             .arg(
+                Argument::new("drive-fd")
+                    .takes_value(true)
+                    .allow_multiple(true)
+                    .help("Pinned drive backing: drive-id=descriptor."),
+            )
+            .arg(
                 Argument::new("control-fd")
                     .takes_value(true)
                     .help("Initial guest control stream descriptor."),
@@ -488,7 +494,9 @@ fn main_exec() -> Result<(), MainError> {
     let launch_io = launch_io::parse(arguments, inherited_api.map(|fd| fd.raw()))
         .map_err(MainError::LaunchIo)?;
     if (!api_enabled || vmm_config_json.is_some())
-        && (launch_io.control.is_some() || launch_io.serial.is_some())
+        && (launch_io.control.is_some()
+            || launch_io.serial.is_some()
+            || !launch_io.drives.is_empty())
     {
         return Err(MainError::LaunchIo(io::ErrorKind::InvalidInput.into()));
     }

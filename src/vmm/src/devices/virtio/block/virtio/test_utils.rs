@@ -50,14 +50,14 @@ pub fn default_mq_block(file_engine_type: FileEngineType, num_queues: u16) -> Vi
 
     let mut config = default_config(f.as_path().to_str().unwrap().to_string(), file_engine_type);
     config.num_queues = std::num::NonZeroU16::new(num_queues);
-    let mut block = VirtioBlock::new(config).unwrap();
+    let mut block = VirtioBlock::new(config, None).unwrap();
     block.spawn_worker(Arc::new(vec![])).unwrap();
     block
 }
 
 /// Create a default Block instance using file at the specified path to be used in tests.
 pub fn default_block_with_path(path: String, file_engine_type: FileEngineType) -> VirtioBlock {
-    VirtioBlock::new(default_config(path, file_engine_type)).unwrap()
+    VirtioBlock::new(default_config(path, file_engine_type), None).unwrap()
 }
 
 /// Create the default Block config, read-write and non-root, using file at the specified path.

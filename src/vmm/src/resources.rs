@@ -109,6 +109,8 @@ pub struct LaunchIo {
     pub control: Option<crate::devices::virtio::vsock::InitialControl>,
     /// Nonblocking serial output pipe.
     pub serial: Option<std::fs::File>,
+    /// Pinned backing files, selected by logical drive identifier.
+    pub drives: std::collections::BTreeMap<String, std::fs::File>,
 }
 
 /// A data structure that encapsulates the device configurations

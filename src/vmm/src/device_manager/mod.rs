@@ -551,7 +551,7 @@ impl DeviceManager {
             return Err(DriveError::RootBlockDeviceAlreadyAdded.into());
         }
 
-        let mut block = Block::new(config).map_err(DriveError::CreateBlockDevice)?;
+        let mut block = Block::new(config, None).map_err(DriveError::CreateBlockDevice)?;
         block
             .spawn_worker(self.blk_worker_filter.clone())
             .map_err(DriveError::CreateBlockDevice)?;
@@ -1404,7 +1404,7 @@ pub(crate) mod tests {
         // directly to the PCI bus (bypassing the hotplug path which
         // rejects root devices).
         let cfg = make_hotplug_block_cfg("rootfs", &f, true);
-        let block = Block::new(cfg).unwrap();
+        let block = Block::new(cfg, None).unwrap();
         pci_devices_mut(&mut vmm.device_manager)
             .attach_pci_virtio_device(
                 vmm.vm.as_kvm().unwrap(),
@@ -1472,7 +1472,7 @@ pub(crate) mod tests {
         let f = TempFile::new().unwrap();
 
         let cfg = make_hotplug_block_cfg("block0", &f, false);
-        let block = Block::new(cfg).unwrap();
+        let block = Block::new(cfg, None).unwrap();
         pci_devices_mut(&mut vmm.device_manager)
             .attach_pci_virtio_device(
                 vmm.vm.as_kvm().unwrap(),
