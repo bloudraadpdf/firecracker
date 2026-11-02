@@ -8,6 +8,7 @@ import platform
 import pytest
 
 import host_tools.cargo_build as host  # pylint:disable=import-error
+from framework import utils_repo
 
 MACHINE = platform.machine()
 TARGET = "{}-unknown-linux-musl".format(MACHINE)
@@ -32,3 +33,17 @@ def test_benchmarks_compile():
     """Checks that all benchmarks compile"""
 
     host.cargo("bench", f"--all --no-run --target {TARGET}")
+
+
+@pytest.mark.parametrize(
+    "directory", utils_repo.rust_tool_directories(), ids=lambda p: p.name
+)
+@pytest.mark.timeout(600)
+def test_tool_unittests(directory):
+    """Run standalone tool unit tests and compile their examples."""
+    host.cargo(
+        "test",
+        f"--locked --all-targets --target {MACHINE}-unknown-linux-gnu",
+        cwd=directory,
+        timeout=540,
+    )

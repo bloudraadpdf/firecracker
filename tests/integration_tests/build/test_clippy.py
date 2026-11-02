@@ -4,6 +4,9 @@
 
 import platform
 
+import pytest
+
+from framework import utils_repo
 from host_tools.cargo_build import cargo
 
 MACHINE = platform.machine()
@@ -13,15 +16,25 @@ TARGETS = [
 ]
 
 
-def test_rust_clippy():
+@pytest.mark.parametrize("target", TARGETS)
+@pytest.mark.parametrize(
+    "features", ["", "--all-features"], ids=["default", "all-features"]
+)
+def test_rust_clippy(target, features):
     """
     Test that clippy does not generate any errors/warnings.
     """
-    # One invocation for both targets: separate ones would serialize on cargo's
-    # build-directory lock, and this one shares the host-side artifacts.
-    targets = " ".join(f"--target {target}" for target in TARGETS)
+    cargo("clippy", f"--profile ci --target {target} --all --all-targets {features}", "-D warnings")
+
+
+@pytest.mark.parametrize(
+    "directory", utils_repo.rust_tool_directories(), ids=lambda p: p.name
+)
+def test_tool_clippy(directory):
+    """Check standalone tools with their native C-library dependencies."""
     cargo(
         "clippy",
-        f"--profile ci {targets} --all --all-targets --all-features",
+        f"--locked --target {MACHINE}-unknown-linux-gnu --all-targets --all-features",
         "-D warnings",
+        cwd=directory,
     )

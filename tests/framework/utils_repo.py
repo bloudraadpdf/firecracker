@@ -23,3 +23,11 @@ def git_repo_files(root: str = ".", glob: str = "*"):
     for file in files:
         if fnmatch(file, glob):
             yield Path(file)
+
+
+def rust_tool_directories():
+    """Return tracked standalone Rust tool workspaces."""
+    return sorted(
+        manifest.parent
+        for manifest in git_repo_files(root="../tools", glob="*/Cargo.toml")
+    )

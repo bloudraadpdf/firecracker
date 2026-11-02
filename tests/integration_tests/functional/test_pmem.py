@@ -238,6 +238,36 @@ def test_pmem_dax_memory_saving(
     ), f"{block_cache_usage} <= {pmem_cache_usage}"
 
 
+def test_pmem_pages_are_guest_memory(uvm, huge_pages, tmp_path, microvm_factory):
+    """Exclude resident guest pmem pages from the VMM overhead limit."""
+    size = 8 << 20
+    backing = tmp_path / "guest.pmem"
+    with backing.open("wb") as file:
+        file.truncate(size)
+    uvm.spawn()
+    uvm.basic_config(mem_size_mib=128, huge_pages=huge_pages)
+    uvm.add_net_iface()
+    uvm.add_pmem("guest", backing)
+    uvm.start()
+
+    def check_guest_pages(vm):
+        vm.ssh.check_output("dd if=/dev/pmem0 of=/dev/null bs=1M count=8")
+        assert (
+            sum(
+                mapping.rss
+                for mapping in vm.ps.memory_maps(grouped=False)
+                if mapping.path == "/guest.pmem"
+            )
+            >= size
+        )
+        assert vm.memory_monitor.current_rss < vm.memory_monitor.threshold
+        vm.memory_monitor.check_samples()
+
+    check_guest_pages(uvm)
+    restored = microvm_factory.build_from_snapshot(uvm.snapshot_full())
+    check_guest_pages(restored)
+
+
 def test_device_reset(uvm, huge_pages):
     """
     Test that virtio-pmem device reset works.

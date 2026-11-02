@@ -80,7 +80,7 @@ def test_pagemap_rss_matches_smaps(tmp_path):
     rss = ProcessRss(os.getpid())
     try:
         for _, addr in mappings:
-            sampled = rss.sample(lambda start, end, addr=addr: not start <= addr < end)
+            sampled = rss.sample(lambda start, end, _path, addr=addr: not start <= addr < end)
             assert sampled == smaps_rss(addr), hex(addr)
     finally:
         rss.close()

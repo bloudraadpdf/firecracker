@@ -107,13 +107,13 @@ class ProcessRss:
         os.close(self._pagemap)
 
     def sample(self, skip=None):
-        """Return the resident bytes of the mappings for which `skip(start, end)` is false."""
+        """Return the resident bytes of the mappings for which `skip(start, end, path)` is false."""
         entries = []
         for line in self._maps.read_bytes().splitlines():
-            fields = line.split()
+            fields = line.split(maxsplit=5)
             start, end = (int(addr, 16) for addr in fields[0].split(b"-"))
             # [vsyscall] lies above the address range pagemap covers
-            if fields[-1] == b"[vsyscall]" or (skip and skip(start, end)):
+            if fields[-1] == b"[vsyscall]" or (skip and skip(start, end, os.fsdecode(fields[5]) if len(fields) > 5 else "")):
                 continue
             offset = start // PAGE_SIZE * 8
             length = (end - start) // PAGE_SIZE * 8

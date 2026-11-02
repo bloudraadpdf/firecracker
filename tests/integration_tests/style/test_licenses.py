@@ -3,6 +3,11 @@
 """Tests checking against the existence of licenses in each file."""
 
 import datetime
+import json
+import shlex
+from pathlib import Path
+
+import pytest
 
 from framework import utils_repo
 from framework.defs import FC_WORKSPACE_DIR
@@ -31,6 +36,7 @@ RIVOS_COPYRIGHT = "Copyright © 2023 Rivos, Inc."
 RIVOS_LICENSE = "SPDX-License-Identifier: Apache-2.0"
 ORACLE_COPYRIGHT = "Copyright © 2020, Oracle and/or its affiliates."
 ORACLE_LICENSE = "SPDX-License-Identifier: Apache-2.0"
+BLOUDRAAD_COPYRIGHT = ("Copyright 2026 Bloudraad.", "Copyright 2026 Bloudraad Ltd")
 
 EXCLUDE = ["build", ".kernel", ".git"]
 
@@ -58,7 +64,7 @@ def _validate_license(filename):
     Python and Rust files should have the licenses on the first 2 lines
     Shell files license is located on lines 3-4 to account for shebang
     """
-    with open(filename, "r", encoding="utf-8") as file:
+    with Path(filename).open("r", encoding="utf-8") as file:
         # Find the copyright line
         while True:
             line = file.readline()
@@ -98,6 +104,10 @@ def _validate_license(filename):
             file, ORACLE_LICENSE
         )
 
+        has_bloudraad_copyright = any(
+            credit in copyright_info for credit in BLOUDRAAD_COPYRIGHT
+        ) and _look_for_license(file, AMAZON_LICENSE)
+
         return (
             has_amazon_copyright
             or has_chromium_copyright
@@ -106,12 +116,13 @@ def _validate_license(filename):
             or has_intel_copyright
             or has_rivos_copyright
             or has_oracle_copyright
+            or has_bloudraad_copyright
         )
 
 
 def test_for_valid_licenses():
     """
-    Test that all *.py, *.rs and *.sh files contain a valid license.
+    Test that all *.py, *.rs, *.sh and *.c files contain a valid license.
     """
 
     python_files = list(utils_repo.git_repo_files(root="..", glob="*.py"))
@@ -126,27 +137,63 @@ def test_for_valid_licenses():
     assert not error_msg, f"Files {error_msg} have invalid licenses"
 
 
-def test_dependency_licenses():
+@pytest.mark.parametrize(
+    "license_id,expected",
+    [
+        ("Apache-2.0", True),
+        ("GPL-2.0-or-later", False),
+        ("BSD-2-Clause-Patent", False),
+        ("MIT", False),
+    ],
+)
+def test_bloudraad_licenses(tmp_path, license_id, expected):
+    """First-party code uses the repository licence without path exceptions."""
+    path = tmp_path / "probe.rs"
+    path.write_text(
+        f"// {BLOUDRAAD_COPYRIGHT[0]}\n// SPDX-License-Identifier: {license_id}\n",
+        encoding="utf-8",
+    )
+    assert _validate_license(path) is expected
+
+
+def test_local_license_requires_copyright(tmp_path):
+    """An SPDX identifier alone does not satisfy the copyright requirement."""
+    path = tmp_path / "probe.rs"
+    path.write_text(f"// {AMAZON_LICENSE}\n", encoding="utf-8")
+    assert _validate_license(path) is False
+
+
+@pytest.mark.parametrize(
+    "toml_file",
+    [FC_WORKSPACE_DIR / "Cargo.toml"]
+    + [directory / "Cargo.toml" for directory in utils_repo.rust_tool_directories()],
+    ids=lambda path: path.parent.name,
+)
+def test_dependency_licenses(toml_file):
     """Ensure license compatibility for Firecracker.
 
     For a list of currently allowed licenses checkout deny.toml in
     the root directory.
     """
-    toml_file = FC_WORKSPACE_DIR / "Cargo.toml"
-
-    _, stdout, stderr = cargo(
-        "deny", f"--manifest-path {toml_file} check licenses bans"
+    manifest = shlex.quote(str(toml_file.resolve()))
+    _, _, stderr = cargo(
+        "deny",
+        f"--format json --manifest-path {manifest} check licenses bans",
+        cwd=FC_WORKSPACE_DIR,
     )
-    assert "licenses ok" in stdout
-
-    # "cargo deny" should deny licenses by default but for some reason copyleft is allowed
-    # by it and if we add a dependency which has copyleft licenses "cargo deny" won't report
-    # it unless it is explicitly told to do so from the deny.toml.
-    # Our current deny.toml seems to cover all the cases we need but,
-    # if there is an exception like copyleft (where we don't want and don't deny
-    # in deny.toml and is allowed by cardo deny), we don't want to be left in the dark.
-    # For such cases check "cargo deny" output, make sure that there are no warnings reported
-    # related to the license and take appropriate actions i.e. either add them to allow list
-    # or remove them if they are incompatible with our licenses.
-    license_res = [line for line in stderr.split("\n") if "license" in line]
-    assert not license_res
+    reports = [json.loads(line) for line in stderr.splitlines()]
+    summary = next(
+        report["fields"]["licenses"]
+        for report in reports
+        if report["type"] == "summary"
+    )
+    assert summary["errors"] == 0
+    standalone = toml_file.resolve() != FC_WORKSPACE_DIR / "Cargo.toml"
+    diagnostics = [
+        report["fields"]
+        for report in reports
+        if report["type"] == "diagnostic"
+        and "license" in report["fields"]["code"]
+        and not (standalone and report["fields"]["code"] == "license-not-encountered")
+    ]
+    assert not diagnostics
