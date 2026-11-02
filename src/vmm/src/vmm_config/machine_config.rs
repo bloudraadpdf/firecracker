@@ -126,6 +126,10 @@ pub struct MachineConfig {
     /// Enables or disabled SMT.
     #[serde(default)]
     pub smt: bool,
+    /// Enables the legacy programmable interval timer on x86_64.
+    #[cfg(target_arch = "x86_64")]
+    #[serde(default = "default_pit")]
+    pub pit: bool,
     /// A CPU template that it is used to filter the CPU features exposed to the guest.
     // FIXME: once support for static CPU templates is removed, this field can be dropped altogether
     #[serde(
@@ -148,6 +152,11 @@ pub struct MachineConfig {
     #[cfg(feature = "gdb")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gdb_socket_path: Option<String>,
+}
+
+#[cfg(target_arch = "x86_64")]
+fn default_pit() -> bool {
+    true
 }
 
 fn is_none_or_custom_template(template: &Option<CpuTemplateType>) -> bool {
@@ -183,6 +192,8 @@ impl Default for MachineConfig {
             vcpu_count: 1,
             mem_size_mib: DEFAULT_MEM_SIZE_MIB,
             smt: false,
+            #[cfg(target_arch = "x86_64")]
+            pit: true,
             cpu_template: None,
             track_dirty_pages: false,
             huge_pages: HugePageConfig::None,
@@ -211,6 +222,10 @@ pub struct MachineConfigUpdate {
     /// Enables or disabled SMT.
     #[serde(default)]
     pub smt: Option<bool>,
+    /// Enables the legacy programmable interval timer on x86_64.
+    #[cfg(target_arch = "x86_64")]
+    #[serde(default)]
+    pub pit: Option<bool>,
     /// A CPU template that it is used to filter the CPU features exposed to the guest.
     #[serde(default)]
     pub cpu_template: Option<StaticCpuTemplate>,
@@ -244,6 +259,8 @@ impl From<MachineConfig> for MachineConfigUpdate {
             vcpu_count: Some(cfg.vcpu_count),
             mem_size_mib: Some(cfg.mem_size_mib),
             smt: Some(cfg.smt),
+            #[cfg(target_arch = "x86_64")]
+            pit: Some(cfg.pit),
             cpu_template: cfg.static_template(),
             track_dirty_pages: Some(cfg.track_dirty_pages),
             huge_pages: Some(cfg.huge_pages),
@@ -320,6 +337,8 @@ impl MachineConfig {
             vcpu_count,
             mem_size_mib,
             smt,
+            #[cfg(target_arch = "x86_64")]
+            pit: update.pit.unwrap_or(self.pit),
             cpu_template,
             track_dirty_pages: update.track_dirty_pages.unwrap_or(self.track_dirty_pages),
             huge_pages: page_config,
@@ -367,6 +386,33 @@ mod tests {
             MachineConfig::default().update(&update),
             Err(MachineConfigError::InvalidMemorySize)
         );
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn pit_defaults_on_and_patch_retains_the_choice() {
+        use super::MachineConfigUpdate;
+        let config: MachineConfig =
+            serde_json::from_str(r#"{"vcpu_count":1,"mem_size_mib":128}"#).unwrap();
+        assert!(config.pit);
+        let off: MachineConfigUpdate = serde_json::from_str(r#"{"pit":false}"#).unwrap();
+        assert!(!off.is_empty());
+        let config = config.update(&off).unwrap();
+        assert!(!config.pit);
+        let memory: MachineConfigUpdate = serde_json::from_str(r#"{"mem_size_mib":256}"#).unwrap();
+        assert!(!config.update(&memory).unwrap().pit);
+        assert_eq!(MachineConfigUpdate::from(config.clone()).pit, Some(false));
+        assert!(
+            !serde_json::from_str::<MachineConfig>(&serde_json::to_string(&config).unwrap())
+                .unwrap()
+                .pit
+        );
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn pit_option_is_rejected_on_aarch64() {
+        serde_json::from_str::<super::MachineConfigUpdate>(r#"{"pit":false}"#).unwrap_err();
     }
 
     // Ensure the special (de)serialization logic for the cpu_template field works:
