@@ -147,6 +147,9 @@ pub enum VmmAction {
     GetFreePageHintingStatus,
     /// Stops a free page hinting run
     StopFreePageHinting,
+    /// Request preferred modern GPU dimensions after boot.
+    #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+    UpdateDisplay(crate::vmm_config::console::DisplayUpdateConfig),
     /// Replace media in an attached optical drive after boot.
     #[cfg(all(feature = "windows", target_arch = "x86_64"))]
     UpdateOpticalDrive(crate::vmm_config::console::OpticalDriveConfig),
@@ -203,6 +206,9 @@ pub enum VmmActionError {
     #[from(ignore)]
     /// MMDS limit exceeded error: {0}
     MmdsLimitExceeded(data_store::MmdsDatastoreError),
+    /// Display update error: {0}
+    #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+    DisplayUpdate(crate::devices::virtio::gpu::GpuError),
     /// Optical media update error: {0}
     #[cfg(all(feature = "windows", target_arch = "x86_64"))]
     OpticalMedia(std::io::Error),
@@ -539,7 +545,9 @@ impl<'a> PrebootApiController<'a> {
             | HotUnplugDevice(..)
             | SendCtrlAltDel => Err(VmmActionError::OperationNotSupportedPreBoot),
             #[cfg(all(feature = "windows", target_arch = "x86_64"))]
-            UpdateOpticalDrive(_) => Err(VmmActionError::OperationNotSupportedPreBoot),
+            UpdateDisplay(_) | UpdateOpticalDrive(_) => {
+                Err(VmmActionError::OperationNotSupportedPreBoot)
+            }
         }
     }
 
@@ -863,6 +871,15 @@ impl RuntimeApiController {
                 .stop_balloon_hinting()
                 .map(|_| VmmData::Empty)
                 .map_err(VmmActionError::BalloonUpdate),
+            #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+            UpdateDisplay(config) => self
+                .vmm
+                .lock()
+                .expect("Poisoned lock")
+                .device_manager
+                .update_display(config)
+                .map(|_| VmmData::Empty)
+                .map_err(VmmActionError::DisplayUpdate),
             #[cfg(all(feature = "windows", target_arch = "x86_64"))]
             UpdateOpticalDrive(config) => self
                 .vmm
@@ -1261,6 +1278,13 @@ mod tests {
         }
 
         #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+        check_unsupported(preboot_request(VmmAction::UpdateDisplay(
+            crate::vmm_config::console::DisplayUpdateConfig {
+                width: 1280,
+                height: 720,
+            },
+        )));
+        #[cfg(all(feature = "windows", target_arch = "x86_64"))]
         check_unsupported(preboot_request(VmmAction::UpdateOpticalDrive(
             crate::vmm_config::console::OpticalDriveConfig {
                 drive_id: "exec".into(),
@@ -1311,6 +1335,20 @@ mod tests {
                 requested_size_mib: 0,
             },
         )));
+    }
+
+    #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+    #[test]
+    fn display_update_requires_a_gpu() {
+        let error = runtime_request(VmmAction::UpdateDisplay(
+            crate::vmm_config::console::DisplayUpdateConfig {
+                width: 1280,
+                height: 720,
+            },
+        ))
+        .unwrap_err();
+        assert!(matches!(error, VmmActionError::DisplayUpdate(_)));
+        assert!(error.to_string().contains("virtio GPU is absent"));
     }
 
     fn runtime_request(request: VmmAction) -> Result<VmmData, VmmActionError> {
