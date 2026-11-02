@@ -21,6 +21,35 @@ use crate::{EventManager, Vmm};
 
 pub mod mock_resources;
 
+pub fn execute_aml(data: Vec<u8>, command: &str) -> String {
+    use acpi_tables::Sdt;
+    use std::io::Write;
+    use std::process::Command;
+    use vm_memory::Bytes;
+
+    let mut table = acpi_tables::Dsdt::new(*b"FC    ", *b"AML TEST", 1, data);
+    let memory =
+        vm_memory::GuestMemoryMmap::<()>::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+    table.write_to_guest(&memory, GuestAddress(0)).unwrap();
+    let mut bytes = vec![0; table.len()];
+    memory.read_slice(&mut bytes, GuestAddress(0)).unwrap();
+    let file = vmm_sys_util::tempfile::TempFile::new_in(std::path::Path::new(".")).unwrap();
+    file.as_file().write_all(&bytes).unwrap();
+    let output = Command::new("acpiexec")
+        .args(["-to", "20", "-b", command])
+        .arg(file.as_path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!output.contains("AE_"), "{output}");
+    output
+}
+
 /// Creates a [`GuestMemoryMmap`] with a single region of the given size starting at guest
 /// physical address 0 and without dirty tracking.
 pub fn single_region_mem(region_size: usize) -> GuestMemoryMmap {

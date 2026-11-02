@@ -20,8 +20,7 @@ pub enum ACPIDeviceError {
     ResourceAllocator(#[from] vm_allocator::Error),
 }
 
-// Although both VMGenID and VMClock devices are always present, they should be instantiated when
-// they are attached to preserve the existing ordering of GSI allocation.
+// Instantiate devices when attached to preserve GSI allocation order.
 #[derive(Debug, Default)]
 pub struct ACPIDeviceManager {
     /// VMGenID device
@@ -32,14 +31,25 @@ pub struct ACPIDeviceManager {
 
 impl ACPIDeviceManager {
     /// Create a new ACPIDeviceManager object
-    pub fn new(vmgenid: VmGenId, vmclock: VmClock) -> Self {
+    pub fn new(vmgenid: VmGenId, vmclock: Option<VmClock>) -> Self {
         ACPIDeviceManager {
             vmgenid: Some(vmgenid),
-            vmclock: Some(vmclock),
+            vmclock,
         }
     }
 
-    pub fn attach_vmgenid(&mut self, vm: &KvmVm) -> Result<(), ACPIDeviceError> {
+    pub fn attach_vmgenid(
+        &mut self,
+        vm: &KvmVm,
+        #[cfg(all(target_arch = "x86_64", feature = "windows"))] power: Option<
+            std::sync::Arc<std::sync::Mutex<crate::devices::legacy::acpi::AcpiPower>>,
+        >,
+    ) -> Result<(), ACPIDeviceError> {
+        #[cfg(all(target_arch = "x86_64", feature = "windows"))]
+        if let Some(power) = power {
+            self.vmgenid = Some(VmGenId::new_with_gpe(&mut vm.resource_allocator(), power)?);
+            return Ok(());
+        }
         self.vmgenid = Some(VmGenId::new(&mut vm.resource_allocator())?);
         Ok(())
     }
@@ -53,30 +63,38 @@ impl ACPIDeviceManager {
         self.vmgenid.as_ref().expect("Missing VMGenID device")
     }
 
-    pub fn vmclock(&self) -> &VmClock {
-        self.vmclock.as_ref().expect("Missing VMClock device")
+    pub fn vmclock(&self) -> Option<&VmClock> {
+        self.vmclock.as_ref()
     }
 
     pub fn activate_vmgenid(&self, vm: &KvmVm) -> Result<(), ACPIDeviceError> {
-        vm.register_irq(&self.vmgenid().interrupt_evt, self.vmgenid().gsi)?;
+        if let Some((event, gsi)) = self.vmgenid().interrupt() {
+            vm.register_irq(event, gsi)?;
+        }
         self.vmgenid().activate(vm.guest_memory())?;
         Ok(())
     }
 
     pub fn activate_vmclock(&self, vm: &KvmVm) -> Result<(), ACPIDeviceError> {
-        vm.register_irq(&self.vmclock().interrupt_evt, self.vmclock().gsi)?;
-        self.vmclock().activate(vm.guest_memory())?;
+        if let Some(vmclock) = self.vmclock() {
+            vm.register_irq(&vmclock.interrupt_evt, vmclock.gsi)?;
+            vmclock.activate(vm.guest_memory())?;
+        }
         Ok(())
     }
 
     pub fn replay_gsi_allocations(&self, vm: &KvmVm) -> Result<(), ACPIDeviceError> {
         let mut resource_allocator = vm.resource_allocator();
-        resource_allocator
-            .gsi_legacy_allocator
-            .allocate_id_at(self.vmgenid().gsi)?;
-        resource_allocator
-            .gsi_legacy_allocator
-            .allocate_id_at(self.vmclock().gsi)?;
+        if let Some((_, gsi)) = self.vmgenid().interrupt() {
+            resource_allocator
+                .gsi_legacy_allocator
+                .allocate_id_at(gsi)?;
+        }
+        if let Some(vmclock) = self.vmclock() {
+            resource_allocator
+                .gsi_legacy_allocator
+                .allocate_id_at(vmclock.gsi)?;
+        }
         Ok(())
     }
 
@@ -93,10 +111,9 @@ impl ACPIDeviceManager {
         mem: &GuestMemoryMmap,
         notification: VmClockRestoreNotification,
     ) -> Result<(), ACPIDeviceError> {
-        self.vmclock
-            .as_mut()
-            .expect("Missing VMClock device")
-            .do_post_restore(mem, notification)?;
+        if let Some(vmclock) = &mut self.vmclock {
+            vmclock.do_post_restore(mem, notification)?;
+        }
         Ok(())
     }
 }
@@ -116,34 +133,90 @@ impl ACPIDeviceManager {
         // AML for [`VmGenId`] device.
         self.vmgenid().append_aml_bytes(v)?;
         // AML for [`VmClock`] device.
-        self.vmclock().append_aml_bytes_in_scope(scope, v)?;
+        if let Some(vmclock) = self.vmclock() {
+            vmclock.append_aml_bytes_in_scope(scope, v)?;
+        }
 
-        // Create the AML for the GED interrupt handler
-        aml::Device::new(
+        if self.vmgenid().uses_gpe() {
+            return aml::Method::new(
+                "\\_GPE._E00".try_into()?,
+                0,
+                true,
+                vec![&aml::Notify::new(
+                    &aml::Path::new("\\_SB_.VGEN")?,
+                    &0x80usize,
+                )],
+            )
+            .append_aml_bytes(v);
+        }
+        let (_, gsi) = self.vmgenid().interrupt().unwrap();
+        crate::acpi::append_ged(
             scope.device_path("GED_")?,
-            vec![
-                &aml::Name::new("_HID".try_into()?, &"ACPI0013")?,
-                &aml::Name::new(
-                    "_CRS".try_into()?,
-                    &aml::ResourceTemplate::new(vec![&aml::Interrupt::new(
-                        true,
-                        true,
-                        false,
-                        false,
-                        self.vmgenid().gsi,
-                    )]),
-                )?,
-                &aml::Method::new(
-                    "_EVT".try_into()?,
-                    1,
-                    true,
-                    vec![&aml::Notify::new(
-                        &aml::Path::new("\\_SB_.VGEN")?,
-                        &0x80usize,
-                    )],
-                ),
-            ],
+            0,
+            gsi,
+            "\\_SB_.VGEN".try_into()?,
+            v,
         )
-        .append_aml_bytes(v)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use acpi_tables::Aml;
+
+    fn aml_with_clock(mut manager: crate::device_manager::DeviceManager, present: bool) -> Vec<u8> {
+        if !present {
+            manager.acpi_devices.vmclock = None;
+        }
+        let mut aml = Vec::new();
+        manager.acpi_devices.append_aml_bytes(&mut aml).unwrap();
+        assert_eq!(aml.windows(8).any(|bytes| bytes == b"AMZNC10C"), present);
+        assert_eq!(aml.windows(4).any(|bytes| bytes == b"GCLK"), present);
+        aml
+    }
+
+    #[test]
+    fn vmclock_aml_presence_preserves_genid_and_ged() {
+        for present in [false, true] {
+            let aml = aml_with_clock(
+                crate::device_manager::tests::default_device_manager(),
+                present,
+            );
+            assert!(aml.windows(4).any(|bytes| bytes == b"VGEN"));
+            assert!(aml.windows(4).any(|bytes| bytes == b"GED_"));
+        }
+    }
+
+    #[test]
+    #[cfg(all(target_arch = "x86_64", feature = "windows"))]
+    fn pc_gpe_executes_generation_notify() {
+        for present in [false, true] {
+            let aml = aml_with_clock(
+                crate::device_manager::tests::default_device_manager_with_pc(),
+                present,
+            );
+            let output = crate::test_utils::execute_aml(aml, "execute \\_GPE._E00");
+            assert!(
+                output
+                    .lines()
+                    .any(|line| line.contains("Received a Device Notify on [VGEN]")
+                        && line.contains("Value 0x80")),
+                "{output}"
+            );
+            if present {
+                let aml = aml_with_clock(
+                    crate::device_manager::tests::default_device_manager_with_pc(),
+                    true,
+                );
+                let output = crate::test_utils::execute_aml(aml, "execute \\_SB_.GCLK._EVT 0");
+                assert!(
+                    output
+                        .lines()
+                        .any(|line| line.contains("Received a Device Notify on [VCLK]")
+                            && line.contains("Value 0x80")),
+                    "{output}"
+                );
+            }
+        }
     }
 }

@@ -1,9 +1,9 @@
 // Copyright 2024 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use acpi_tables::aml;
 #[cfg(any(target_arch = "x86_64", feature = "windows"))]
 use acpi_tables::fadt::{FADT_F_HW_REDUCED_ACPI, FADT_F_PWR_BUTTON, FADT_F_SLP_BUTTON};
+use acpi_tables::{Aml, aml};
 #[cfg(any(target_arch = "x86_64", feature = "windows"))]
 use acpi_tables::{Dsdt, Fadt, Madt, Mcfg, RootTable, RootTableEntries, Rsdp, Sdt};
 #[cfg(any(target_arch = "x86_64", feature = "windows"))]
@@ -59,14 +59,50 @@ pub(crate) enum DeviceScope {
 }
 
 impl DeviceScope {
-    pub(crate) fn device_path(self, name: &str) -> Result<aml::Path, aml::AmlError> {
-        let parent = match self {
+    fn parent(self) -> &'static str {
+        match self {
             Self::SystemBus => "_SB_",
             #[cfg(target_arch = "x86_64")]
             Self::PciRoot => "_SB_.PC00",
-        };
-        format!("{parent}.{name}").as_str().try_into()
+        }
     }
+
+    pub(crate) fn device_path(self, name: &str) -> Result<aml::Path, aml::AmlError> {
+        format!("{}.{name}", self.parent()).as_str().try_into()
+    }
+
+    pub(crate) fn absolute_device_path(self, name: &str) -> Result<aml::Path, aml::AmlError> {
+        format!("\\{}.{name}", self.parent()).as_str().try_into()
+    }
+}
+
+pub(crate) fn append_ged(
+    path: aml::Path,
+    uid: u8,
+    gsi: u32,
+    target: aml::Path,
+    v: &mut Vec<u8>,
+) -> Result<(), aml::AmlError> {
+    aml::Device::new(
+        path,
+        vec![
+            &aml::Name::new("_HID".try_into()?, &"ACPI0013")?,
+            &aml::Name::new("_UID".try_into()?, &uid)?,
+            &aml::Name::new(
+                "_CRS".try_into()?,
+                &aml::ResourceTemplate::new(vec![&aml::Interrupt::new(
+                    true, true, false, false, gsi,
+                )]),
+            )?,
+            &aml::Method::new(
+                "_EVT".try_into()?,
+                1,
+                true,
+                vec![&aml::Notify::new(&target, &0x80usize)],
+            ),
+        ],
+    )
+    .append_aml_bytes(v)
 }
 
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
@@ -325,12 +361,7 @@ mod tests {
     #[cfg(feature = "windows")]
     fn pc_vmm() -> crate::Vmm {
         let mut vmm = default_vmm();
-        vmm.device_manager.legacy_devices.as_mut().unwrap().pc = Some(
-            crate::device_manager::legacy::PcDevices::new(
-                vmm.vm.as_kvm().unwrap().vcpus_exit_evt(),
-            )
-            .unwrap(),
-        );
+        vmm.device_manager = crate::device_manager::tests::default_device_manager_with_pc();
         vmm
     }
 
@@ -363,18 +394,26 @@ mod tests {
             ),
         ] {
             for pc_enabled in [false, true] {
-                vmm.device_manager.legacy_devices.as_mut().unwrap().pc = pc_enabled.then(|| {
-                    crate::device_manager::legacy::PcDevices::new(
-                        vmm.vm.as_kvm().unwrap().vcpus_exit_evt(),
-                    )
-                    .unwrap()
-                });
+                let mut fixture = if pc_enabled {
+                    crate::device_manager::tests::default_device_manager_with_pc()
+                } else {
+                    crate::device_manager::tests::default_device_manager()
+                };
+                vmm.device_manager.legacy_devices.as_mut().unwrap().pc =
+                    fixture.legacy_devices.as_mut().unwrap().pc.take();
+                vmm.device_manager.acpi_devices = fixture.acpi_devices;
                 let mut bytes = Vec::new();
                 vmm.device_manager.append_aml_bytes(&mut bytes).unwrap();
                 super::setup_arch_dsdt(&mut bytes, &vmm.device_manager).unwrap();
-                for (name, irq) in [(b"VCLK", 6u32), (b"GED_", 5), (b"COM1", 4), (b"PS2_", 1)]
-                    .into_iter()
-                    .chain(pc_enabled.then_some((b"RTC0", 8)))
+                for (name, irq) in [
+                    (b"GCLK", Some(if pc_enabled { 5u32 } else { 6 })),
+                    (b"COM1", Some(4)),
+                    (b"PS2_", Some(1)),
+                    (b"VCLK", None),
+                ]
+                .into_iter()
+                .chain((!pc_enabled).then_some((b"GED_", Some(5))))
+                .chain(pc_enabled.then_some((b"RTC0", Some(8))))
                 {
                     let path = [parent, name].concat();
                     let start = bytes
@@ -393,9 +432,15 @@ mod tests {
                         length |= usize::from(bytes[length_start + 1 + i]) << (4 + 8 * i);
                     }
                     let body = &bytes[start + path.len()..length_start + length];
-                    let resource = [&[0x89, 6, 0, 3, 1][..], &irq.to_le_bytes()].concat();
-                    assert!(body.windows(resource.len()).any(|value| value == resource));
+                    if let Some(irq) = irq {
+                        let resource = [&[0x89, 6, 0, 3, 1][..], &irq.to_le_bytes()].concat();
+                        assert!(body.windows(resource.len()).any(|value| value == resource));
+                    } else {
+                        assert!(!body.windows(5).any(|value| value == [0x89, 6, 0, 3, 1]));
+                    }
                 }
+                assert_eq!(bytes.windows(4).any(|value| value == b"GED_"), !pc_enabled);
+                assert_eq!(bytes.windows(4).any(|value| value == b"_E00"), pc_enabled);
                 let notify = b"\x86\\\x2e_SB_VGEN\x0a\x80";
                 assert!(bytes.windows(notify.len()).any(|value| value == notify));
                 for name in [b"RTC0", b"PRES", b"_S5_"] {
@@ -480,6 +525,9 @@ mod tests {
         assert_eq!(&table[36..40], &[0; 4]);
         assert_eq!(&table[46..48], &[0; 2]);
         assert_eq!(&table[56..80], &[0; 24]);
+        assert_eq!(&table[80..88], &[0; 8]);
+        assert_eq!(&table[92..95], &[0; 3]);
+        assert_eq!(&table[220..244], &[0; 24]);
         assert_eq!(&table[132..140], &[0; 8]);
     }
 
@@ -515,6 +563,9 @@ mod tests {
         assert_eq!(u32::from_le_bytes(table[64..68].try_into().unwrap()), 0x606);
         assert_eq!(u32::from_le_bytes(table[76..80].try_into().unwrap()), 0x608);
         assert_eq!(&table[88..92], &[4, 2, 0, 4]);
+        assert_eq!(u32::from_le_bytes(table[80..84].try_into().unwrap()), 0x60c);
+        assert_eq!(&table[92..95], &[2, 0, 0]);
+        assert_eq!(&table[220..232], &[1, 16, 0, 1, 0x0c, 6, 0, 0, 0, 0, 0, 0]);
         let facs_address = u64::from(u32::from_le_bytes(table[36..40].try_into().unwrap()));
         assert_ne!(facs_address, 0);
         assert_eq!(facs_address % 64, 0);
