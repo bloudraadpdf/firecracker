@@ -9,6 +9,10 @@ pub mod gic;
 pub mod kvm;
 /// Layout for this aarch64 system.
 pub mod layout;
+#[cfg(feature = "windows")]
+pub(crate) mod mmio;
+#[cfg(any(feature = "gdb", feature = "windows"))]
+pub(crate) mod paging;
 /// Logic for configuring aarch64 registers.
 pub mod regs;
 /// Architecture specific vCPU code

@@ -4,6 +4,7 @@
 use std::sync::Mutex;
 
 use kvm_bindings::{KVM_CAP_ARM_WRITABLE_IMP_ID_REGS, KVMIO, kvm_enable_cap};
+use kvm_ioctls::VmFd;
 use serde::{Deserialize, Serialize};
 use vmm_sys_util::errno;
 use vmm_sys_util::ioctl::ioctl_with_ref;
@@ -27,6 +28,20 @@ mod ioctls {
     ioctl_iow_nr!(KVM_ENABLE_CAP, KVMIO, 0xa3, kvm_enable_cap);
 }
 
+fn enable_cap(fd: &VmFd, capability: u32) -> Result<(), errno::Error> {
+    let cap = kvm_enable_cap {
+        cap: capability,
+        ..Default::default()
+    };
+    // SAFETY: The kernel only reads the fully initialised capability structure.
+    let result = unsafe { ioctl_with_ref(fd, ioctls::KVM_ENABLE_CAP(), &cap) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(errno::Error::last())
+    }
+}
+
 /// Structure representing the current architecture's understand of what a "virtual machine" is.
 #[derive(Debug)]
 pub struct KvmVm {
@@ -39,6 +54,9 @@ pub struct KvmVm {
 /// Error type for [`KvmVm::restore_state`]
 #[derive(Debug, PartialEq, Eq, thiserror::Error, displaydoc::Display)]
 pub enum KvmVmError {
+    #[cfg(feature = "windows")]
+    /// Cannot enable ARM64 MMIO exits without instruction syndrome: {0}
+    EnableNisv(errno::Error),
     /// Error creating the global interrupt controller: {0}
     VmCreateGIC(crate::arch::aarch64::gic::GicError),
     /// Failed to save the VM's GIC state: {0}
@@ -67,24 +85,20 @@ impl KvmVm {
             .fd
             .check_extension_raw(u64::from(KVM_CAP_ARM_WRITABLE_IMP_ID_REGS))
             == 1
+            && let Err(error) = enable_cap(&common.fd, KVM_CAP_ARM_WRITABLE_IMP_ID_REGS)
         {
-            let cap = kvm_enable_cap {
-                cap: KVM_CAP_ARM_WRITABLE_IMP_ID_REGS,
-                ..Default::default()
-            };
-            // SAFETY: The ioctl is safe because we allocated the struct and
-            // the kernel will only read the size of the struct.
-            let ret = unsafe { ioctl_with_ref(&common.fd, ioctls::KVM_ENABLE_CAP(), &cap) };
-            if ret != 0 {
-                // Not fatal: a VM whose CPU template does not touch the
-                // implementation ID registers is unaffected, and one that
-                // does will fail loudly when the template is applied.
-                warn!(
-                    "Failed to enable KVM_CAP_ARM_WRITABLE_IMP_ID_REGS: {}",
-                    errno::Error::last()
-                );
-            }
+            // Not fatal: a VM whose CPU template does not touch the
+            // implementation ID registers is unaffected, and one that
+            // does will fail loudly when the template is applied.
+            warn!(
+                "Failed to enable KVM_CAP_ARM_WRITABLE_IMP_ID_REGS: {}",
+                error
+            );
         }
+
+        #[cfg(feature = "windows")]
+        enable_cap(&common.fd, kvm_bindings::KVM_CAP_ARM_NISV_TO_USER)
+            .map_err(KvmVmError::EnableNisv)?;
 
         Ok(KvmVm {
             common,

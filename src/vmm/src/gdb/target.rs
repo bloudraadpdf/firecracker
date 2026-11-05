@@ -86,6 +86,9 @@ pub enum GdbTargetError {
     KvmIoctlsError(#[from] kvm_ioctls::Error),
     /// Gva no translation available
     GvaTranslateError,
+    #[cfg(target_arch = "aarch64")]
+    /// Cannot translate the ARM64 kernel address: {0}
+    ArmPaging(#[from] crate::arch::aarch64::paging::PagingError),
     /// Conversion error with cpu rflags
     RegFlagConversionError,
     #[cfg(target_arch = "aarch64")]

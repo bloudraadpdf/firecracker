@@ -123,6 +123,7 @@ arm64_sys_reg!(KVM_REG_ARM_PTIMER_CNT, 3, 3, 14, 0, 1);
 // Translation Table Base Register
 // https://developer.arm.com/documentation/ddi0595/2021-03/AArch64-Registers/TTBR1-EL1--Translation-Table-Base-Register-1--EL1-
 arm64_sys_reg!(TTBR1_EL1, 3, 0, 2, 0, 1);
+arm64_sys_reg!(SCTLR_EL1, 3, 0, 1, 0, 0);
 // Translation Control Register
 // https://developer.arm.com/documentation/ddi0601/2024-09/AArch64-Registers/TCR-EL1--Translation-Control-Register--EL1-
 arm64_sys_reg!(TCR_EL1, 3, 0, 2, 0, 2);

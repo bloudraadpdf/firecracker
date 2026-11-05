@@ -114,6 +114,9 @@ pub struct KvmVcpu {
     pub fd: VcpuFd,
     /// Vcpu peripherals, such as buses
     pub peripherals: Peripherals,
+    /// Guest memory attached before the vCPU thread starts.
+    #[cfg(feature = "windows")]
+    pub(crate) memory: GuestMemoryMmap,
     kvi: kvm_vcpu_init,
     /// IPA of steal_time region
     pub pvtime_ipa: Option<GuestAddress>,
@@ -149,9 +152,31 @@ impl KvmVcpu {
             index,
             fd: kvm_vcpu,
             peripherals: Default::default(),
+            #[cfg(feature = "windows")]
+            memory: vm.guest_memory().clone(),
             kvi,
             pvtime_ipa: None,
         })
+    }
+
+    #[cfg(feature = "windows")]
+    pub(crate) fn emulate_nisv(
+        &self,
+        iss: u64,
+        fault_ipa: u64,
+    ) -> Result<VcpuEmulation, VcpuError> {
+        let bus =
+            self.peripherals.mmio_bus.as_ref().ok_or_else(|| {
+                VcpuError::UnhandledKvmExit("ARM64 MMIO bus is missing".to_string())
+            })?;
+        let _metric = METRICS.vcpu.exit_mmio_read_agg.record_latency_metrics();
+        super::mmio::emulate(&self.fd, &self.memory, bus, iss, fault_ipa).map_err(|error| {
+            VcpuError::UnhandledKvmExit(format!(
+                "ARM64 MMIO IPA {fault_ipa:#x}, ISS {iss:#x}: {error}"
+            ))
+        })?;
+        METRICS.vcpu.exit_mmio_read.inc();
+        Ok(VcpuEmulation::Handled)
     }
 
     /// Read the MPIDR - Multiprocessor Affinity Register.

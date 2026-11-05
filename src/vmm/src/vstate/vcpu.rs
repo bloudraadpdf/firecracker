@@ -184,6 +184,10 @@ impl Vcpu {
         vm: &KvmVm,
         seccomp_filter: Arc<BpfProgram>,
     ) -> Result<VcpuHandle, StartThreadedError> {
+        #[cfg(all(target_arch = "aarch64", feature = "windows"))]
+        {
+            self.kvm_vcpu.memory = vm.guest_memory().clone();
+        }
         let event_sender = self.event_sender.take().expect("vCPU already started");
         let response_receiver = self.response_receiver.take().unwrap();
         let vcpu_fd = self
@@ -414,6 +418,14 @@ impl Vcpu {
     /// Returns error or enum specifying whether emulation was handled or interrupted.
     pub fn run_emulation(&mut self) -> Result<VcpuEmulation, VcpuError> {
         match self.kvm_vcpu.fd.run() {
+            #[cfg(all(target_arch = "aarch64", feature = "windows"))]
+            Ok(VcpuExit::Unsupported(kvm_bindings::KVM_EXIT_ARM_NISV)) => {
+                // SAFETY: KVM_EXIT_ARM_NISV selects this copied union member after KVM_RUN.
+                let fault = unsafe { self.kvm_vcpu.fd.get_kvm_run().__bindgen_anon_1.arm_nisv };
+                self.kvm_vcpu
+                    .emulate_nisv(fault.esr_iss, fault.fault_ipa)
+                    .inspect_err(|_| METRICS.vcpu.failures.inc())
+            }
             #[cfg(target_arch = "x86_64")]
             Ok(VcpuExit::IoIn(..) | VcpuExit::IoOut(..)) => self.kvm_vcpu.emulate_pio(),
             #[cfg(target_arch = "x86_64")]
@@ -1025,6 +1037,105 @@ pub(crate) mod tests {
         assert!(vcpu.kvm_vcpu.peripherals.mmio_bus.is_none());
         vcpu.set_mmio_bus(Arc::new(Bus::new()));
         assert!(vcpu.kvm_vcpu.peripherals.mmio_bus.is_some());
+    }
+
+    #[cfg(all(target_arch = "aarch64", feature = "windows"))]
+    #[test]
+    fn windows_tpm_load_pair_after_late_memory_registration() {
+        use kvm_bindings::{KVM_REG_ARM_CORE, KVM_REG_ARM64, KVM_REG_SIZE_U64, user_pt_regs};
+        use std::sync::atomic::AtomicUsize;
+        use vm_memory::Bytes;
+
+        use crate::arch::aarch64::regs::arm64_core_reg_id;
+        use crate::vstate::vm::tests::setup_vm;
+
+        struct Registers(Arc<AtomicUsize>);
+        impl BusDevice for Registers {
+            fn read(&mut self, _base: u64, offset: u64, data: &mut [u8]) {
+                assert_eq!(offset, 0x58);
+                self.0.fetch_add(1, Ordering::Relaxed);
+                data.copy_from_slice(&[0x80, 0x0f, 0, 0, 0x80, 0, 0, 0x10]);
+            }
+        }
+
+        let mut vm = setup_vm();
+        let mut vcpu = Vcpu::new(0, &vm, EventFd::new(0).unwrap()).unwrap();
+        vcpu.kvm_vcpu.init(&[]).unwrap();
+        vm.setup_irqchip(1).unwrap();
+        vm.register_dram_memory_regions(crate::test_utils::single_region_mem_raw(0x1000))
+            .unwrap();
+        // Preserve the LDP result before PSCI SYSTEM_OFF resets the registers.
+        vm.guest_memory()
+            .write_obj(0x2943_2141_u32, GuestAddress(0))
+            .unwrap();
+        vm.guest_memory()
+            .write_obj(0xa900_2161_u32, GuestAddress(4))
+            .unwrap();
+        vm.guest_memory()
+            .write_obj(0xd400_0002_u32, GuestAddress(8))
+            .unwrap();
+        let reg = |index: usize| arm64_core_reg_id!(KVM_REG_SIZE_U64, index * 8);
+        for (id, value) in [
+            (reg(0), 0x8400_0008_u64),
+            (reg(1), u64::MAX),
+            (reg(8), u64::MAX),
+            (reg(10), 0x1000_0040),
+            (reg(11), 0x100),
+            (
+                arm64_core_reg_id!(KVM_REG_SIZE_U64, std::mem::offset_of!(user_pt_regs, pc)),
+                0,
+            ),
+            (
+                arm64_core_reg_id!(KVM_REG_SIZE_U64, std::mem::offset_of!(user_pt_regs, pstate)),
+                0x3c5,
+            ),
+        ] {
+            vcpu.kvm_vcpu
+                .fd
+                .set_one_reg(id, &value.to_le_bytes())
+                .unwrap();
+        }
+        let bus = Arc::new(Bus::new());
+        let reads = Arc::new(AtomicUsize::new(0));
+        let registers = Arc::new(Mutex::new(Registers(reads.clone())));
+        bus.insert(registers.clone(), 0x1000_0000, 0x1000).unwrap();
+        vcpu.set_mmio_bus(bus.clone());
+        let fd = vcpu.copy_kvm_vcpu_fd(&vm).unwrap();
+        for (iss, address) in [(5 | (1 << 6), 0x1000_0058), (5, 0x1000_005c)] {
+            assert!(
+                crate::arch::aarch64::mmio::emulate(&fd, vm.guest_memory(), &bus, iss, address,)
+                    .is_err()
+            );
+        }
+        assert_eq!(reads.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            crate::arch::aarch64::paging::register(&fd, reg(1)).unwrap(),
+            u64::MAX
+        );
+        assert_eq!(
+            crate::arch::aarch64::paging::register(&fd, reg(8)).unwrap(),
+            u64::MAX
+        );
+        let mut handle = vcpu
+            .start_threaded(&vm, get_empty_filters().remove("vcpu").unwrap())
+            .unwrap();
+        queue_event_expect_response(&mut handle, VcpuEvent::Resume, VcpuResponse::Resumed);
+        let response = handle.response_receiver().recv_timeout(RECV_TIMEOUT_SEC);
+        handle.send_event(VcpuEvent::Finish).unwrap();
+        assert_eq!(response.unwrap(), VcpuResponse::Exited(FcExitCode::Ok));
+        assert_eq!(reads.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            vm.guest_memory()
+                .read_obj::<u64>(GuestAddress(0x100))
+                .unwrap(),
+            3968
+        );
+        assert_eq!(
+            vm.guest_memory()
+                .read_obj::<u64>(GuestAddress(0x108))
+                .unwrap(),
+            0x1000_0080
+        );
     }
 
     #[test]
