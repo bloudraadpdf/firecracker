@@ -142,6 +142,27 @@ mod tests {
     use crate::api_server::parsed_request::tests::{depr_action_from_req, vmm_action_from_request};
 
     #[test]
+    fn snapshot_load_accepts_anonymous_memory() {
+        let body = serde_json::json!({
+            "snapshot_path": "vm.state",
+            "mem_backend": {"backend_type": "Anonymous", "backend_path": "vm.memory"},
+            "huge_pages": "Transparent"
+        });
+        let request = parse_put_snapshot(&Body::new(body.to_string()), Some("load")).unwrap();
+        assert!(matches!(
+            vmm_action_from_request(request),
+            VmmAction::LoadSnapshot(LoadSnapshotParams {
+                mem_backend: MemBackendConfig {
+                    backend_type: MemBackendType::Anonymous,
+                    ..
+                },
+                huge_pages: SnapshotLoadHugePageConfig::Transparent,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn protected_services_require_explicit_restore_generation() {
         use std::path::PathBuf;
 

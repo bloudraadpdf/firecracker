@@ -8,7 +8,7 @@
 use std::ffi::c_void;
 use std::fs::File;
 use std::io;
-use std::io::{Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 use std::ops::Deref;
 use std::os::fd::AsRawFd;
 use std::sync::{Arc, Mutex};
@@ -46,6 +46,8 @@ const HUGETLB_FLAG_MASK: libc::c_int = libc::MAP_HUGETLB | (0x3F << libc::MAP_HU
 /// Errors associated with dumping guest memory to file.
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum MemoryError {
+    /// Cannot load memory: {0}
+    ReadMemory(std::io::Error),
     /// Cannot dump memory: {0}
     WriteMemory(GuestMemoryError),
     /// Cannot create mmap region: {0}
@@ -965,23 +967,7 @@ pub fn memory_regions_from_ranges_file_backed(
     track_dirty_pages: bool,
     madvise_flags: libc::c_int,
 ) -> Result<Vec<GuestRegionMmap>, MemoryError> {
-    let end = regions
-        .iter()
-        .try_fold(file_offset.start(), |acc, &(_, size)| {
-            acc.checked_add(size as u64)
-        })
-        .ok_or(MemoryError::OffsetTooLarge)?;
-    // Use the end offset rather than `fstat`: a block device reports `st_size == 0`.
-    let file_size = file_offset
-        .file()
-        .seek(SeekFrom::End(0))
-        .map_err(MemoryError::SeekError)?;
-
-    // Ensure we do not mmap beyond EOF. The kernel would allow that, but a SIGBUS is triggered
-    // on an attempted access to a page of the mapping that lies beyond the end of the file.
-    if end > file_size {
-        return Err(MemoryError::OffsetTooLarge);
-    }
+    check_file_range(file_offset.file(), regions, file_offset.start())?;
 
     let mut offset = file_offset.start();
     regions
@@ -999,6 +985,29 @@ pub fn memory_regions_from_ranges_file_backed(
             Ok(guest_memory)
         })
         .collect()
+}
+
+fn check_file_range(
+    mut file: &File,
+    regions: &[(GuestAddress, usize)],
+    start: u64,
+) -> Result<(), MemoryError> {
+    let end = regions
+        .iter()
+        .try_fold(start, |acc, &(_, size)| acc.checked_add(size as u64))
+        .ok_or(MemoryError::OffsetTooLarge)?;
+    // Use the end offset rather than `fstat`: a block device reports `st_size == 0`.
+    let file_size = file
+        .seek(SeekFrom::End(0))
+        .map_err(MemoryError::SeekError)?;
+
+    // Ensure we do not mmap beyond EOF. The kernel would allow that, but a SIGBUS is triggered
+    // on an attempted access to a page of the mapping that lies beyond the end of the file.
+    if end > file_size {
+        return Err(MemoryError::OffsetTooLarge);
+    }
+
+    Ok(())
 }
 
 /// Creates a single `GuestRegionMmap`, mapped from `file_offset` if given.
@@ -1130,6 +1139,24 @@ pub fn snapshot_file(
         track_dirty_pages,
         huge_pages.madvise_flags(),
     )
+}
+
+/// Copies a snapshot into anonymous memory so guest writes retain huge-page backing.
+pub fn snapshot_copy(
+    mut file: File,
+    regions: &[(GuestAddress, usize)],
+    track_dirty_pages: bool,
+    huge_pages: HugePageConfig,
+) -> Result<Vec<GuestRegionMmap>, MemoryError> {
+    check_file_range(&file, regions, 0)?;
+    file.rewind().map_err(MemoryError::SeekError)?;
+    let memory = anonymous(regions, track_dirty_pages, huge_pages)?;
+    for region in &memory {
+        // SAFETY: These fresh writable mappings are not yet exposed to KVM or devices.
+        let bytes = unsafe { std::slice::from_raw_parts_mut(region.as_ptr(), region.size()) };
+        file.read_exact(bytes).map_err(MemoryError::ReadMemory)?;
+    }
+    Ok(memory)
 }
 
 /// Marks as dirty the `len` bytes of guest memory mapped at host address `ptr`.
@@ -1473,6 +1500,68 @@ mod tests {
             guest_memory.iter().for_each(|region| {
                 assert_eq!(region.bitmap().is_some(), dirty_page_tracking);
             });
+        }
+    }
+
+    #[test]
+    fn snapshot_copy_preserves_regions_source_and_dirty_tracking() {
+        let size = mib_to_bytes(2);
+        for huge_pages in [HugePageConfig::None, HugePageConfig::Transparent] {
+            for track in [false, true] {
+                let file = TempFile::new().unwrap().into_file();
+                file.set_len((size * 2) as u64).unwrap();
+                file.write_all_at(&[0x42], 0).unwrap();
+                file.write_all_at(&[0x24], (size * 2 - 1) as u64).unwrap();
+                let regions = [
+                    (GuestAddress(0), size),
+                    (GuestAddress(4 * size as u64), size),
+                ];
+                let memory =
+                    snapshot_copy(file.try_clone().unwrap(), &regions, track, huge_pages).unwrap();
+                for (index, region) in memory.iter().enumerate() {
+                    assert_eq!(region.start_addr(), regions[index].0);
+                    assert!(region.file_offset().is_none());
+                    assert_eq!(region.bitmap().is_some(), track);
+                    assert!(!region.bitmap().dirty_at(0));
+                    assert!(!region.bitmap().dirty_at(size - 1));
+                }
+                assert_eq!(
+                    memory[0].read_obj::<u8>(MemoryRegionAddress(0)).unwrap(),
+                    0x42
+                );
+                assert_eq!(
+                    memory[1]
+                        .read_obj::<u8>(MemoryRegionAddress((size - 1) as u64))
+                        .unwrap(),
+                    0x24
+                );
+                assert_eq!(memory[1].read_obj::<u8>(MemoryRegionAddress(0)).unwrap(), 0);
+                memory[0].write_obj(0x99u8, MemoryRegionAddress(0)).unwrap();
+                assert_eq!(memory[0].bitmap().dirty_at(0), track);
+                let mut original = [0];
+                file.read_exact_at(&mut original, 0).unwrap();
+                assert_eq!(original, [0x42]);
+            }
+        }
+    }
+
+    #[test]
+    fn snapshot_copy_rejects_short_or_overflowing_files() {
+        let file = TempFile::new().unwrap().into_file();
+        file.set_len(4096).unwrap();
+        for regions in [
+            vec![(GuestAddress(0), 8192)],
+            vec![(GuestAddress(0), usize::MAX), (GuestAddress(4096), 1)],
+        ] {
+            assert!(matches!(
+                snapshot_copy(
+                    file.try_clone().unwrap(),
+                    &regions,
+                    false,
+                    HugePageConfig::None
+                ),
+                Err(MemoryError::OffsetTooLarge)
+            ));
         }
     }
 

@@ -1865,7 +1865,11 @@ definitions:
         type: string
         enum:
           - File
+          - Anonymous
           - Uffd
+        description: File maps snapshot memory privately on demand. Anonymous copies
+          the entire memory file into anonymous memory before resume, using the
+          selected huge_pages configuration. Uffd delegates page faults to a handler.
       backend_path:
         type: string
         description: Based on 'backend_type' it is either

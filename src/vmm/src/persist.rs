@@ -543,8 +543,9 @@ pub fn restore_from_snapshot(
     let mem_state = &microvm_state.vm_state.memory;
 
     let (guest_memory, uffd) = match params.mem_backend.backend_type {
-        MemBackendType::File => {
-            if vm_resources.machine_config.huge_pages.is_hugetlbfs() {
+        MemBackendType::File | MemBackendType::Anonymous => {
+            let copy = params.mem_backend.backend_type == MemBackendType::Anonymous;
+            if !copy && vm_resources.machine_config.huge_pages.is_hugetlbfs() {
                 return Err(RestoreFromSnapshotGuestMemoryError::File(
                     GuestMemoryFromFileError::HugetlbfsSnapshot,
                 )
@@ -556,6 +557,7 @@ pub fn restore_from_snapshot(
                     mem_state,
                     track_dirty_pages,
                     vm_resources.machine_config.huge_pages,
+                    copy,
                 )
                 .map_err(RestoreFromSnapshotGuestMemoryError::File)?,
                 None,
@@ -618,7 +620,8 @@ pub enum GuestMemoryFromFileError {
     File(#[from] std::io::Error),
     /// Failed to restore guest memory: {0}
     Restore(#[from] MemoryError),
-    /// Cannot restore hugetlbfs backed snapshot by mapping the memory file. Please use uffd.
+    /// Cannot restore hugetlbfs backed snapshot by mapping the memory file. Please use Anonymous
+    /// or Uffd.
     HugetlbfsSnapshot,
 }
 
@@ -627,9 +630,15 @@ fn guest_memory_from_file(
     mem_state: &GuestMemoryState,
     track_dirty_pages: bool,
     huge_pages: HugePageConfig,
+    copy: bool,
 ) -> Result<Vec<GuestRegionMmap>, GuestMemoryFromFileError> {
     let mem_file = File::open(mem_file_path)?;
-    let guest_mem = memory::snapshot_file(
+    let load = if copy {
+        memory::snapshot_copy
+    } else {
+        memory::snapshot_file
+    };
+    let guest_mem = load(
         mem_file,
         &mem_state.regions(),
         track_dirty_pages,
