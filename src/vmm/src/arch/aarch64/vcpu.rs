@@ -455,8 +455,20 @@ impl KvmVcpu {
     ///
     /// * `reg` - Register to be set.
     pub fn set_register(&self, reg: Aarch64RegisterRef) -> Result<(), VcpuArchError> {
+        let set_id = match reg.id {
+            PMINTENCLR_EL1 => PMINTENSET_EL1,
+            PMCNTENCLR_EL0 => PMCNTENSET_EL0,
+            PMOVSCLR_EL0 => PMOVSSET_EL0,
+            id => id,
+        };
+        if set_id != reg.id {
+            // Clear then set works with both older W1C/W1S and newer direct-assignment KVM ABIs.
+            self.fd
+                .set_one_reg(reg.id, &u64::MAX.to_le_bytes())
+                .map_err(|e| VcpuArchError::SetOneReg(reg.id, reg.value_str(), e))?;
+        }
         self.fd
-            .set_one_reg(reg.id, reg.as_slice())
+            .set_one_reg(set_id, reg.as_slice())
             .map_err(|e| VcpuArchError::SetOneReg(reg.id, reg.value_str(), e))?;
         Ok(())
     }
@@ -762,6 +774,12 @@ pub(crate) mod tests {
         assert!(vcpu.has_pmu());
         vcpu.fd
             .set_one_reg(PMSELR_EL0, &1_u64.to_le_bytes())
+            .unwrap();
+        vcpu.fd
+            .set_one_reg(PMINTENCLR_EL1, &u64::MAX.to_le_bytes())
+            .unwrap();
+        vcpu.fd
+            .set_one_reg(PMOVSSET_EL0, &(1_u64 << 31).to_le_bytes())
             .unwrap();
         let state = vcpu.save_state().unwrap();
         let mut restored_vm = setup_vm_with_memory(0x1000);
