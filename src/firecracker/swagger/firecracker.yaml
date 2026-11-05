@@ -404,7 +404,7 @@ paths:
     put:
       summary: Replaces optical media in an attached drive. Post-boot only.
       description: >-
-        Requires the windows feature on AMD64 and a drive attached at boot.
+        Requires the windows feature and a drive attached at boot.
         Path and body IDs must match. An omitted or null path removes the medium
         and opens the tray. Insertion closes the tray. The drive must be idle
         and unlocked. Failed updates preserve the previous medium and path.
@@ -1593,7 +1593,7 @@ definitions:
       drive_id:
         type: string
         minLength: 1
-        description: Unique nonempty alphanumeric or underscore identifier within this console; list order selects primary then secondary master.
+        description: Unique nonempty alphanumeric or underscore identifier within this console; list order selects the controller slot.
       path_on_host:
         type: string
         description: Optional read-only ISO path; omission or null leaves the drive empty.
@@ -1605,8 +1605,8 @@ definitions:
       Requires the windows build feature. Optional graphical console.
       AMD64 attaches VGA, PS/2 keyboard, USB
       absolute HID mouse and optional optical media. ARM64 attaches an MMIO
-      display and one combined virtio keyboard/absolute pointer with modern PCI;
-      its configuration accepts only socket_path. Both require PCI, at least
+      display and one combined virtio keyboard/absolute pointer with modern PCI,
+      optional virtio-SCSI optical drives and a named virtio serial output port. Both require PCI, at least
       64 MiB and ordinary pages. Set through the startup configuration file;
       there is no separate console configuration endpoint.
     required:
@@ -1640,7 +1640,13 @@ definitions:
         default: []
         items:
           $ref: "#/definitions/OpticalDriveConfig"
-        description: AMD64 optical masters with unique drive IDs; an empty array attaches no IDE controller. Not accepted on ARM64.
+        description: Optical drives with unique IDs; IDE on AMD64, virtio-SCSI targets on ARM64. An empty array attaches no optical controller.
+      serial_port:
+        type: string
+        minLength: 1
+        maxLength: 128
+        pattern: "^[A-Za-z0-9_.-]+$"
+        description: Optional ARM64 virtio-console port name. Guest output is written to the VMM standard output. Not accepted on AMD64.
 
   FullVmConfiguration:
     type: object

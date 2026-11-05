@@ -14,6 +14,8 @@ use crate::devices::virtio::net::TapError;
 
 pub mod balloon;
 pub mod block;
+#[cfg(feature = "windows")]
+mod buffers;
 pub mod device;
 pub mod generated;
 pub mod gpu;
@@ -25,7 +27,10 @@ pub mod net;
 pub mod persist;
 pub mod pmem;
 pub mod queue;
+pub mod queued;
 pub mod rng;
+pub mod scsi;
+pub mod serial;
 pub mod test_utils;
 pub mod transport;
 pub mod vhost_user;

@@ -21,8 +21,7 @@ pub enum DisplayModel {
     Qxl,
 }
 
-/// One AMD64 optical drive; list order selects primary then secondary master.
-#[cfg(target_arch = "x86_64")]
+/// One optical drive; list order selects its controller slot.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct OpticalDriveConfig {
@@ -56,10 +55,12 @@ pub struct ConsoleConfig {
     /// Optional with explicit CloudHv firmware; required for SeaBIOS and legacy profiles.
     #[cfg(target_arch = "x86_64")]
     pub vga_rom_path: Option<PathBuf>,
-    /// At most two optical masters, in primary/secondary channel order.
-    #[cfg(target_arch = "x86_64")]
+    /// At most two optical drives in controller slot order.
     #[serde(default)]
     pub optical_drives: Vec<OpticalDriveConfig>,
+    /// Optional ARM64 named virtio serial output port.
+    #[cfg(target_arch = "aarch64")]
+    pub serial_port: Option<String>,
 }
 
 impl ConsoleConfig {
@@ -72,7 +73,6 @@ impl ConsoleConfig {
                 "virtio GPU does not use a VGA option ROM",
             ));
         }
-        #[cfg(target_arch = "x86_64")]
         if self.optical_drives.len() > 2
             || self.optical_drives.iter().any(|drive| {
                 drive.drive_id.is_empty()
@@ -87,6 +87,14 @@ impl ConsoleConfig {
             return Err(std::io::Error::other(
                 "optical drives require at most two unique alphanumeric or underscore IDs",
             ));
+        }
+        #[cfg(target_arch = "aarch64")]
+        if self
+            .serial_port
+            .as_deref()
+            .is_some_and(|name| !crate::devices::virtio::serial::valid_name(name))
+        {
+            return Err(std::io::Error::other("invalid serial port name"));
         }
         utils::unix_socket::validate(&self.socket_path)
     }
@@ -236,8 +244,9 @@ mod tests {
 #[cfg(feature = "windows")]
 #[cfg(target_arch = "x86_64")]
 mod memory_tests {
-    use crate::arch::x86_64::{arch_memory_regions, reserve_vga_memory};
     use vm_memory::GuestAddress;
+
+    use crate::arch::x86_64::{arch_memory_regions, reserve_vga_memory};
 
     #[test]
     fn vga_aperture_excludes_ram_without_moving_other_addresses() {
@@ -265,13 +274,20 @@ mod arm_tests {
     use super::*;
 
     #[test]
-    fn arm_console_accepts_only_the_private_socket() {
+    fn arm_console_validates_native_transports() {
         let config: ConsoleConfig =
             serde_json::from_str(r#"{"socket_path":"console.sock"}"#).unwrap();
         config.validate().unwrap();
-        for property in ["vga_rom_path", "optical_drives"] {
+        for property in ["vga_rom_path", "display"] {
             let value = serde_json::json!({"socket_path":"console.sock", (property):"unsupported"});
             serde_json::from_value::<ConsoleConfig>(value).unwrap_err();
         }
+        let mut config: ConsoleConfig = serde_json::from_str(r#"{"socket_path":"console.sock","serial_port":"com.toets.0","optical_drives":[{"drive_id":"payload"},{"drive_id":"exec"}]}"#).unwrap();
+        config.validate().unwrap();
+        config.serial_port = Some("bad/port".into());
+        config.validate().unwrap_err();
+        config.serial_port = None;
+        config.optical_drives[1].drive_id = "payload".into();
+        config.validate().unwrap_err();
     }
 }

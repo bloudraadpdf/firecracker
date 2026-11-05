@@ -68,6 +68,8 @@ pub struct ConsoleServer {
     #[cfg(target_arch = "x86_64")]
     qxl: Option<Arc<Mutex<super::console_qxl::QxlConsole>>>,
     input: ConsoleInput,
+    #[cfg(target_arch = "aarch64")]
+    pub(super) scsi: Option<Arc<Mutex<dyn crate::devices::virtio::device::VirtioDevice>>>,
     #[cfg(target_arch = "x86_64")]
     optical: Option<Arc<Mutex<OpticalDevice>>>,
     #[cfg(target_arch = "x86_64")]
@@ -105,6 +107,8 @@ impl ConsoleServer {
             #[cfg(target_arch = "x86_64")]
             qxl: None,
             input,
+            #[cfg(target_arch = "aarch64")]
+            scsi: None,
             #[cfg(target_arch = "x86_64")]
             optical,
             #[cfg(target_arch = "x86_64")]
@@ -304,6 +308,23 @@ impl ConsoleServer {
                     .optical
                     .as_ref()
                     .is_some_and(|device| device.lock().unwrap().eject(0).is_ok());
+                Self::acknowledge(if result { 0 } else { 2 })
+            }
+            #[cfg(target_arch = "aarch64")]
+            4 if request[5..].iter().all(|byte| *byte == 0) => {
+                let result = self.scsi.as_ref().is_some_and(|device| {
+                    device
+                        .lock()
+                        .unwrap()
+                        .as_mut_any()
+                        .downcast_mut::<crate::devices::virtio::queued::QueuedDevice<
+                            crate::devices::virtio::scsi::Scsi,
+                        >>()
+                        .unwrap()
+                        .protocol
+                        .eject(0)
+                        .is_ok()
+                });
                 Self::acknowledge(if result { 0 } else { 2 })
             }
             5 if request[5..].iter().all(|byte| *byte == 0) => {

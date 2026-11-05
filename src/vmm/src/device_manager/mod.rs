@@ -23,6 +23,8 @@ use persist::{
 };
 use serde::{Deserialize, Serialize};
 use utils::time::TimestampUs;
+#[cfg(all(target_arch = "aarch64", feature = "windows"))]
+use vm_memory::{GuestMemoryBackend, GuestMemoryRegion};
 use vm_superio::serial;
 use vmm_sys_util::eventfd::EventFd;
 
@@ -64,8 +66,6 @@ use crate::vmm_config::pmem::{PmemConfig, PmemConfigError};
 use crate::vstate::bus::BusError;
 use crate::vstate::memory::GuestMemoryMmap;
 use crate::vstate::vm::{KvmVm, Vm};
-#[cfg(all(target_arch = "aarch64", feature = "windows"))]
-use vm_memory::{GuestMemoryBackend, GuestMemoryRegion};
 
 /// ACPI device manager.
 pub mod acpi;
@@ -849,6 +849,11 @@ impl DevicesState {
 /// Errors for (de)serialization of the devices.
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum DevicePersistError {
+    /// Named serial and SCSI console devices require PCI.
+    ConsoleTransport,
+    #[cfg(feature = "windows")]
+    /// Console transport: {0}
+    Queued(#[from] crate::devices::virtio::queued::QueuedPersistError),
     #[cfg(feature = "windows")]
     /// GPU: {0}
     Gpu(#[from] crate::devices::virtio::gpu::persist::GpuPersistError),
@@ -1308,9 +1313,9 @@ impl DeviceManager {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::*;
     use vmm_sys_util::tempfile::TempFile;
 
+    use super::*;
     use crate::builder::tests::{
         CustomBlockConfig, default_kernel_cmdline, default_vmm, default_vmm_with_hotplug_ports,
         default_vmm_with_pci, insert_block_devices,
@@ -1705,9 +1710,9 @@ pub(crate) mod tests {
 
     #[test]
     fn test_unplug_marks_used_rings_dirty() {
-        use crate::arch::host_page_size;
         use vm_memory::GuestMemoryBackend;
 
+        use crate::arch::host_page_size;
         use crate::devices::virtio::block::device::Block;
         use crate::devices::virtio::test_utils::{VirtQueue, default_interrupt};
         use crate::test_utils::single_region_mem_dirty_tracking;

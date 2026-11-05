@@ -339,7 +339,6 @@ impl DeviceManager {
             .resize(config.width, config.height)
     }
 
-    #[cfg(target_arch = "x86_64")]
     pub(crate) fn update_optical_drive(
         &mut self,
         config: crate::vmm_config::console::OpticalDriveConfig,
@@ -354,6 +353,7 @@ impl DeviceManager {
             .iter()
             .position(|drive| drive.drive_id == config.drive_id)
             .ok_or_else(|| io::Error::other("optical drive is absent"))?;
+        #[cfg(target_arch = "x86_64")]
         console
             .optical
             .as_ref()
@@ -361,6 +361,16 @@ impl DeviceManager {
             .lock()
             .unwrap()
             .replace_media(channel, config.path_on_host.as_deref())?;
+        #[cfg(target_arch = "aarch64")]
+        {
+            let VirtioDevices::Pci(pci) = &self.virtio_devices else {
+                return Err(io::Error::other("optical controller requires PCI"));
+            };
+            let device = pci
+                .get_device(VirtioDeviceType::Scsi, "scsi")
+                .ok_or_else(|| io::Error::other("optical controller is absent"))?;
+            device.lock().unwrap().as_mut_any().downcast_mut::<crate::devices::virtio::queued::QueuedDevice<crate::devices::virtio::scsi::Scsi>>().unwrap().protocol.replace_media(channel, config.path_on_host.clone())?;
+        }
         console.config.optical_drives[channel] = config;
         Ok(())
     }
@@ -545,6 +555,63 @@ impl DeviceManager {
             .map_err(io::Error::other)?;
             input
         };
+        use crate::devices::virtio::queued::{Protocol, QueuedDevice};
+        use crate::devices::virtio::scsi::Scsi;
+        use crate::devices::virtio::serial::Serial;
+        let serial = pci.get_device(VirtioDeviceType::Console, Serial::ID);
+        let scsi = pci.get_device(VirtioDeviceType::Scsi, Scsi::ID);
+        if state.is_some() {
+            if serial.is_some() != config.serial_port.is_some()
+                || scsi.is_some() != !config.optical_drives.is_empty()
+            {
+                return Err(io::Error::other(
+                    "saved console transport topology disagrees",
+                ));
+            }
+            if let Some(device) = serial {
+                let device = device.lock().unwrap();
+                let port = &device
+                    .as_any()
+                    .downcast_ref::<QueuedDevice<Serial>>()
+                    .unwrap()
+                    .protocol;
+                if Some(port.name()) != config.serial_port.as_deref() {
+                    return Err(io::Error::other("saved serial port name disagrees"));
+                }
+            }
+            if let Some(device) = scsi {
+                let device = device.lock().unwrap();
+                let scsi = &device
+                    .as_any()
+                    .downcast_ref::<QueuedDevice<Scsi>>()
+                    .unwrap()
+                    .protocol;
+                if !scsi.paths().eq(config
+                    .optical_drives
+                    .iter()
+                    .map(|drive| &drive.path_on_host))
+                {
+                    return Err(io::Error::other("saved optical paths disagree"));
+                }
+            }
+        } else {
+            if let Some(name) = &config.serial_port {
+                pci.attach_queued(vm, Serial::new(name.clone())?, events)?;
+            }
+            if !config.optical_drives.is_empty() {
+                pci.attach_queued(
+                    vm,
+                    Scsi::new(
+                        &config
+                            .optical_drives
+                            .iter()
+                            .map(|drive| drive.path_on_host.clone())
+                            .collect::<Vec<_>>(),
+                    )?,
+                    events,
+                )?;
+            }
+        }
         let framebuffer = Ramfb::attach(
             vm,
             state.map(|state| {
@@ -552,11 +619,12 @@ impl DeviceManager {
                 framebuffer
             }),
         )?;
-        let server = ConsoleServer::new(
+        let mut server = ConsoleServer::new(
             &config.socket_path,
             framebuffer.clone(),
             ConsoleInput::Virtio(input),
         )?;
+        server.scsi = pci.get_device(VirtioDeviceType::Scsi, Scsi::ID);
         let display = ConsoleDisplay::Ramfb(framebuffer);
         self.console = Some(ConsoleHardware {
             config: config.clone(),
@@ -672,11 +740,12 @@ mod registration_tests {
 
     #[test]
     fn qxl_console_restores_its_selected_adapter_and_transactional_timer_registration() {
+        use vmm_sys_util::tempdir::TempDir;
+
         use crate::device_manager::DeviceRestoreArgs;
         use crate::resources::VmResources;
         use crate::snapshot::Persist;
         use crate::vstate::resources::ResourceAllocator;
-        use vmm_sys_util::tempdir::TempDir;
         let directory = TempDir::new_with_prefix("./qxl-console-").unwrap();
         let config = ConsoleConfig {
             socket_path: directory.as_path().join("console.sock"),
@@ -762,11 +831,12 @@ mod registration_tests {
 
     #[test]
     fn virtio_console_restores_one_gpu_and_its_boot_display() {
+        use vmm_sys_util::tempdir::TempDir;
+
         use crate::device_manager::DeviceRestoreArgs;
         use crate::resources::VmResources;
         use crate::snapshot::Persist;
         use crate::vstate::resources::ResourceAllocator;
-        use vmm_sys_util::tempdir::TempDir;
         let directory = TempDir::new_with_prefix("./gpu-console-").unwrap();
         let config = ConsoleConfig {
             socket_path: directory.as_path().join("console.sock"),
@@ -884,6 +954,7 @@ mod registration_tests {
     #[test]
     fn mismatched_optical_snapshot_is_rejected_before_attaching_devices() {
         use std::io::Write;
+
         use vmm_sys_util::tempdir::TempDir;
         use vmm_sys_util::tempfile::TempFile;
 

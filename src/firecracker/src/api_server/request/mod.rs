@@ -16,7 +16,7 @@ pub mod machine_configuration;
 pub mod metrics;
 pub mod mmds;
 pub mod net;
-#[cfg(all(feature = "windows", target_arch = "x86_64"))]
+#[cfg(feature = "windows")]
 pub mod optical;
 pub mod pmem;
 pub mod serial;

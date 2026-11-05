@@ -1,10 +1,13 @@
 // Copyright 2026 Bloudraad.
 // SPDX-License-Identifier: Apache-2.0
 
+use vm_memory::Bytes;
+
 use super::super::test_utils::request;
 use super::*;
-use crate::devices::virtio::queue::VIRTQ_DESC_F_NEXT;
+use crate::devices::virtio::queue::{VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE};
 use crate::devices::virtio::test_utils::{VirtQueue as TestQueue, default_mem};
+use crate::vstate::memory::GuestAddress;
 
 fn descriptors<'a>(
     mem: &'a GuestMemoryMmap,

@@ -268,7 +268,7 @@ fn prepare_install_files(
     fs::remove_dir_all(driver_tree)?;
     let components: &[&str] = match architecture {
         Architecture::Amd64 => &["NetKVM"],
-        Architecture::Arm64 => &["NetKVM", "vioinput", "viosock"],
+        Architecture::Arm64 => &["NetKVM", "vioinput", "viosock", "vioscsi", "vioserial"],
     };
     for component in components {
         let package = format!("{component}/{driver}/{}", architecture.directory());
@@ -305,10 +305,12 @@ fn prepare_install_files(
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).map(PathBuf::from).collect();
     let [profile, source, drivers, output, extra @ ..] = args.as_slice() else {
-        return Err("usage: prepare-nt6 \
+        return Err(
+            "usage: prepare-nt6 \
              win7|win10|win11|win11-enterprise-26h2|win11-pro-26h2|win11-iot-arm64|server2025 \
              WINDOWS_ISO VIRTIO_DRIVER_ISO NEW_OUTPUT_DIRECTORY [ANSWER_XML]"
-            .into());
+                .into(),
+        );
     };
     if extra.len() > 1 {
         return Err("at most one answer file is allowed".into());
@@ -348,8 +350,8 @@ fn main() -> Result<()> {
     fs::write(output.join("files.sha256-sizes"), evidence)?;
     if architecture == Architecture::Arm64 {
         println!(
-            "Staged {} ARM64 payload files: {}. WIM servicing and GPT/FAT installer assembly \
-             remain required.",
+            "Staged {} ARM64 payload files: {}. WIM servicing and EFI ISO assembly remain \
+             required.",
             expected.len(),
             tree.display()
         );
@@ -583,7 +585,14 @@ mod tests {
         let tree = root.join("tree");
         fs::create_dir(&tree).unwrap();
         let mut selected = BTreeMap::new();
-        for component in ["viostor", "NetKVM", "vioinput", "viosock"] {
+        for component in [
+            "viostor",
+            "NetKVM",
+            "vioinput",
+            "viosock",
+            "vioscsi",
+            "vioserial",
+        ] {
             for (version, arch) in [
                 ("w11", "amd64"),
                 ("w10", "amd64"),
@@ -622,7 +631,14 @@ mod tests {
         run(Command::new("7z")
             .args(["a", "-tzip", "-bd"])
             .arg(&archive)
-            .args(["viostor", "NetKVM", "vioinput", "viosock"])
+            .args([
+                "viostor",
+                "NetKVM",
+                "vioinput",
+                "viosock",
+                "vioscsi",
+                "vioserial",
+            ])
             .current_dir(&source))
         .unwrap();
         let answer = with_answer.then(|| b"<unattend/>".to_vec());

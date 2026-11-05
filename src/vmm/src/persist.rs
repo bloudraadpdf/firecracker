@@ -12,7 +12,6 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use crate::utils::Version;
 use serde::{Deserialize, Serialize};
 use userfaultfd::{FeatureFlags, Uffd, UffdBuilder};
 use vmm_sys_util::sock_ctrl_msg::ScmSocket;
@@ -25,16 +24,16 @@ use crate::cpu_config::templates::StaticCpuTemplate;
 use crate::cpu_config::x86_64::cpuid::CpuidTrait;
 #[cfg(target_arch = "x86_64")]
 use crate::cpu_config::x86_64::cpuid::common::get_vendor_id_from_host;
-use crate::device_manager::{DevicePersistError, DevicesState};
-use crate::devices::virtio::PrepareSaveError;
 // Re-exported so external crates inspecting a `MicrovmState` snapshot can match on the
 // serialised virtio transport variant.
 pub use crate::device_manager::VirtioDevicesState;
+use crate::device_manager::{DevicePersistError, DevicesState};
+use crate::devices::virtio::PrepareSaveError;
 use crate::logger::{info, warn};
 use crate::resources::VmResources;
 use crate::seccomp::BpfThreadMap;
 use crate::snapshot::Snapshot;
-use crate::utils::u64_to_usize;
+use crate::utils::{Version, u64_to_usize};
 use crate::vmm_config::boot_source::BootSourceConfig;
 use crate::vmm_config::instance_info::InstanceInfo;
 use crate::vmm_config::machine_config::{HugePageConfig, MachineConfigError, MachineConfigUpdate};
@@ -199,7 +198,7 @@ pub enum CreateSnapshotError {
 }
 
 /// Snapshot version
-pub const SNAPSHOT_VERSION: Version = Version::new(46, 0, 0);
+pub const SNAPSHOT_VERSION: Version = Version::new(47, 0, 0);
 
 /// Creates a Microvm snapshot.
 pub fn create_snapshot(
@@ -506,8 +505,8 @@ pub fn restore_from_snapshot(
     );
     if pci_enabled != vm_resources.pci_enabled {
         warn!(
-            "The snapshot's PCI configuration does not match --enable-pci; \
-             following the snapshot configuration."
+            "The snapshot's PCI configuration does not match --enable-pci; following the snapshot \
+             configuration."
         );
     }
     vm_resources.pci_enabled = pci_enabled;
@@ -588,7 +587,8 @@ pub fn restore_from_snapshot(
 /// Error type for [`snapshot_state_from_file`]
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum SnapshotStateFromFileError {
-    /// A dedicated variable-service backend and expected generation are required exactly when the snapshot contains protected variables.
+    /// A dedicated variable-service backend and expected generation are required exactly when the
+    /// snapshot contains protected variables.
     UefiVarsBackend,
     /// A dedicated TPM backend is required exactly when the snapshot contains TPM state.
     TpmBackend,
@@ -850,13 +850,15 @@ mod tests {
     #[test]
     #[cfg(feature = "windows")]
     fn maximum_optional_buffers_fit_snapshot_reader() {
+        #[cfg(target_arch = "x86_64")]
+        use std::io::Write;
+
+        use vmm_sys_util::tempdir::TempDir;
+
         use crate::device_manager::DeviceManager;
         use crate::vmm_config::console::ConsoleConfig;
         use crate::vmm_config::machine_config::MAX_SUPPORTED_VCPUS;
         use crate::vstate::vm::tests::setup_vm_with_memory;
-        #[cfg(target_arch = "x86_64")]
-        use std::io::Write;
-        use vmm_sys_util::tempdir::TempDir;
 
         let directory = TempDir::new().unwrap();
         #[cfg(target_arch = "x86_64")]
@@ -897,8 +899,9 @@ mod tests {
                     display: Default::default(),
                     #[cfg(target_arch = "x86_64")]
                     vga_rom_path: Some(rom.as_path().to_owned()),
-                    #[cfg(target_arch = "x86_64")]
                     optical_drives: Vec::new(),
+                    #[cfg(target_arch = "aarch64")]
+                    serial_port: Some("com.toets.0".into()),
                 },
                 None,
                 &mut events,

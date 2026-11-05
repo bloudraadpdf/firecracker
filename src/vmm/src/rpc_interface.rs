@@ -23,7 +23,6 @@ use crate::mmds::data_store::{self, Mmds, MmdsDatastoreError};
 use crate::persist::{CreateSnapshotError, RestoreFromSnapshotError, VmInfo};
 use crate::resources::VmmConfig;
 use crate::seccomp::BpfThreadMap;
-use crate::vmm_config::HotplugDeviceConfig;
 use crate::vmm_config::balloon::{
     BalloonConfigError, BalloonDeviceConfig, BalloonStats, BalloonUpdateConfig,
     BalloonUpdateStatsConfig,
@@ -45,7 +44,7 @@ use crate::vmm_config::pmem::{PmemConfig, PmemConfigError, PmemDeviceUpdateConfi
 use crate::vmm_config::serial::SerialConfig;
 use crate::vmm_config::snapshot::{CreateSnapshotParams, LoadSnapshotParams, SnapshotType};
 use crate::vmm_config::vsock::{VsockConfigError, VsockDeviceConfig};
-use crate::vmm_config::{self, RateLimiterUpdate};
+use crate::vmm_config::{self, HotplugDeviceConfig, RateLimiterUpdate};
 
 /// This enum represents the public interface of the VMM. Each action contains various
 /// bits of information (ids, paths, etc.).
@@ -154,7 +153,7 @@ pub enum VmmAction {
     #[cfg(all(feature = "windows", target_arch = "x86_64"))]
     UpdateDisplay(crate::vmm_config::console::DisplayUpdateConfig),
     /// Replace media in an attached optical drive after boot.
-    #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+    #[cfg(feature = "windows")]
     UpdateOpticalDrive(crate::vmm_config::console::OpticalDriveConfig),
     /// Update existing block device properties such as `path_on_host` or `rate_limiter`.
     UpdateBlockDevice(BlockDeviceUpdateConfig),
@@ -213,7 +212,7 @@ pub enum VmmActionError {
     #[cfg(all(feature = "windows", target_arch = "x86_64"))]
     DisplayUpdate(crate::devices::virtio::gpu::GpuError),
     /// Optical media update error: {0}
-    #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+    #[cfg(feature = "windows")]
     OpticalMedia(std::io::Error),
     /// Network config error: {0}
     NetworkConfig(#[from] NetworkInterfaceError),
@@ -547,10 +546,10 @@ impl<'a> PrebootApiController<'a> {
             | StopFreePageHinting
             | HotUnplugDevice(..)
             | SendCtrlAltDel => Err(VmmActionError::OperationNotSupportedPreBoot),
+            #[cfg(feature = "windows")]
+            UpdateOpticalDrive(_) => Err(VmmActionError::OperationNotSupportedPreBoot),
             #[cfg(all(feature = "windows", target_arch = "x86_64"))]
-            UpdateDisplay(_) | UpdateOpticalDrive(_) | SendPowerButton => {
-                Err(VmmActionError::OperationNotSupportedPreBoot)
-            }
+            UpdateDisplay(_) | SendPowerButton => Err(VmmActionError::OperationNotSupportedPreBoot),
         }
     }
 
@@ -885,7 +884,7 @@ impl RuntimeApiController {
                 .update_display(config)
                 .map(|_| VmmData::Empty)
                 .map_err(VmmActionError::DisplayUpdate),
-            #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+            #[cfg(feature = "windows")]
             UpdateOpticalDrive(config) => self
                 .vmm
                 .lock()
@@ -1299,7 +1298,7 @@ mod tests {
                 height: 720,
             },
         )));
-        #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+        #[cfg(feature = "windows")]
         check_unsupported(preboot_request(VmmAction::UpdateOpticalDrive(
             crate::vmm_config::console::OpticalDriveConfig {
                 drive_id: "exec".into(),

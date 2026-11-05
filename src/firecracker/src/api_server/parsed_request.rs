@@ -27,7 +27,7 @@ use super::request::machine_configuration::{
 use super::request::metrics::parse_put_metrics;
 use super::request::mmds::{parse_get_mmds, parse_patch_mmds, parse_put_mmds};
 use super::request::net::{parse_patch_net, parse_put_net};
-#[cfg(all(feature = "windows", target_arch = "x86_64"))]
+#[cfg(feature = "windows")]
 use super::request::optical::parse_put_optical;
 use super::request::pmem::{parse_patch_pmem, parse_put_pmem};
 use super::request::snapshot::{parse_patch_vm_state, parse_put_snapshot};
@@ -103,7 +103,7 @@ impl TryFrom<&Request> for ParsedRequest {
             (Method::Put, "boot-source", Some(body)) => parse_put_boot_source(body),
             (Method::Put, "cpu-config", Some(body)) => parse_put_cpu_config(body),
             (Method::Put, "drives", Some(body)) => parse_put_drive(body, path_tokens.next()),
-            #[cfg(all(feature = "windows", target_arch = "x86_64"))]
+            #[cfg(feature = "windows")]
             (Method::Put, "optical-drives", Some(body)) if path_tokens.clone().count() == 1 => {
                 parse_put_optical(body, path_tokens.next())
             }

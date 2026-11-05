@@ -17,12 +17,11 @@ use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 use std::sync::{Arc, Barrier, Mutex, Weak};
 
 use event_manager::{EventOps, Events, MutEventSubscriber};
-use vmm_sys_util::epoll::EventSet;
-
 use kvm_ioctls::{IoEventAddress, NoDatamatch};
 use serde::{Deserialize, Serialize};
 use vm_allocator::{AddressAllocator, AllocPolicy, RangeInclusive};
 use vm_memory::{ByteValued, Le32};
+use vmm_sys_util::epoll::EventSet;
 use vmm_sys_util::errno;
 use vmm_sys_util::eventfd::EventFd;
 use zerocopy::IntoBytes;
@@ -285,7 +284,8 @@ pub enum VirtioPciDeviceError {
     Msi(#[from] InterruptError),
     /// Invalid PCI configuration state: {0}
     PciConfiguration(#[from] PciConfigurationError),
-    /// Invalid restore state: driver_status {0:#x} is inconsistent with device_activated (expected {1:#x})
+    /// Invalid restore state: driver_status {0:#x} is inconsistent with device_activated (expected
+    /// {1:#x})
     InvalidRestoreState(u8, u8),
     /// Restored MSI-X vector count ({0}) does not match the expected count ({1}) for this device
     UnexpectedMsixVectorCount(usize, usize),
@@ -446,6 +446,11 @@ impl VirtioPciDevice {
     ) -> PciConfiguration {
         let pci_device_id = legacy_id.unwrap_or(VIRTIO_PCI_DEVICE_ID_BASE + device_type as u16);
         let (class, subclass) = match device_type {
+            VirtioDeviceType::Scsi => (
+                PciClassCode::MassStorageController,
+                PciMassStorageSubclass::ScsiStorage as u8,
+            ),
+            VirtioDeviceType::Console => (PciClassCode::CommunicationController, 0x80),
             VirtioDeviceType::Net => (
                 PciClassCode::NetworkController,
                 PciNetworkControllerSubclass::EthernetController as u8,
@@ -2294,10 +2299,12 @@ mod tests {
 
     #[test]
     fn interrupt_forwarder_registration_failure_rolls_back_partial_events() {
-        use super::PciInterruptForwarder;
-        use event_manager::{Events, SubscriberOps};
         use std::sync::Weak;
+
+        use event_manager::{Events, SubscriberOps};
         use vmm_sys_util::epoll::EventSet;
+
+        use super::PciInterruptForwarder;
 
         let mut events = crate::EventManager::new().unwrap();
         let owner = PciInterruptForwarder {
@@ -2336,8 +2343,9 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn test_intx_isr_masking_forwarding_and_reset() {
-        use crate::devices::virtio::transport::{VirtioInterrupt, VirtioInterruptType};
         use event_manager::SubscriberOps;
+
+        use crate::devices::virtio::transport::{VirtioInterrupt, VirtioInterruptType};
         let vmm = create_vmm_with_pci_mode(crate::pci::PciTransportMode::Transitional);
         let device = get_virtio_device(&vmm);
         let base = enable_legacy_ports(&device);
@@ -2566,9 +2574,10 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn test_legacy_partial_queue_use_and_reset() {
+        use vm_memory::{Bytes, GuestAddress};
+
         use crate::devices::virtio::balloon::Balloon;
         use crate::devices::virtio::queue::Descriptor;
-        use vm_memory::{Bytes, GuestAddress};
 
         let (vmm, backend) = legacy_balloon_fixture();
         let device = pci_devices(&vmm.device_manager)

@@ -42,6 +42,12 @@ use crate::devices::virtio::vsock::persist::{
     VsockConstructorArgs, VsockState, VsockUdsConstructorArgs,
 };
 use crate::devices::virtio::vsock::{Vsock, VsockUnixBackend};
+#[cfg(feature = "windows")]
+use crate::devices::virtio::{
+    queued::{Protocol, QueuedDevice, QueuedPersistError, QueuedState},
+    scsi::Scsi,
+    serial::Serial,
+};
 use crate::logger::{debug, warn};
 use crate::pci::PciSBDF;
 use crate::pci::bus::PciBusError;
@@ -407,6 +413,74 @@ impl PciDevices {
         }
     }
 
+    #[cfg(all(feature = "windows", target_arch = "aarch64"))]
+    pub(crate) fn attach_queued<P: Protocol>(
+        &mut self,
+        vm: &Arc<KvmVm>,
+        protocol: P,
+        events: &mut EventManager,
+    ) -> std::io::Result<()> {
+        let device = Arc::new(Mutex::new(QueuedDevice::new(protocol)?));
+        self.attach_pci_virtio_device(
+            vm,
+            P::ID.to_owned(),
+            device.clone(),
+            events,
+            PciPlacement::PrimaryBus,
+        )
+        .map_err(std::io::Error::other)?;
+        if let Err(error) = device.lock().unwrap().check_registered() {
+            let id = self.virtio_devices[&(P::TYPE, P::ID.to_owned())]
+                .lock()
+                .unwrap()
+                .sub_id
+                .unwrap();
+            events
+                .remove_subscriber(id)
+                .map_err(std::io::Error::other)?;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "windows")]
+    fn restore_queued<P: Protocol>(
+        &mut self,
+        mem: &GuestMemoryMmap,
+        state: &VirtioDeviceState<QueuedState<P::State>, VirtioPciDeviceState>,
+        args: &mut PciDevicesConstructorArgs<'_>,
+    ) -> Result<(), DevicePersistError> {
+        if state.device_id != P::ID {
+            return Err(QueuedPersistError::State(std::io::Error::other(
+                "invalid console device ID",
+            ))
+            .into());
+        }
+        let device = Arc::new(Mutex::new(QueuedDevice::<P>::restore(
+            mem.clone(),
+            &state.device_state,
+        )?));
+        self.restore_pci_device(
+            args.vm,
+            device.clone(),
+            &state.device_id,
+            &state.transport_state,
+            args.event_manager,
+        )?;
+        if let Err(error) = device.lock().unwrap().check_registered() {
+            let id = self.virtio_devices[&(P::TYPE, state.device_id.clone())]
+                .lock()
+                .unwrap()
+                .sub_id
+                .unwrap();
+            args.event_manager
+                .remove_subscriber(id)
+                .map_err(|error| QueuedPersistError::State(std::io::Error::other(error)))?;
+            return Err(QueuedPersistError::State(error).into());
+        }
+        Ok(())
+    }
+
     fn restore_pci_device<T: 'static + VirtioDevice + MutEventSubscriber + Debug>(
         &mut self,
         vm: &Arc<KvmVm>,
@@ -535,6 +609,14 @@ impl PciDevicesState {
                         .map(|state| &state.transport_state),
                     self.virtio_devices
                         .input_device
+                        .as_ref()
+                        .map(|state| &state.transport_state),
+                    self.virtio_devices
+                        .serial_device
+                        .as_ref()
+                        .map(|state| &state.transport_state),
+                    self.virtio_devices
+                        .scsi_device
                         .as_ref()
                         .map(|state| &state.transport_state),
                     self.virtio_devices
@@ -714,6 +796,38 @@ impl<'a> Persist<'a> for PciDevices {
                     #[cfg(not(feature = "windows"))]
                     unreachable!("virtio-gpu requires the windows build feature");
                 }
+                VirtioDeviceType::Console => {
+                    #[cfg(feature = "windows")]
+                    {
+                        let device = locked_virtio_dev
+                            .as_any()
+                            .downcast_ref::<QueuedDevice<Serial>>()
+                            .unwrap();
+                        state.serial_device = Some(VirtioDeviceState {
+                            device_id: device.id().to_string(),
+                            device_state: device.save(),
+                            transport_state,
+                        });
+                    }
+                    #[cfg(not(feature = "windows"))]
+                    unreachable!("console transports require the windows build feature");
+                }
+                VirtioDeviceType::Scsi => {
+                    #[cfg(feature = "windows")]
+                    {
+                        let device = locked_virtio_dev
+                            .as_any()
+                            .downcast_ref::<QueuedDevice<Scsi>>()
+                            .unwrap();
+                        state.scsi_device = Some(VirtioDeviceState {
+                            device_id: device.id().to_string(),
+                            device_state: device.save(),
+                            transport_state,
+                        });
+                    }
+                    #[cfg(not(feature = "windows"))]
+                    unreachable!("console transports require the windows build feature");
+                }
                 VirtioDeviceType::Mem => {
                     let mem_dev = locked_virtio_dev
                         .as_mut_any()
@@ -747,8 +861,12 @@ impl<'a> Persist<'a> for PciDevices {
         constructor_args: Self::ConstructorArgs,
         pci_state: &Self::State,
     ) -> Result<Self, Self::Error> {
+        #[cfg(feature = "windows")]
+        let mut constructor_args = constructor_args;
         if pci_state.virtio_devices.input_device.is_some()
             || pci_state.virtio_devices.gpu_device.is_some()
+            || pci_state.virtio_devices.serial_device.is_some()
+            || pci_state.virtio_devices.scsi_device.is_some()
         {
             crate::vmm_config::require_windows_support()?;
         }
@@ -918,6 +1036,14 @@ impl<'a> Persist<'a> for PciDevices {
         }
 
         #[cfg(feature = "windows")]
+        if let Some(saved) = &state.serial_device {
+            pci_devices.restore_queued::<Serial>(mem, saved, &mut constructor_args)?;
+        }
+        #[cfg(feature = "windows")]
+        if let Some(saved) = &state.scsi_device {
+            pci_devices.restore_queued::<Scsi>(mem, saved, &mut constructor_args)?;
+        }
+        #[cfg(feature = "windows")]
         if let Some(input_state) = &state.input_device {
             let device = Arc::new(Mutex::new(Input::restore(
                 InputConstructorArgs { mem: mem.clone() },
@@ -1006,8 +1132,8 @@ impl<'a> Persist<'a> for PciDevices {
             )?
         }
 
-        // After PCI devices are restored, we must set up the GSI routes (one KVM_SET_GSI_ROUTING call for all vectors),
-        // and enable all unmasked vectors (one kvm_irqfd call per vector).
+        // After PCI devices are restored, we must set up the GSI routes (one KVM_SET_GSI_ROUTING
+        // call for all vectors), and enable all unmasked vectors (one kvm_irqfd call per vector).
         // Ordering: routing must be set before IRQFDs to avoid kernel panics on
         // older AMD/SVM hosts (see kernel commit a80ced6ea514).
         if !pci_devices.virtio_devices.is_empty() || !pci_state.root_ports.is_empty() {
@@ -1185,6 +1311,25 @@ mod tests {
                 )
                 .unwrap();
                 gpu.lock().unwrap().check_registered().unwrap();
+                let devices: [Arc<Mutex<dyn VirtioDevice>>; 2] = [
+                    Arc::new(Mutex::new(
+                        QueuedDevice::new(Serial::new("com.toets.0".into()).unwrap()).unwrap(),
+                    )),
+                    Arc::new(Mutex::new(
+                        QueuedDevice::new(Scsi::new(&[None, None]).unwrap()).unwrap(),
+                    )),
+                ];
+                for device in devices {
+                    let id = device.lock().unwrap().id().to_owned();
+                    pci.attach_pci_virtio_device(
+                        vmm.vm.as_kvm().unwrap(),
+                        id,
+                        device,
+                        &mut event_manager,
+                        PciPlacement::PrimaryBus,
+                    )
+                    .unwrap();
+                }
             }
 
             vmm.device_manager.prepare_save().unwrap();
@@ -1223,6 +1368,39 @@ mod tests {
             blk_worker_filter: None,
         };
         let _restored_dev_manager = PciDevices::restore(restore_args, pci_state).unwrap();
+
+        #[cfg(feature = "windows")]
+        {
+            let restored = _restored_dev_manager.save();
+            assert_eq!(
+                restored
+                    .virtio_devices
+                    .serial_device
+                    .as_ref()
+                    .unwrap()
+                    .device_state,
+                pci_state
+                    .virtio_devices
+                    .serial_device
+                    .as_ref()
+                    .unwrap()
+                    .device_state
+            );
+            assert_eq!(
+                restored
+                    .virtio_devices
+                    .scsi_device
+                    .as_ref()
+                    .unwrap()
+                    .device_state,
+                pci_state
+                    .virtio_devices
+                    .scsi_device
+                    .as_ref()
+                    .unwrap()
+                    .device_state
+            );
+        }
 
         #[cfg(feature = "windows")]
         {

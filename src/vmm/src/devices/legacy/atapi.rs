@@ -6,13 +6,49 @@
 #[cfg(feature = "windows")]
 use std::fs::File;
 #[cfg(feature = "windows")]
-use std::io;
+use std::io::{self, Read};
 #[cfg(feature = "windows")]
 use std::os::unix::fs::FileExt;
+#[cfg(feature = "windows")]
+use std::path::Path;
 
+#[cfg(feature = "windows")]
+use aws_lc_rs::digest::{Context, SHA256};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "windows")]
 use vmm_sys_util::eventfd::EventFd;
+
+#[cfg(feature = "windows")]
+pub(crate) fn media_identity(media: &mut File) -> io::Result<String> {
+    let mut digest = Context::new(&SHA256);
+    let mut buffer = [0; 65536];
+    loop {
+        let count = media.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    Ok(digest
+        .finish()
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+#[cfg(feature = "windows")]
+pub(crate) fn open_media(path: Option<&Path>) -> io::Result<Option<(File, String)>> {
+    path.map(|path| {
+        let mut media = File::open(path)?;
+        if !media.metadata()?.is_file() {
+            return Err(io::Error::other("ISO must be a regular file"));
+        }
+        let identity = media_identity(&mut media)?;
+        Ok((media, identity))
+    })
+    .transpose()
+}
 
 /// Primary IDE command-block port.
 #[cfg(feature = "windows")]
@@ -34,7 +70,7 @@ const DRQ: u8 = 8;
 #[cfg(feature = "windows")]
 const ERROR: u8 = 1;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum Transfer {
     Idle,
     Packet {
@@ -66,7 +102,7 @@ enum MediaEvent {
 }
 
 /// Controller state; media identity must be a verified digest of the opened ISO.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AtapiState {
     media: Option<MediaState>,
     tray_open: bool,
@@ -76,13 +112,24 @@ pub struct AtapiState {
     features: u8,
     pending_irq: bool,
     sense: [u8; 3],
-    unit_attention: bool,
+    unit_attention: Option<u8>,
     media_event: MediaEvent,
     transfer: Transfer,
 }
 
 #[cfg(feature = "windows")]
 impl AtapiState {
+    pub(crate) fn validate_scsi(&self) -> io::Result<()> {
+        if !matches!(self.transfer, Transfer::Idle)
+            || self.pending_irq
+            || self.control != 0
+            || self.features != 0
+        {
+            return Err(io::Error::other("invalid synchronous SCSI optical state"));
+        }
+        Ok(())
+    }
+
     fn media_size(&self) -> u64 {
         self.media.as_ref().map_or(0, |media| media.size)
     }
@@ -132,7 +179,7 @@ impl Atapi {
                 features: 0,
                 pending_irq: false,
                 sense: [0; 3],
-                unit_attention: false,
+                unit_attention: None,
                 media_event: MediaEvent::None,
                 transfer: Transfer::Idle,
             },
@@ -228,7 +275,7 @@ impl Atapi {
     }
 
     fn media_changed(&mut self) {
-        self.state.unit_attention = true;
+        self.state.unit_attention = Some(0x28);
         self.state.media_event = if self.state.media_present() {
             MediaEvent::NewMedia
         } else {
@@ -239,6 +286,77 @@ impl Atapi {
     /// Saves in-flight PIO data, task-file registers and media state.
     pub fn save(&self) -> AtapiState {
         self.state.clone()
+    }
+
+    /// Resets a SCSI logical unit and reports the reset on its next command.
+    pub fn scsi_reset(&mut self) {
+        self.reset();
+        self.state.locked = false;
+        self.state.unit_attention = Some(0x29);
+    }
+
+    /// Executes the shared optical command set with a bounded SCSI data buffer.
+    pub fn scsi_command(&mut self, cdb: &[u8], capacity: usize) -> io::Result<(Vec<u8>, Vec<u8>)> {
+        if cdb.len() < 12 || capacity > 1024 * 1024 {
+            return Err(io::Error::other("invalid optical SCSI buffer"));
+        }
+        let packet: [u8; 12] = cdb[..12].try_into().unwrap();
+        let allocation = match packet[0] {
+            0x03 | 0x12 | 0x1a => u64::from(packet[4]),
+            0x25 => 8,
+            0x28 => u64::from(u16::from_be_bytes([packet[7], packet[8]])) * BLOCK_SIZE,
+            0xa8 => u64::from(u32::from_be_bytes(packet[6..10].try_into().unwrap())) * BLOCK_SIZE,
+            0x43 | 0x4a | 0x5a => u64::from(u16::from_be_bytes([packet[7], packet[8]])),
+            0xa0 => u64::from(u32::from_be_bytes(packet[6..10].try_into().unwrap())),
+            _ => 0,
+        };
+        if allocation > capacity as u64 {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "short optical SCSI buffer",
+            ));
+        }
+        self.state.registers[4..6].fill(0);
+        self.state.registers[7] = READY;
+        if cdb[12..].iter().any(|byte| *byte != 0) {
+            self.fail(5, 0x24);
+        } else if packet[0] == 0xa0 {
+            if packet[2] > 2 {
+                self.fail(5, 0x24);
+            } else {
+                let mut bytes = vec![0; if packet[2] == 1 { 8 } else { 16 }];
+                bytes[3] = u8::try_from(bytes.len() - 8).unwrap();
+                self.response(bytes, usize::try_from(allocation).unwrap());
+            }
+        } else {
+            self.execute_packet(packet);
+        }
+        let mut data = Vec::new();
+        while let Transfer::Data {
+            phase_remaining, ..
+        } = self.state.transfer
+        {
+            let start = data.len();
+            if phase_remaining > capacity - start {
+                self.state.transfer = Transfer::Idle;
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "optical SCSI overrun",
+                ));
+            }
+            data.resize(start + phase_remaining, 0);
+            self.read_data(&mut data[start..]);
+        }
+        let mut sense = Vec::new();
+        if self.state.registers[7] & ERROR != 0 {
+            sense.resize(18, 0);
+            sense[0] = 0x70;
+            sense[2] = self.state.sense[0];
+            sense[7] = 10;
+            sense[12..14].copy_from_slice(&self.state.sense[1..]);
+        }
+        self.state.pending_irq = false;
+        Ok((data, sense))
     }
 
     /// Restores against matching optional media and valid transfer bounds.
@@ -599,9 +717,9 @@ impl Atapi {
             return;
         }
         if !matches!(packet[0], 0x03 | 0x12 | 0x4a)
-            && std::mem::take(&mut self.state.unit_attention)
+            && let Some(asc) = self.state.unit_attention.take()
         {
-            self.fail(6, 0x28);
+            self.fail(6, asc);
             return;
         }
         if !self.state.media_present()
@@ -613,8 +731,8 @@ impl Atapi {
         match packet[0] {
             0x00 | 0x2b | 0xbb => self.complete(),
             0x03 => {
-                let [key, asc, ascq] = if std::mem::take(&mut self.state.unit_attention) {
-                    [6, 0x28, 0]
+                let [key, asc, ascq] = if let Some(asc) = self.state.unit_attention.take() {
+                    [6, asc, 0]
                 } else {
                     self.state.sense
                 };
@@ -826,6 +944,35 @@ mod tests {
         let mut byte = [0];
         device.read(7, &mut byte);
         byte[0]
+    }
+
+    #[test]
+    fn scsi_reads_and_sense_share_the_optical_core() {
+        let (mut device, irq, bytes) = fixture();
+        device.set_legacy_irq_enabled(false);
+        let mut cdb = [0; 32];
+        cdb[0] = 0x28;
+        cdb[8] = 4;
+        assert_eq!(
+            device.scsi_command(&cdb, 8191).unwrap_err().kind(),
+            io::ErrorKind::WriteZero
+        );
+        assert_eq!(device.scsi_command(&cdb, 8192).unwrap(), (bytes, vec![]));
+        irq.read().unwrap_err();
+        device.save().validate_scsi().unwrap();
+        let mut invalid = device.save();
+        invalid.pending_irq = true;
+        invalid.validate_scsi().unwrap_err();
+        device.scsi_reset();
+        cdb.fill(0);
+        let (_, sense) = device.scsi_command(&cdb, 0).unwrap();
+        assert_eq!((sense[2], sense[12]), (6, 0x29));
+        assert_eq!(device.scsi_command(&cdb, 0).unwrap(), (vec![], vec![]));
+        device.eject().unwrap();
+        let (_, sense) = device.scsi_command(&cdb, 0).unwrap();
+        assert_eq!((sense[2], sense[12]), (6, 0x28));
+        let (_, sense) = device.scsi_command(&cdb, 0).unwrap();
+        assert_eq!((sense[2], sense[12]), (2, 0x3a));
     }
 
     fn packet(device: &mut Atapi, command: &[u8], limit: u16) {
@@ -1171,7 +1318,7 @@ mod tests {
             device.state.media.as_ref().unwrap().identity,
             "verified-test-media"
         );
-        assert!(!device.state.unit_attention);
+        assert!(device.state.unit_attention.is_none());
         device
             .replace_media(Some((media.try_clone().unwrap(), "replacement".into())))
             .unwrap();
@@ -1195,7 +1342,7 @@ mod tests {
             if allocation > 4 {
                 assert_eq!(event[4], if allocation == 5 { 2 } else { 0 });
             }
-            assert!(restored.state.unit_attention);
+            assert!(restored.state.unit_attention.is_some());
         }
         packet(&mut restored, &[3, 0, 0, 0, 18], 2048);
         let sense = receive(&mut restored);

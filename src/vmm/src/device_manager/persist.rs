@@ -153,6 +153,20 @@ pub struct DeviceStates<Tr> {
     pub input_device: Option<VirtioDeviceState<InputState, Tr>>,
     /// Graphics device state.
     pub gpu_device: Option<VirtioDeviceState<GpuState, Tr>>,
+    pub serial_device: Option<
+        VirtioDeviceState<
+            crate::devices::virtio::queued::QueuedState<
+                crate::devices::virtio::serial::SerialState,
+            >,
+            Tr,
+        >,
+    >,
+    pub scsi_device: Option<
+        VirtioDeviceState<
+            crate::devices::virtio::queued::QueuedState<crate::devices::virtio::scsi::ScsiState>,
+            Tr,
+        >,
+    >,
 }
 
 impl<Tr> Default for DeviceStates<Tr> {
@@ -168,6 +182,8 @@ impl<Tr> Default for DeviceStates<Tr> {
             memory_device: None,
             input_device: None,
             gpu_device: None,
+            serial_device: None,
+            scsi_device: None,
         }
     }
 }
@@ -552,6 +568,9 @@ impl<'a> Persist<'a> for MMIOVirtioDevices {
                     #[cfg(not(feature = "windows"))]
                     unreachable!("virtio-gpu requires the windows build feature");
                 }
+                VirtioDeviceType::Console | VirtioDeviceType::Scsi => {
+                    unreachable!("console transports require PCI")
+                }
                 VirtioDeviceType::Mem => {
                     let mem = locked_device
                         .as_mut_any()
@@ -576,6 +595,9 @@ impl<'a> Persist<'a> for MMIOVirtioDevices {
         constructor_args: Self::ConstructorArgs,
         state: &Self::State,
     ) -> Result<Self, Self::Error> {
+        if state.serial_device.is_some() || state.scsi_device.is_some() {
+            return Err(DevicePersistError::ConsoleTransport);
+        }
         if state.input_device.is_some() || state.gpu_device.is_some() {
             crate::vmm_config::require_windows_support()?;
         }
@@ -992,6 +1014,8 @@ mod tests {
                 && self.memory_device == other.memory_device
                 && self.input_device == other.input_device
                 && self.gpu_device == other.gpu_device
+                && self.serial_device == other.serial_device
+                && self.scsi_device == other.scsi_device
         }
     }
 

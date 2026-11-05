@@ -4,9 +4,7 @@
 //! PCI IDE discovery, mode switching and verified installation media.
 
 #[cfg(feature = "windows")]
-use std::fs::File;
-#[cfg(feature = "windows")]
-use std::io::{self, Read};
+use std::io;
 #[cfg(feature = "windows")]
 use std::path::Path;
 #[cfg(feature = "windows")]
@@ -14,8 +12,6 @@ use std::sync::atomic::AtomicU32;
 #[cfg(feature = "windows")]
 use std::sync::{Arc, Barrier, Mutex, Weak};
 
-#[cfg(feature = "windows")]
-use aws_lc_rs::digest::{Context, SHA256};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "windows")]
 use vm_allocator::{AddressAllocator, AllocPolicy, RangeInclusive};
@@ -25,8 +21,10 @@ use vmm_sys_util::eventfd::EventFd;
 #[cfg(feature = "windows")]
 use super::pci_mngr::PciDevices;
 use crate::devices::legacy::atapi::AtapiState;
+#[cfg(all(test, feature = "windows"))]
+use crate::devices::legacy::atapi::media_identity;
 #[cfg(feature = "windows")]
-use crate::devices::legacy::atapi::{Atapi, COMMAND_PORT, CONTROL_PORT, Channel, IRQ};
+use crate::devices::legacy::atapi::{Atapi, COMMAND_PORT, CONTROL_PORT, Channel, IRQ, open_media};
 use crate::pci::PciSBDF;
 #[cfg(feature = "windows")]
 use crate::pci::configuration::PciConfiguration;
@@ -183,38 +181,6 @@ impl OpticalState {
             .map_err(io::Error::other)?
             .read_reg(1))
     }
-}
-
-#[cfg(feature = "windows")]
-fn media_identity(media: &mut File) -> io::Result<String> {
-    let mut digest = Context::new(&SHA256);
-    let mut buffer = [0; 65536];
-    loop {
-        let count = media.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        digest.update(&buffer[..count]);
-    }
-    Ok(digest
-        .finish()
-        .as_ref()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect())
-}
-
-#[cfg(feature = "windows")]
-fn open_media(path: Option<&Path>) -> io::Result<Option<(File, String)>> {
-    path.map(|path| {
-        let mut media = File::open(path)?;
-        if !media.metadata()?.is_file() {
-            return Err(io::Error::other("ISO must be a regular file"));
-        }
-        let identity = media_identity(&mut media)?;
-        Ok((media, identity))
-    })
-    .transpose()
 }
 
 #[cfg(feature = "windows")]
