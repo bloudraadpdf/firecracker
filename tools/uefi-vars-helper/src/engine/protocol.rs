@@ -27,7 +27,7 @@ impl Engine {
                 put64(buffer, 36, status);
             }
             END_DXE | READY | EXIT => {
-                if buffer.len() != 24 {
+                if buffer[24..] != [0] {
                     return Ok(0x12);
                 }
                 self.state.flags |= match guid {

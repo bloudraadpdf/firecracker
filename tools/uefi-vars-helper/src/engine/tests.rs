@@ -77,7 +77,7 @@ fn get_variable_reports_required_size_and_runtime_visibility() {
     assert_eq!(engine.transact(&mut request), Ok(0));
     assert_eq!(u64_at(&request, 32), Ok(TOO_SMALL));
     assert_eq!(size_at(&request, 56), Ok(7));
-    engine.transact(&mut frame(EXIT, &[])).unwrap();
+    engine.transact(&mut frame(EXIT, &[0])).unwrap();
     put64(&mut request, 56, 0);
     engine.transact(&mut request).unwrap();
     assert_eq!(u64_at(&request, 32), Ok(NOT_FOUND));
@@ -99,7 +99,7 @@ fn get_next_variable_distinguishes_invalid_cursor_from_exhaustion() {
         .unwrap();
     for runtime in [false, true] {
         if runtime {
-            engine.transact(&mut frame(EXIT, &[])).unwrap();
+            engine.transact(&mut frame(EXIT, &[0])).unwrap();
         }
         for mut candidate in [engine.clone(), Engine::restore(&engine.save()).unwrap()] {
             let before = candidate.save();
@@ -151,7 +151,7 @@ fn appended_large_variable_remains_readable_after_runtime_restore() {
         assert_eq!(engine.transact(&mut request), Ok(0));
         assert_eq!(u64_at(&request, 32), Ok(0));
     }
-    engine.transact(&mut frame(EXIT, &[])).unwrap();
+    engine.transact(&mut frame(EXIT, &[0])).unwrap();
     let mut restored = Engine::restore(&engine.save()).unwrap();
     let mut request = set_message("large", [0x31; 16], 0, &vec![0; 80000]);
     put64(&mut request, 24, 1);
@@ -171,7 +171,7 @@ fn appended_large_variable_remains_readable_after_runtime_restore() {
 #[test]
 fn lock_on_create_and_specific_names_override_namespace_policy() {
     let mut engine = Engine::new();
-    engine.transact(&mut frame(END_DXE, &[])).unwrap();
+    engine.transact(&mut frame(END_DXE, &[0])).unwrap();
     engine.register_policy(&policy(1, "")).unwrap();
     engine.register_policy(&policy(2, "sample")).unwrap();
     assert_eq!(
@@ -192,7 +192,7 @@ fn lock_on_create_and_specific_names_override_namespace_policy() {
 #[test]
 fn policy_state_lock_and_hex_wildcard_are_enforced() {
     let mut engine = Engine::new();
-    engine.transact(&mut frame(END_DXE, &[])).unwrap();
+    engine.transact(&mut frame(END_DXE, &[0])).unwrap();
     engine.register_policy(&policy(1, "Boot####")).unwrap();
     assert_eq!(
         engine.set_variable("Boot00Af", [0x31; 16], 7, b"value"),
@@ -224,11 +224,13 @@ fn policy_state_lock_and_hex_wildcard_are_enforced() {
 fn lifecycle_events_are_monotonic_and_malformed_events_do_not_mutate_state() {
     let mut engine = Engine::new();
     for guid in [END_DXE, READY, EXIT] {
-        assert_eq!(engine.transact(&mut frame(guid, &[])), Ok(0));
+        assert_eq!(engine.transact(&mut frame(guid, &[0])), Ok(0));
     }
     let before = engine.save();
     assert_eq!(before.flags, 7);
-    assert_eq!(engine.transact(&mut frame(EXIT, &[0])), Ok(0x12));
+    for payload in [&[][..], &[1][..], &[0, 0][..]] {
+        assert_eq!(engine.transact(&mut frame(EXIT, payload)), Ok(0x12));
+    }
     assert_eq!(engine.save(), before);
     let mut restored = Engine::restore(&before).unwrap();
     assert_eq!(
@@ -340,7 +342,7 @@ fn malformed_signature_lists_are_rejected_and_append_ignores_duplicate_owners() 
 #[test]
 fn append_cannot_exceed_policy_size_and_failure_is_atomic() {
     let mut engine = Engine::new();
-    engine.transact(&mut frame(END_DXE, &[])).unwrap();
+    engine.transact(&mut frame(END_DXE, &[0])).unwrap();
     let mut limit = policy(0, "sample");
     limit[28..32].copy_from_slice(&4u32.to_le_bytes());
     engine.register_policy(&limit).unwrap();
@@ -356,7 +358,7 @@ fn append_cannot_exceed_policy_size_and_failure_is_atomic() {
 #[test]
 fn edk2_policy_padding_is_not_part_of_validation_or_lock_semantics() {
     let mut engine = Engine::new();
-    engine.transact(&mut frame(END_DXE, &[])).unwrap();
+    engine.transact(&mut frame(END_DXE, &[0])).unwrap();
     let mut bytes = policy(1, "sample");
     bytes[41..44].fill(0xaf);
     engine.register_policy(&bytes).unwrap();
@@ -374,7 +376,7 @@ fn runtime_delete_accepts_zero_attributes_and_empty_append_preserves_attributes(
         engine.set_variable("sample", [0x31; 16], 7, b"value"),
         Ok(())
     );
-    engine.transact(&mut frame(EXIT, &[])).unwrap();
+    engine.transact(&mut frame(EXIT, &[0])).unwrap();
     let before = engine.save();
     assert_eq!(
         engine.set_variable("sample", [0x31; 16], APPEND, &[]),
@@ -409,7 +411,7 @@ fn runtime_delete_accepts_zero_attributes_and_empty_append_preserves_attributes(
 #[test]
 fn equal_specificity_keeps_first_registered_policy_after_restore() {
     let mut engine = Engine::new();
-    engine.transact(&mut frame(END_DXE, &[])).unwrap();
+    engine.transact(&mut frame(END_DXE, &[0])).unwrap();
     engine.register_policy(&policy(1, "Boot0###")).unwrap();
     engine.register_policy(&policy(0, "Boot#0##")).unwrap();
     for mut engine in [engine.clone(), Engine::restore(&engine.save()).unwrap()] {
@@ -535,7 +537,7 @@ fn bds_policy_allows_firmware_initialization_before_end_of_dxe() {
             engine.set_variable("SecureBoot", GLOBAL, BS | RT, &[0]),
             Err(PROTECTED)
         );
-        assert_eq!(engine.transact(&mut frame(END_DXE, &[])), Ok(0));
+        assert_eq!(engine.transact(&mut frame(END_DXE, &[0])), Ok(0));
         let before = engine.save();
         for (attributes, data) in [(BS | RT, vec![0; 4]), (0, vec![])] {
             let mut update = set_message("BootOptionSupport", GLOBAL, attributes, &data);
@@ -570,7 +572,7 @@ fn policy_restrictions_start_at_each_post_dxe_phase_and_survive_restore() {
             engine.set_variable("locked", [0x31; 16], 7, b"initial"),
             Ok(())
         );
-        assert_eq!(engine.transact(&mut frame(event, &[])), Ok(0));
+        assert_eq!(engine.transact(&mut frame(event, &[0])), Ok(0));
         for mut engine in [engine.clone(), Engine::restore(&engine.save()).unwrap()] {
             let before = engine.save();
             assert_eq!(
@@ -604,7 +606,7 @@ fn locking_policy_registration_does_not_end_firmware_initialization() {
         engine.set_variable("sample", [0x31; 16], 7, b"initial"),
         Ok(())
     );
-    assert_eq!(engine.transact(&mut frame(END_DXE, &[])), Ok(0));
+    assert_eq!(engine.transact(&mut frame(END_DXE, &[0])), Ok(0));
     assert_eq!(
         engine.set_variable("sample", [0x31; 16], 7, b"changed"),
         Err(PROTECTED)
