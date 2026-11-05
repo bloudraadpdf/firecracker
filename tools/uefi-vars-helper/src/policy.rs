@@ -1,14 +1,16 @@
 // Copyright 2026 Bloudraad.
 // SPDX-License-Identifier: Apache-2.0
 //! Pinned Microsoft trust policy; no private keys or guest-facing provisioning.
-use crate::engine::{State, Variable};
-use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
+
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
+
+use crate::engine::{State, Variable};
 
 const OWNER: [u8; 16] = [
     0xbd, 0x9a, 0xfa, 0x77, 0x59, 0x03, 0x32, 0x4d, 0xbd, 0x60, 0x28, 0xf4, 0xe7, 0x8f, 0x78, 0x4b,
@@ -96,7 +98,45 @@ struct Revocations {
     svns: Vec<Svn>,
 }
 
-pub fn prepare(root: &Path, output: &Path) -> io::Result<()> {
+#[derive(Clone, Copy)]
+pub enum Architecture {
+    X64,
+    Arm64,
+}
+
+impl std::str::FromStr for Architecture {
+    type Err = io::Error;
+
+    fn from_str(value: &str) -> io::Result<Self> {
+        match value {
+            "x64" => Ok(Self::X64),
+            "arm64" => Ok(Self::Arm64),
+            _ => Err(invalid("architecture must be x64 or arm64")),
+        }
+    }
+}
+
+impl Revocations {
+    fn image_hashes(&self, architecture: Architecture) -> io::Result<Vec<Vec<u8>>> {
+        let key = match architecture {
+            Architecture::X64 => "x64",
+            Architecture::Arm64 => "aarch64",
+        };
+        self.images
+            .get(key)
+            .ok_or_else(|| invalid("missing architecture revocations"))?
+            .iter()
+            .map(|entry| {
+                if entry.kind != "SHA256" {
+                    return Err(invalid("unknown image hash type"));
+                }
+                hash(&entry.hash)
+            })
+            .collect()
+    }
+}
+
+pub fn prepare(root: &Path, output: &Path, architecture: Architecture) -> io::Result<()> {
     let certificate = |name, digest| signature_list(X509, &[load(root, name, digest)?]);
     let pk = certificate(
         "WindowsOEMDevicesPK.der",
@@ -116,18 +156,7 @@ pub fn prepare(root: &Path, output: &Path) -> io::Result<()> {
         "7c3bcbb57af5678bf30a1945f38ab3314aaf05e73d33766aaa69e6dcbe9c68a8",
     )?;
     let revoked: Revocations = serde_json::from_slice(&revoked)?;
-    let hashes = revoked
-        .images
-        .get("x64")
-        .ok_or_else(|| invalid("missing AMD64 revocations"))?
-        .iter()
-        .map(|entry| {
-            if entry.kind != "SHA256" {
-                return Err(invalid("unknown image hash type"));
-            }
-            hash(&entry.hash)
-        })
-        .collect::<io::Result<Vec<_>>>()?;
+    let hashes = revoked.image_hashes(architecture)?;
     let mut dbx = signature_list(SHA256, &hashes)?;
     if revoked.certificates.len() != 1
         || revoked.certificates[0].value != "MicWinProPCA2011_2011-10-19.der"
@@ -182,6 +211,32 @@ pub fn prepare(root: &Path, output: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn revocations_select_the_requested_architecture() {
+        let revoked: Revocations = serde_json::from_value(serde_json::json!({
+            "images": {
+                "x64": [{"hashType":"SHA256", "authenticodeHash":"11".repeat(32)}],
+                "aarch64": [{"hashType":"SHA256", "authenticodeHash":"22".repeat(32)}],
+                "arm": [{"hashType":"SHA256", "authenticodeHash":"33".repeat(32)}]
+            },
+            "certificates": [], "svns": []
+        }))
+        .unwrap();
+        assert_eq!(
+            revoked.image_hashes(Architecture::X64).unwrap(),
+            [vec![0x11; 32]]
+        );
+        assert_eq!(
+            revoked.image_hashes(Architecture::Arm64).unwrap(),
+            [vec![0x22; 32]]
+        );
+        assert!("other".parse::<Architecture>().is_err());
+        let empty: Revocations = serde_json::from_value(serde_json::json!({
+            "images": {}, "certificates": [], "svns": []
+        }))
+        .unwrap();
+        assert!(empty.image_hashes(Architecture::Arm64).is_err());
+    }
     #[test]
     fn signature_list_has_exact_efi_lengths() {
         let list = signature_list(SHA256, &[vec![1; 32], vec![2; 32]]).unwrap();
