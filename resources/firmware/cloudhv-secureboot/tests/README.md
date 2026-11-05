@@ -74,7 +74,7 @@ The 67,228-byte dbx is the deterministic synthetic `EFI_CERT_SHA256_GUID`
 signature list used by the helper's large-database regression. It contains 1,400
 entries, with a zero owner GUID and an index in the first four hash bytes. It is
 a transport fixture, not a Microsoft revocation policy. The maintained
-`seed-microsoft` encoder produces a 23,103-byte dbx for its pinned inputs,
+`seed-microsoft x64` encoder produces a 23,103-byte dbx for its pinned inputs,
 SHA-256 `8c88c19dc4d7d7213362d8e9e2e4ffe9d312a79e01bb701a568405c9dd30194f`; that
 policy cannot exercise the 64 KiB boundary. Do not substitute it for this
 fixture or deploy the synthetic list as a trust policy. The signed probe remains

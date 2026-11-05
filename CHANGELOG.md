@@ -10,6 +10,9 @@ and this project adheres to
 
 ### Added
 
+- Added the `Anonymous` snapshot memory backend. It copies snapshot RAM into
+  anonymous memory before resume and supports transparent or explicit huge pages
+  for guest writes without a separate UFFD handler.
 - [#6226](https://github.com/firecracker-microvm/firecracker/pull/6226),
   [#6227](https://github.com/firecracker-microvm/firecracker/pull/6227),
   [#6228](https://github.com/firecracker-microvm/firecracker/pull/6228),

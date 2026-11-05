@@ -322,9 +322,9 @@ unset, following Microsoft's
 [UEFI EMS procedure](https://learn.microsoft.com/en-us/windows-hardware/drivers/devtest/boot-parameters-to-enable-ems-redirection#enabling-ems-on-a-computer-with-uefi-firmware).
 
 `win11-iot-arm64` stages the Toets Windows 11 IoT Enterprise LTSC 2024 ARM64
-media and matching `w11/ARM64` viostor, NetKVM, vioinput and viosock packages.
-The viosock package includes its native Winsock provider; staging does not
-install or register it. The pinned source is
+media and matching `w11/ARM64` viostor, NetKVM, vioinput, vioscsi, vioserial and
+viosock packages. The viosock package includes its native Winsock provider;
+staging does not install or register it. The pinned source is
 `X23-81950_26100.1742.240906-0331.ge_release_svc_refresh_CLIENT_ENTERPRISES_OEM_A64FRE_en-us.iso`,
 SHA-256 `f8f068cdc90c894a55d8c8530db7c193234ba57bb11d33b71383839ac41246b4`. Use
 an authorised copy of that exact source and the pinned virtio-win ISO. This
@@ -336,28 +336,60 @@ build/windows/prepare-nt6 win11-iot-arm64 windows11-iot-arm64.iso virtio-win.iso
   build/windows/arm64-staging build/windows/arm64/Autounattend.xml
 ```
 
-The result is `arm64-staging/tree/` and `files.sha256-sizes`. The tool verifies
-the source hashes and ARM64 fallback PE machine, then copies the driver packages
-and optional answer. It preserves the source `boot.wim`; it does not inject
-WinPE drivers, change boot policy, build an ISO or create a GPT/FAT installer.
-Do not pass the staged tree or original optical ISO as an ARM console device.
+The result is `arm64-staging/tree/` and `files.sha256-sizes`. ARM64 packages are
+in `tree/Drivers/`; no `$WinPEDriver$` directory is created. The `client-arm64`
+answer selects these packages in `offlineServicing`. The tool verifies the
+source hashes and ARM64 fallback PE machine, then copies the driver packages and
+optional answer. It preserves the source `boot.wim`; it does not inject WinPE
+drivers, change boot policy or build an ISO.
 
-ARM uses a read-only virtio installer disk. WinPE must contain its signed ARM64
-storage and input drivers before boot, because it cannot read external virtio
-media to load its own storage driver. Service the staged WIM using Microsoft's
-DISM in an existing AMD64 Windows technician environment with the matching ADK
-and WinPE add-on. Microsoft documents
+ARM uses a read-only virtio-SCSI optical drive. WinPE must contain its signed
+ARM64 storage and input drivers before boot, because it cannot read external
+virtio media to load its own storage driver. Service the staged WIM using
+Microsoft's DISM in an existing AMD64 Windows technician environment with the
+matching ADK and WinPE add-on. Microsoft documents
 [ARM image servicing on AMD64](https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/arm64-device-manufacturing)
 and
 [WinPE driver injection](https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/winpe-mount-and-customize).
-Provision installed-OS drivers separately, preserve signed ARM boot files and
-handle FAT32's file-size limit. Prove the writable target's identity before
-using an answer that wipes DiskID 0.
+On the technician, copy `tree/sources/boot.wim` to a writable working directory.
+Use `Get-WindowsImage -ImagePath boot.wim` and require both images to report
+architecture 12 (ARM64). For each image index, mount it with
+`dism /Mount-Image /ImageFile:boot.wim /Index:1 /MountDir:mount`, changing the
+index for the second image. Add each of viostor, vioscsi, vioserial, vioinput
+and NetKVM with `dism /Image:mount /Add-Driver /Driver:<package.inf>`. Check
+each catalogue with `Get-AuthenticodeSignature`; require `Valid`. Do not use
+`/ForceUnsigned`. Check every DISM exit code, list drivers with `/Get-Drivers`,
+then commit with `dism /Unmount-Image /MountDir:mount /Commit`. Copy the
+serviced WIM back to the staged tree only after both indices succeed. Retain the
+transcript and WIM SHA-256.
 
-A direct Firecracker ARM64 installer and standard ARM64 Windows 11 remain
-unqualified. The [ARM64 guide](../../docs/windows-arm64.md) retains historical
-prepared-disk provenance and current host requirements. The AMD64 console and
-installation procedure do not establish ARM64 support.
+Build EFI optical media from the serviced tree on Linux:
+
+```sh
+genisoimage -udf -iso-level 3 -J -joliet-long -V TOETS_ARM64 \
+  -eltorito-alt-boot -e efi/microsoft/boot/efisys.bin -no-emul-boot \
+  -o build/windows/arm64-serviced.iso build/windows/arm64-staging/tree
+7z x -obuild/windows/arm64-readback build/windows/arm64-serviced.iso
+diff -qr build/windows/arm64-staging/tree build/windows/arm64-readback
+sha256sum build/windows/arm64-serviced.iso
+```
+
+Readback must match every staged file; the generated `boot.catalog` is an
+additional file. Preserve the source ISO and its pin. The serviced ISO has its
+own digest. Provision the installed OS with
+`Microsoft-Windows-PnpCustomizationsNonWinPE` driver paths in the answer's
+`offlineServicing` pass. WinPE already contains the five packages; do not reload
+them through `PnpCustomizationsWinPE` or `$WinPEDriver$`. The tested Setup
+returned `0x80070103 - 0x40031` when it tried to reload the already active input
+driver. Prove the writable target's identity before using an answer that wipes
+DiskID 0. Configure `console.optical_drives` for the installer and payload, and
+`console.serial_port` for the named result port.
+
+Toets completed an unattended native Firecracker installation of the pinned
+Windows 11 IoT Enterprise LTSC 2024 ARM64 media on 3 November 2026. The
+[ARM64 guide](../../docs/windows-arm64.md) records the prepared ISO digest,
+runtime, host and result. Standard ARM64 Windows 11 Pro and Enterprise remain
+unqualified by this procedure.
 
 ## XP display driver
 

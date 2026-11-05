@@ -62,9 +62,15 @@ snapshot and is the default when the field is omitted. `None` uses the host's
 default memory-mapping behavior, while `Transparent` and `2M` select their
 corresponding huge page configurations.
 
-Explicit `2M` hugetlbfs pages require UFFD, so combining `2M` with file-backed
-restore returns an error. `Transparent` is accepted with UFFD, although UFFD may
-limit the effectiveness of transparent huge pages.
+The `Anonymous` snapshot memory backend copies the memory file into anonymous
+memory before resume. Use it when the restored guest needs huge pages for its
+writable working set. It supports `Transparent` and `2M`, retains the source
+file unchanged, and requires the full guest RAM allocation at restore time. File
+mappings share clean pages but can split into small pages on guest writes.
+
+Explicit `2M` hugetlbfs pages require `Anonymous` or UFFD; combining `2M` with
+the `File` backend returns an error. `Transparent` is accepted with UFFD,
+although UFFD may limit the effectiveness of transparent huge pages.
 
 When restoring snapshots via UFFD, Firecracker will send the configured page
 size (in KiB) for each memory region as part of the initial handshake, as

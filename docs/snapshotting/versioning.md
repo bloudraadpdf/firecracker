@@ -211,3 +211,13 @@ Snapshot format 45 rebases the fork onto upstream commit
 configuration and PCI root-port state, plus the fork's platform state.
 Formats 44 and earlier cannot be restored by this build. Create new snapshots
 from a cold boot; do not reuse an old snapshot with the new binary.
+
+Snapshot format 46 replaces the ARM64 PCI display with firmware-reserved guest
+RAM and a `fw_cfg` configuration device. The device state stores its selector,
+offset, partial DMA address and framebuffer configuration. Pixels use the guest
+memory snapshot. Formats 45 and earlier require their matching binary.
+
+Snapshot format 47 adds the virtio serial handshake and SCSI optical transport
+state. It retains the RAM framebuffer state from format 46. Formats 46 and
+earlier require their matching binary; create new snapshots from a cold boot.
+The `Anonymous` restore backend changes host memory backing, not this format.

@@ -562,20 +562,33 @@ restore. The inherited guest clock offset is unchanged and unqualified.
 
 ## Latest qualified integration baseline
 
-The latest qualified AMD64 Windows-feature binary is `6f63cd8d`, built from
-runtime source `95aaccfb` and using snapshot format 34. Its default counterpart
-is `1c68a888`. Later documentation and secure-helper cleanup changes do not
-change these binaries. The table records completed installed-reference checks on
-this runtime separately from unchanged component results and remaining edition
-gates.
+The earlier AMD64 integration baseline is Windows-feature binary `6f63cd8d`,
+built from runtime source `95aaccfb` and using snapshot format 34. Its default
+counterpart is `1c68a888`. Later documentation and secure-helper cleanup changes
+do not change these binaries. The table records completed installed-reference
+checks on this runtime separately from unchanged component results and remaining
+edition gates.
 
-Current source uses snapshot format 45 on upstream
+Current source uses snapshot format 47 on upstream
 `1703ba371c47966c28e7208d7cf8f6202999481e`. It includes the upstream queue and
 PCI root-port state and the fork's Windows, kernel prefault and inherited
-block-backing state. The recorded Windows guest runs retain their original
-runtime hashes and formats. The format-34 baseline below does not qualify the
-GPU or format-43 restore path. The GPU candidate above records actual format-37
-restore evidence; it does not qualify the later optical state format.
+block-backing state, plus the ARM64 RAM framebuffer, named serial port and
+virtio-SCSI optical transport state. Current native ARM64 desktop and media
+checks are recorded in the
+[ARM64 guide](windows-arm64.md#native-console-and-media). The
+[Toets consumer record](https://git.bloudraad.io/bloudraad/toets/src/branch/main/docs/reference/firecracker.md)
+records newer AMD64 installation and lifecycle qualification separately from the
+older integration baseline below. On 3 November 2026, runtime `1729b4cca` and
+Toets `997301b` passed all eight cold/restored token tests and all sixteen
+application tests across XP, Windows 7, Windows 10 Enterprise LTSC 2021 and
+Windows 11 IoT Enterprise LTSC 2024 on AMD64. The application tests cover EXE
+and MSI installation, each through its UI and silent mode. The Windows 7, 10 and
+11 tests used newly created UAC profile states. The consumer record identifies
+every run and the VMM hashes. The recorded Windows guest runs retain their
+original runtime hashes and formats. The format-34 baseline below does not
+qualify the GPU or format-43 restore path. The GPU candidate above records
+actual format-37 restore evidence; it does not qualify the later optical state
+format.
 
 Reuse a recorded result when the inputs relevant to that check are unchanged.
 Retain the guest configuration, driver and firmware hashes, VMM capability and
@@ -779,10 +792,14 @@ three zero-payload denials with six sealed accounting entries. These results use
 the retained original reader and host inputs; a rebuilt reader needs new
 qualification.
 
-The [ARM64 guide](windows-arm64.md) describes the separate firmware path and
-historical emulated results. Native ARM64 installation, input, security and
-network/restore qualification remain open. Cross-host migration and
-firmware-stage snapshots are also unvalidated.
+The [ARM64 guide](windows-arm64.md#native-console-and-media) records the native
+format-47 desktop, keyboard, pointer, optical-read and named-serial checks on 3
+November 2026. Those checks used an installed image with signed ARM64 drivers.
+An unattended native installation of Windows 11 IoT Enterprise LTSC 2024 ARM64
+also passed with `bc0ecd98e` and Toets `997301b`: all setup stages, `BUILD OK`,
+PSCI shutdown and VMM exit zero. Windows state lifecycle, security and egress
+qualification remain open. Cross-host migration and firmware-stage snapshots are
+also unvalidated.
 
 The completed default and Windows measurements retain the failed footprint
 comparisons against the unchanged thresholds, as described above. They do not

@@ -4,10 +4,12 @@ The optional console provides a private display/input endpoint without guest
 networking or vsock. The AMD64 profile adds selectable graphics with boot VGA/VBE,
 a PS/2 keyboard, a
 USB HID pointer and optional read-only ATAPI installation media. The ARM64
-profile adds an MMIO display and one combined virtio keyboard/absolute pointer.
+profile adds a firmware RAM framebuffer, one combined virtio keyboard/absolute
+pointer, an optional named virtio serial output port and read-only virtio-SCSI
+optical drives.
 See the [validation record](windows-validation.md#latest-qualified-integration-baseline)
 for the current XP display/input results and historical AMD64 results. ARM64
-guest qualification remains pending.
+desktop, input and optical/serial results are in the [ARM64 guide](windows-arm64.md).
 
 The AMD64 device path is:
 
@@ -273,45 +275,60 @@ Select `ArmVirtCloudHvConsole.dsc`, or `ArmVirtCloudHvSecure.dsc` with the TPM
 and protected variable devices. The original `ArmVirtCloudHv.dsc` is headless;
 console JSON alone does not select a graphical firmware build.
 
-Add only the private console socket to the ARM64 startup configuration:
+Select the private console socket and optional Windows transports:
 
 ```json
 {
   "console": {
-    "socket_path": "console.sock"
+    "socket_path": "console.sock",
+    "serial_port": "com.toets.0",
+    "optical_drives": [{"drive_id": "payload"}, {"drive_id": "exec"}]
   }
 }
 ```
 
 Use `--enable-pci`, modern PCI, at least 64 MiB RAM and ordinary pages. ARM64
 uses 64 MiB as a device-attachment minimum, not a Windows installation minimum.
-It rejects `vga_rom_path` and `optical_drives`. The device profile contains
+It rejects `vga_rom_path` and `display`. The device profile contains
 no VGA option ROM, legacy VGA aperture, PS/2 controller, USB controller, ISA
-bridge, A20 port or IDE controller. The display has a framebuffer BAR and a
-register BAR; the keyboard and pointer share one virtio PCI function.
+bridge, A20 port or IDE controller. The display uses firmware-reserved guest RAM.
+Its `fw_cfg` configuration page
+is at `0x10002000`; the keyboard and pointer share one virtio PCI function.
+PCI enumeration cannot disable or relocate the framebuffer.
 
 ```text
 private console socket
           |
      ConsoleServer
        |       |
- MMIO display  virtio-input (keyboard + absolute pointer)
+ RAM display   virtio-input (keyboard + absolute pointer)
        |       |
        +---+---+
            |
       ARM64 firmware / Windows
 ```
 
-Firmware must provide the matching MMIO GOP and virtio input drivers before
+Firmware must provide the RAM framebuffer GOP and virtio input drivers before
 Windows starts. Windows needs the signed ARM64 virtio-input driver. The pinned
 source accepts the combined keyboard/pointer capabilities; a source review and
 cross-build do not prove signed-driver loading or ARM64 guest operation. See the
 [ARM64 prerequisites and validation limits](windows-arm64.md).
 
-A direct ARM64 installation path has not been qualified. It needs prepared
-GPT/FAT media on virtio block storage; this profile has no optical device.
-Preparation must handle split WIM files and load the matching signed ARM64
-storage and input drivers in both WinPE and the installed image. A driver
+Optional optical drives use one modern virtio-SCSI controller with up to two
+targets, each with LUN0. The existing optical command implementation supplies
+read-only CD media, sense data, unit attention and tray locking. The same media
+update API and console eject command work on both architectures. The pinned
+EDK II ARM profile already includes VirtioScsiDxe. Windows requires signed
+ARM64 vioscsi; its installed viostor driver serves the system disk.
+
+The optional `serial_port` exposes one standard multiport virtio-console port.
+The signed Windows vioser driver creates its named device. Guest output goes
+to VMM standard output. Toets selects `com.toets.0`, opened by its helpers as
+`\\.\Global\com.toets.0`. This port has no host input channel.
+
+A direct ARM64 installation path has not been qualified. Preparation must load
+the matching signed ARM64 storage and input drivers in both WinPE and the
+installed image. A driver
 directory beside `boot.wim` does not load those drivers. The AMD64 ATAPI ISO
 procedure below does not apply.
 
@@ -545,7 +562,8 @@ wait for guest shutdown and the process result. The action requires the
 See the [action reference](api_requests/actions.md#intel-and-amd-windows-feature-only-sendpowerbutton).
 
 Guest reset exits Firecracker. A configured AMD64 PC returns exit code3 for an
-ACPI or i8042 reset, and code0 for normal shutdown. Other nonzero results are
+ACPI or i8042 reset. ARM64 returns code3 for a PSCI reset. Both return code0
+for normal shutdown. Other nonzero results are
 failures. The supervisor restarts only a recognised reset, with a bounded reboot
 count and the same writable disk, firmware, UUID and device configuration.
 Wait for the old process to exit before starting its replacement. Start a new
@@ -607,10 +625,10 @@ full installed-reference matrix covers the legacy VGA profile.
 AMD64 console snapshots contain display memory and registers, keyboard/mouse
 queues, held input, pending releases, keyboard LEDs and pending lock updates,
 USB controller/HID state, PCI state, optical transfer state and media identity.
-The current snapshot format is 45.0.0. It includes the kernel prefault ranges
+The current snapshot format is 47.0.0. It includes the kernel prefault ranges
 and inherited block-backing requirements from `patch/v1.17.0-dev`, with the
 Windows device and CET state, plus the upstream queue and PCI root-port state.
-Formats 44 and earlier require their original
+Formats 46 and earlier require their original
 binary. Basic VGA state adds about 16 MiB; QXL also saves 48 MiB of private
 RAM/VRAM, its protocol ROM, control state and validated secondary-surface
 descriptors. The bounded snapshot reader accepts at most 128 MiB, including GPU
@@ -620,13 +638,17 @@ with the power registers. The changed FADT declares this fixed hardware;
 format42 snapshots retain their earlier declaration and require their matching
 binary.
 
-ARM64 console snapshots save display/configuration and one typed virtio-input
-state in the PCI device manager. The console reuses that backend on restore; it
+ARM64 console snapshots save the RAM framebuffer configuration, `fw_cfg`
+selector, offset and partial DMA address. Pixel bytes remain in the guest memory
+snapshot. Named serial handshake messages, SCSI queues, media digests, tray
+state and sense data are saved with their PCI devices. Restore checks their
+configuration against the console topology. The console saves one typed virtio-input state in the PCI device
+manager. The console reuses that backend on restore; it
 does not save a second held-key or LED state. Pending frames, partial-frame
 cursor, position, held releases and guest/pending lock LEDs travel with Input.
 Missing, stray or mismatched console/input topology is rejected before backend
 attachment. Format29 through format39 snapshots require their matching older
-binaries; format45 has no decoder for them. Formats40 through43 also require
+binaries; format47 has no decoder for them. Formats40 through43 also require
 their matching binaries. Snapshots do not move between AMD64 and ARM64.
 
 The historical format31 Windows 11 test edition was IoT Enterprise LTSC 2024. It

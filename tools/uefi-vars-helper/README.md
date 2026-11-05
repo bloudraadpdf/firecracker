@@ -160,6 +160,10 @@ readable with its protocol headers. QueryVariableInfo reports storage capacity
 and per-variable overhead, not the larger transport limit. Its authenticated
 maximum reserves the private-variable signer digest as a safe class bound.
 
+Lifecycle notifications use the pinned EDK II payload: `MessageLength = 1`
+and `Data[0] = 0`. The helper rejects empty and malformed payloads without
+changing the lifecycle flags.
+
 The engine implements the 64-bit EDK II MM variable and variable-policy
 interfaces. Policies are registered during trusted firmware initialisation and
 are enforced after EndOfDxe, matching the pinned EDK II variable-check path.
@@ -228,7 +232,7 @@ keys or a resulting disabled Secure Boot state. Checkpoint and restore field
 definitions are in `src/service.rs`; restore wraps the checkpoint with
 `expected_generation`.
 
-## Microsoft policy for AMD64 acceptance
+## Microsoft policy for native acceptance
 
 `seed-microsoft` builds a public-key seed from Microsoft `secureboot_objects`
 revision `daa32713651f2ffe97b18df5aaf93ffe238aa464`. This is an explicit,
@@ -249,16 +253,21 @@ Percent-encode spaces in URLs. Retain the upstream BSD-2-Clause-Patent licence
 if distributing these inputs. Then run:
 
 ```sh
-firecracker-uefi-vars seed-microsoft SOURCE_DIRECTORY seed.json
+firecracker-uefi-vars seed-microsoft x64 SOURCE_DIRECTORY seed.json
 firecracker-uefi-vars provision store.json seed.json
 ```
 
+Use `arm64` in place of `x64` for ARM64 guests. The architecture selects the
+image revocations from the pinned database. Missing architecture entries stop
+seed generation.
+
 The resulting policy uses Microsoft's platform key, 2023 KEK and 2023 Windows
-boot CA. It includes all pinned AMD64 image revocations, the revoked 2011
-Windows boot CA and the published SVN records. It does not trust the EFI probe
-certificate or arbitrary third-party EFI programs. The old 26100.1742 Toets
-installation medium was rejected by this policy during acceptance. Use current
-signed installation media; do not remove revocations to boot an old image.
+boot CA. It includes all pinned image revocations for the selected architecture,
+the revoked 2011 Windows boot CA and the published SVN records. It does not
+trust the EFI probe certificate or arbitrary third-party EFI programs. The old
+26100.1742 Toets installation medium was rejected by this policy during
+acceptance. Use current signed installation media; do not remove revocations to
+boot an old image.
 
 See
 [Microsoft key management guidance](https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/windows-secure-boot-key-creation-and-management-guidance)

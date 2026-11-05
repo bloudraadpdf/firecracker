@@ -76,7 +76,7 @@ snapshot results in multiple files that are composing the full microVM snapshot:
   **managed by the users**).
 
 The design allows sharing of memory pages and read only disks between multiple
-microVMs. When loading a snapshot, instead of loading at resume time the full
+microVMs. With the `File` backend, instead of loading at resume time the full
 contents from file to memory, Firecracker creates a
 [MAP_PRIVATE mapping](http://man7.org/linux/man-pages/man2/mmap.2.html) of the
 memory file, resulting in runtime on-demand loading of memory pages. Any
@@ -84,6 +84,11 @@ subsequent memory writes go to a copy-on-write anonymous memory mapping. This
 has the advantage of very fast snapshot loading times, but comes with the cost
 of having to keep the guest memory file around for the entire lifetime of the
 resumed microVM.
+
+The `Anonymous` backend copies the memory file into private anonymous memory
+before resume. It uses the selected huge-page configuration for the writable
+guest memory, at the cost of a full RAM allocation and copy during restore. The
+source snapshot remains unchanged.
 
 ### Snapshot files management
 
@@ -113,13 +118,14 @@ vCPU count and emulated devices count. The Firecracker CI runs snapshot tests on
 all [supported platforms](../../README.md#tested-platforms).
 
 On x86_64, snapshot format 13 records the physical ranges of the boot kernel's
-file-backed code and read-only ELF data. When KVM supports `KVM_PRE_FAULT_MEMORY`,
-restore prepares read-only stage-2 mappings for allocated tmpfs pages in those
-ranges before vCPU threads start. This preserves copy-on-write and sparse holes.
-It shifts kernel instruction and data faults into restore preparation; other memory pages
-remain demand-faulted. Disk, userfaultfd and non-ELF boot sources retain demand
-faults. Hosts without the capability and unsupported vCPU modes do the same.
-See the [KVM API](https://docs.kernel.org/virt/kvm/api.html#kvm-pre-fault-memory).
+file-backed code and read-only ELF data. When KVM supports
+`KVM_PRE_FAULT_MEMORY`, restore prepares read-only stage-2 mappings for
+allocated tmpfs pages in those ranges before vCPU threads start. This preserves
+copy-on-write and sparse holes. It shifts kernel instruction and data faults
+into restore preparation; other memory pages remain demand-faulted. Disk,
+userfaultfd and non-ELF boot sources retain demand faults. Hosts without the
+capability and unsupported vCPU modes do the same. See the
+[KVM API](https://docs.kernel.org/virt/kvm/api.html#kvm-pre-fault-memory).
 
 ### Developer preview status
 
@@ -147,8 +153,8 @@ the feature can be combined with guest_memfd support in Firecracker.
 
 ## Firecracker Snapshotting characteristics
 
-- Fresh Firecracker microVMs are booted using `anonymous` memory, while microVMs
-  resumed from snapshot load memory on-demand from the snapshot and
+- Fresh Firecracker microVMs are booted using `anonymous` memory. MicroVMs
+  resumed with the `File` backend load memory on-demand from the snapshot and
   copy-on-write to anonymous memory.
 - Resuming from a snapshot is optimized for speed, while taking a snapshot
   involves some extra CPU cycles for synchronously writing memory pages to the
@@ -463,6 +469,9 @@ snapshot. Accepted values are:
 
 - `File` - rely on the kernel to handle page faults when loading the contents of
   the guest memory file into memory.
+- `Anonymous` - copy the entire memory file into anonymous memory before resume.
+  This supports huge pages for guest writes without a separate page-fault
+  handler.
 - `Uffd` - use a dedicated user space process to handle page faults that occur
   for the guest memory range. Please refer to
   [this](handling-page-faults-on-snapshot-resume.md) for more details on
@@ -470,8 +479,8 @@ snapshot. Accepted values are:
 
 The meaning of `backend_path` depends on the `backend_type` chosen:
 
-- if using `File`, then `backend_path` should contain the path to the snapshot's
-  memory file to be loaded.
+- if using `File` or `Anonymous`, then `backend_path` should contain the path to
+  the snapshot's memory file to be loaded.
 - when using `Uffd`, `backend_path` refers to the path of the unix domain socket
   used for communication between Firecracker and the user space process that
   handles page faults.
@@ -480,7 +489,7 @@ The `huge_pages` field selects the host page configuration for the restored
 microVM. It accepts `Snapshot`, `None`, `Transparent`, and `2M`. `Snapshot`
 reuses the value stored in the snapshot and is the default when the field is
 omitted; `None` uses the host's default memory-mapping behavior. Explicit `2M`
-hugetlbfs pages require the `Uffd` backend, so combining `2M` with `File`
+hugetlbfs pages require `Anonymous` or `Uffd`, so combining `2M` with `File`
 returns an error. With `Uffd`, the effectiveness of transparent huge pages may
 be limited.
 

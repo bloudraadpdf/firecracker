@@ -1,7 +1,7 @@
 # ARM64 CloudHv firmware profiles
 
 The secure external EDK II profile selects the existing host variable transport,
-TPM CRB, Bochs MMIO graphics and virtio input drivers. Cross builds establish
+TPM CRB, RAM framebuffer graphics and virtio input drivers. Cross builds establish
 source integration only. ARM Secure Boot, PPI interaction, Windows installation
 and post-ExitBootServices runtime qualification remain pending. The ordinary
 `ArmVirtCloudHv.dsc` profile retains its original providers.
@@ -32,11 +32,15 @@ licences with distributed firmware.
 | Profile                     | Graphics/input                         | TPM/host variables                      |
 | --------------------------- | -------------------------------------- | --------------------------------------- |
 | `ArmVirtCloudHv.dsc`        | Original headless profile              | Original providers                      |
-| `ArmVirtCloudHvConsole.dsc` | Bochs MMIO GOP + combined virtio input | Original providers                      |
+| `ArmVirtCloudHvConsole.dsc` | RAM framebuffer GOP + combined virtio input | Original providers                      |
 | `ArmVirtCloudHvSecure.dsc`  | Same graphics/input                    | Required TPM + protected host variables |
 
 Console JSON does not select the firmware build. Select its matching profile
-explicitly. From the Firecracker root, enter the EDK II checkout, initialise the
+explicitly. Both console profiles use the existing `QemuRamfbDxe` driver. It
+allocates reserved guest RAM and sends its address and mode through `fw_cfg`.
+The GOP framebuffer remains available during Windows PCI enumeration.
+
+From the Firecracker root, enter the EDK II checkout, initialise the
 build environment and build with the installed AArch64 GNU cross compiler:
 
 ```sh
@@ -66,7 +70,7 @@ secure profile; a build flag does not enrol a Secure Boot trust policy.
                                       |
                                   Tcg2Dxe / host ACPI TPM2
 0x10001000 variable MMIO -> VirtMmCommunicationDxe -> host helper
-PCI0380 BAR0/BAR2 -> QemuVideoDxe -> graphics console
+0x10002000 fw_cfg -> QemuRamfbDxe -> reserved RAM framebuffer
 virtio input PCI  -> VirtioInputDxe -> trusted console input
 connected consoles -> physical presence -> hierarchy configuration -> boot
 ```
