@@ -665,19 +665,15 @@ pub(crate) mod tests {
     #[test]
     fn test_create_vcpu() {
         let vm = setup_vm_with_memory(0x1000);
-
-        unsafe { libc::close(vm.fd().as_raw_fd()) };
-
+        let file = std::fs::File::open("/dev/null").unwrap();
+        assert_eq!(
+            unsafe { libc::dup2(file.as_raw_fd(), vm.fd().as_raw_fd()) },
+            vm.fd().as_raw_fd()
+        );
         let err = KvmVcpu::new(0, &vm);
-
-        // dropping vm would double close the gic fd, so leak it
-        // do the drop before assertion. Otherwise if assert fails,
-        // we get IO runtime error instead of assert error.
-        std::mem::forget(vm);
-
         assert_eq!(
             err.err().unwrap().to_string(),
-            "Error creating vcpu: Bad file descriptor (os error 9)".to_string()
+            "Error creating vcpu: Not a tty (os error 25)".to_string()
         );
     }
 
