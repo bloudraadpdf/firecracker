@@ -118,6 +118,15 @@ pub fn create_fdt(
     create_devices_node(&mut fdt_writer, device_manager)?;
     #[cfg(feature = "windows")]
     create_uefi_vars_node(&mut fdt_writer, device_manager.uefi_vars.is_some())?;
+    #[cfg(feature = "windows")]
+    if device_manager.console.is_some() {
+        use crate::device_manager::console_ramfb::{MMIO_BASE, MMIO_SIZE};
+        let node = fdt_writer.begin_node(&format!("fw-cfg@{MMIO_BASE:x}"))?;
+        fdt_writer.property_string("compatible", "qemu,fw-cfg-mmio")?;
+        fdt_writer.property_array_u64("reg", &[MMIO_BASE, MMIO_SIZE])?;
+        fdt_writer.property_null("dma-coherent")?;
+        fdt_writer.end_node(node)?;
+    }
     create_vmgenid_node(&mut fdt_writer, device_manager.acpi_devices.vmgenid())?;
     if let Some(vmclock) = device_manager.acpi_devices.vmclock() {
         create_vmclock_node(&mut fdt_writer, vmclock)?;

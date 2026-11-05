@@ -16,6 +16,7 @@ impl VideoMemory {
         Ok(Self(Arc::new(MmapRegion::new(FRAMEBUFFER_SIZE)?)))
     }
 
+    #[cfg(any(target_arch = "x86_64", test))]
     pub(super) fn mapping(&self) -> Arc<MmapRegion> {
         self.0.clone()
     }

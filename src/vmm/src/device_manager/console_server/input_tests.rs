@@ -16,7 +16,10 @@ fn server(input: Arc<Mutex<Input>>) -> (ConsoleServer, TempDir) {
     let directory = TempDir::new().unwrap();
     let server = ConsoleServer::new(
         &directory.as_path().join("input.sock"),
+        #[cfg(target_arch = "x86_64")]
         Arc::new(Mutex::new(Vga::default())),
+        #[cfg(target_arch = "aarch64")]
+        Arc::new(Mutex::new(Ramfb::new(default_mem(), Default::default()))),
         ConsoleInput::Virtio(input),
         #[cfg(target_arch = "x86_64")]
         None,
@@ -34,6 +37,19 @@ fn event(mem: &GuestMemoryMmap, index: u16) -> (u16, u16, i32) {
         u16::from_le_bytes(bytes[2..4].try_into().unwrap()),
         i32::from_le_bytes(bytes[4..].try_into().unwrap()),
     )
+}
+
+#[test]
+#[cfg(target_arch = "aarch64")]
+fn unconfigured_display_provides_a_valid_console_frame() {
+    let (device, _) = active_input(&default_mem(), 8);
+    let (mut server, _directory) = server(Arc::new(Mutex::new(device)));
+    let response = server.handle(&request(0, &[]));
+    assert_eq!(&response[..4], b"FCF1");
+    let word = |offset| u32::from_le_bytes(response[offset..offset + 4].try_into().unwrap());
+    assert!(word(4) > 0 && word(8) > 0);
+    assert_eq!(word(4) * word(8) * 4, word(12));
+    assert_eq!(response.len(), 16 + word(12) as usize);
 }
 
 #[test]
@@ -195,7 +211,10 @@ fn selected_input_and_console_subscriptions_follow_the_startup_result() {
         let server = Arc::new(Mutex::new(
             ConsoleServer::new(
                 &directory.as_path().join("guard.sock"),
+                #[cfg(target_arch = "x86_64")]
                 Arc::new(Mutex::new(Vga::default())),
+                #[cfg(target_arch = "aarch64")]
+                Arc::new(Mutex::new(Ramfb::new(default_mem(), Default::default()))),
                 ConsoleInput::Virtio(input.clone()),
                 #[cfg(target_arch = "x86_64")]
                 None,

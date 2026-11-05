@@ -234,6 +234,7 @@ mod tests {
             (BOOT_DEVICE_MEM_START, BOOT_DEVICE_MEM_START + MMIO_SIZE),
             (RTC_MEM_START, RTC_MEM_START + MMIO_SIZE),
             (SERIAL_MEM_START, SERIAL_MEM_START + MMIO_SIZE),
+            (GPIO_PL061_MEM_START, GPIO_PL061_MEM_START + MMIO_SIZE),
             (PCI_MMCONFIG_START, PCI_MMCONFIG_START + PCI_MMCONFIG_SIZE),
             (
                 DRAM_MEM_START,
@@ -244,7 +245,11 @@ mod tests {
             (FIRMWARE_RSDP_ADDR, FIRMWARE_RSDP_ADDR + 0x1_0000),
             (FIRMWARE_START, FIRMWARE_START + FIRMWARE_MAX_SIZE),
         ];
-        for base in [MMIO_BASE, uefi_vars::MMIO_BASE] {
+        for base in [
+            MMIO_BASE,
+            uefi_vars::MMIO_BASE,
+            super::super::console_ramfb::MMIO_BASE,
+        ] {
             assert!(base.is_multiple_of(MMIO_SIZE));
             assert!(base >= 0x0040_0000 && base + MMIO_SIZE <= DRAM_MEM_START);
             for (start, end) in ranges {
@@ -262,6 +267,6 @@ mod tests {
                 .start(),
             MEM_32BIT_DEVICES_START
         );
-        assert_eq!(resources.mmio32_memory.base(), 0x4000_3000);
+        assert_eq!(resources.mmio32_memory.base(), 0x4000_4000);
     }
 }

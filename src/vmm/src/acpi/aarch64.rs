@@ -28,6 +28,26 @@ pub(crate) fn setup_arch_dsdt(
     devices.acpi_devices.append_aml_bytes(bytes)?;
     devices.append_tpm_aml(bytes)?;
     devices.append_uefi_vars_aml(bytes)?;
+    if devices.console.is_some() {
+        use crate::device_manager::console_ramfb::{MMIO_BASE, MMIO_SIZE};
+        aml::Device::new(
+            "_SB_.FWCF".try_into()?,
+            vec![
+                &aml::Name::new("_HID".try_into()?, &"QEMU0002")?,
+                &aml::Name::new("_STA".try_into()?, &0x0fu8)?,
+                &aml::Name::new("_CCA".try_into()?, &aml::ONE)?,
+                &aml::Name::new(
+                    "_CRS".try_into()?,
+                    &aml::ResourceTemplate::new(vec![&aml::Memory32Fixed::new(
+                        true,
+                        u32::try_from(MMIO_BASE).unwrap(),
+                        u32::try_from(MMIO_SIZE).unwrap(),
+                    )]),
+                )?,
+            ],
+        )
+        .append_aml_bytes(bytes)?;
+    }
     if let Some(serial) = devices.mmio_platform_devices.serial_device_info() {
         aml::Device::new(
             "_SB_.COM1".try_into()?,

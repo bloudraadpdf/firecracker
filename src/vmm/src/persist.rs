@@ -199,7 +199,7 @@ pub enum CreateSnapshotError {
 }
 
 /// Snapshot version
-pub const SNAPSHOT_VERSION: Version = Version::new(45, 0, 0);
+pub const SNAPSHOT_VERSION: Version = Version::new(46, 0, 0);
 
 /// Creates a Microvm snapshot.
 pub fn create_snapshot(
@@ -904,6 +904,7 @@ mod tests {
                 &mut events,
             )
             .unwrap();
+        #[cfg(target_arch = "x86_64")]
         manager.console.as_ref().unwrap().fill_test_framebuffer();
         #[cfg(target_arch = "x86_64")]
         {
@@ -962,7 +963,8 @@ mod tests {
         let mut encoded = Vec::new();
         Snapshot::new(&state).save(&mut encoded).unwrap();
         // Ensure the high-entropy large buffers actually reached the encoder.
-        assert!(encoded.len() > 28 * 1024 * 1024);
+        let minimum_mib = if cfg!(target_arch = "x86_64") { 28 } else { 12 };
+        assert!(encoded.len() > minimum_mib * 1024 * 1024);
         eprintln!("combined optional-buffer snapshot bytes: {}", encoded.len());
         let restored = Snapshot::<MicrovmState>::load(&mut encoded.as_slice()).unwrap();
         assert_eq!(

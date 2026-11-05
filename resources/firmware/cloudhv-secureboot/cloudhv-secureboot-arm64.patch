@@ -187,7 +187,7 @@ diff --git a/ArmVirtPkg/ArmVirtCloudHv.dsc b/ArmVirtPkg/ArmVirtCloudHv.dsc
    }
 +
 +!ifdef FIRECRACKER_CONSOLE
-+  OvmfPkg/QemuVideoDxe/QemuVideoDxe.inf
++  OvmfPkg/QemuRamfbDxe/QemuRamfbDxe.inf
 +  OvmfPkg/VirtioInputDxe/VirtioInput.inf
 +!endif
 +!if $(FIRECRACKER_SECURE_BOOT) == TRUE
@@ -225,7 +225,7 @@ diff --git a/ArmVirtPkg/ArmVirtCloudHv.fdf b/ArmVirtPkg/ArmVirtCloudHv.fdf
    INF OvmfPkg/VirtioPciDeviceDxe/VirtioPciDeviceDxe.inf
    INF OvmfPkg/Virtio10Dxe/Virtio10.inf
 +!ifdef FIRECRACKER_CONSOLE
-+  INF OvmfPkg/QemuVideoDxe/QemuVideoDxe.inf
++  INF OvmfPkg/QemuRamfbDxe/QemuRamfbDxe.inf
 +  INF OvmfPkg/VirtioInputDxe/VirtioInput.inf
 +!endif
 +!if $(FIRECRACKER_SECURE_BOOT) == TRUE

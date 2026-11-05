@@ -23,8 +23,9 @@ use super::console_bridge::BridgeState;
 #[cfg(target_arch = "x86_64")]
 #[cfg(feature = "windows")]
 use super::console_bridge::ConsoleBridge;
-#[cfg(feature = "windows")]
+#[cfg(all(feature = "windows", target_arch = "x86_64"))]
 use super::console_display::DisplayDevice;
+#[cfg(target_arch = "x86_64")]
 use super::console_display::DisplayState;
 #[cfg(feature = "windows")]
 use super::console_input::ConsoleInput;
@@ -37,6 +38,10 @@ use super::console_optical::OpticalState;
 use super::console_qxl::QxlConsole;
 #[cfg(target_arch = "x86_64")]
 use super::console_qxl::QxlState;
+#[cfg(all(feature = "windows", target_arch = "aarch64"))]
+use super::console_ramfb::Ramfb;
+#[cfg(target_arch = "aarch64")]
+use super::console_ramfb::RamfbState;
 #[cfg(feature = "windows")]
 use super::console_server::ConsoleServer;
 #[cfg(target_arch = "x86_64")]
@@ -65,14 +70,17 @@ use crate::vstate::vm::KvmVm;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 enum ConsoleDisplayState {
+    #[cfg(target_arch = "x86_64")]
     Vga(Box<DisplayState>),
+    #[cfg(target_arch = "aarch64")]
+    Ramfb(RamfbState),
     #[cfg(target_arch = "x86_64")]
     VirtioGpu,
     #[cfg(target_arch = "x86_64")]
     Qxl(Box<QxlState>),
 }
 
-#[cfg(feature = "windows")]
+#[cfg(all(feature = "windows", target_arch = "x86_64"))]
 impl ConsoleDisplayState {
     fn vga(&self) -> Option<&DisplayState> {
         match self {
@@ -94,7 +102,10 @@ impl ConsoleDisplayState {
 #[cfg(feature = "windows")]
 #[derive(Debug)]
 enum ConsoleDisplay {
+    #[cfg(target_arch = "x86_64")]
     Vga(Arc<Mutex<DisplayDevice>>),
+    #[cfg(target_arch = "aarch64")]
+    Ramfb(Arc<Mutex<Ramfb>>),
     #[cfg(target_arch = "x86_64")]
     VirtioGpu(Arc<Mutex<crate::devices::display::Vga>>),
     #[cfg(target_arch = "x86_64")]
@@ -103,6 +114,7 @@ enum ConsoleDisplay {
 
 #[cfg(feature = "windows")]
 impl ConsoleDisplay {
+    #[cfg(target_arch = "x86_64")]
     fn vga(&self) -> Arc<Mutex<crate::devices::display::Vga>> {
         match self {
             Self::Vga(device) => device.lock().unwrap().vga(),
@@ -115,6 +127,9 @@ impl ConsoleDisplay {
 
     fn save(&self) -> io::Result<ConsoleDisplayState> {
         Ok(match self {
+            #[cfg(target_arch = "aarch64")]
+            Self::Ramfb(device) => ConsoleDisplayState::Ramfb(device.lock().unwrap().save()),
+            #[cfg(target_arch = "x86_64")]
             Self::Vga(device) => ConsoleDisplayState::Vga(Box::new(device.lock().unwrap().save())),
             #[cfg(target_arch = "x86_64")]
             Self::VirtioGpu(_) => ConsoleDisplayState::VirtioGpu,
@@ -215,11 +230,6 @@ impl ConsoleState {
     pub(super) fn validate(&self) -> io::Result<()> {
         self.config.validate()
     }
-
-    pub(super) fn mmio_regions(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
-        let ConsoleDisplayState::Vga(display) = &self.display;
-        display.mmio_regions()
-    }
 }
 
 #[cfg(any(target_arch = "aarch64", test))]
@@ -270,7 +280,7 @@ impl ConsoleHardware {
     }
 }
 
-#[cfg(all(test, feature = "windows"))]
+#[cfg(all(test, feature = "windows", target_arch = "x86_64"))]
 impl ConsoleHardware {
     pub(crate) fn fill_test_framebuffer(&self) {
         let bytes: Vec<u8> = (0..=255)
@@ -535,16 +545,19 @@ impl DeviceManager {
             .map_err(io::Error::other)?;
             input
         };
-        let display = ConsoleDisplay::Vga(DisplayDevice::attach(
+        let framebuffer = Ramfb::attach(
             vm,
-            pci,
-            state.and_then(|state| state.display.vga()),
-        )?);
+            state.map(|state| {
+                let ConsoleDisplayState::Ramfb(framebuffer) = &state.display;
+                framebuffer
+            }),
+        )?;
         let server = ConsoleServer::new(
             &config.socket_path,
-            display.vga(),
+            framebuffer.clone(),
             ConsoleInput::Virtio(input),
         )?;
+        let display = ConsoleDisplay::Ramfb(framebuffer);
         self.console = Some(ConsoleHardware {
             config: config.clone(),
             display,

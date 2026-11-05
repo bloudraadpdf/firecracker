@@ -74,6 +74,7 @@ pub mod console;
 mod console_a20;
 #[cfg(target_arch = "x86_64")]
 mod console_bridge;
+#[cfg(target_arch = "x86_64")]
 mod console_display;
 #[cfg(feature = "windows")]
 mod console_input;
@@ -81,6 +82,8 @@ mod console_input;
 mod console_optical;
 #[cfg(target_arch = "x86_64")]
 mod console_qxl;
+#[cfg(target_arch = "aarch64")]
+pub(crate) mod console_ramfb;
 #[cfg(feature = "windows")]
 mod console_server;
 #[cfg(target_arch = "x86_64")]
@@ -1053,8 +1056,13 @@ impl DeviceManager {
         }
         let tpm = state.tpm.is_some();
         let variables = state.uefi_vars.is_some();
-        let validate =
-            |(base, length)| Self::validate_security_mapping(base, length, tpm, variables);
+        let validate = |(base, length)| {
+            Self::validate_security_mapping(base, length, tpm, variables)?;
+            if state.console.is_some() {
+                console_ramfb::Ramfb::validate_mapping(base, length)?;
+            }
+            Ok::<_, std::io::Error>(())
+        };
         memory
             .iter()
             .map(|region| (region.start_addr().0, region.len()))
@@ -1071,9 +1079,6 @@ impl DeviceManager {
         .flatten()
         .map(|region| (region.addr, region.len))
         .try_for_each(validate)?;
-        if let Some(console) = &state.console {
-            console.mmio_regions().try_for_each(validate)?;
-        }
         Ok(())
     }
 

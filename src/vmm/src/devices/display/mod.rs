@@ -11,7 +11,7 @@ use std::time::Instant;
 
 #[cfg(feature = "windows")]
 mod memory;
-#[cfg(feature = "windows")]
+#[cfg(all(feature = "windows", target_arch = "x86_64"))]
 pub(crate) mod pci;
 #[cfg(feature = "windows")]
 use memory::VideoMemory;
@@ -197,6 +197,7 @@ impl Default for Vga {
 #[cfg(feature = "windows")]
 impl Vga {
     /// Stable, page-aligned VRAM backing for the linear framebuffer KVM slot.
+    #[cfg(any(target_arch = "x86_64", test))]
     pub(crate) fn framebuffer_mapping(&self) -> std::sync::Arc<vm_memory::MmapRegion> {
         self.memory.mapping()
     }

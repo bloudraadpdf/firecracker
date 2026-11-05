@@ -22,6 +22,9 @@ use vmm_sys_util::epoll::EventSet;
 use super::console_input::ConsoleInput;
 #[cfg(target_arch = "x86_64")]
 use super::console_optical::OpticalDevice;
+#[cfg(target_arch = "aarch64")]
+use super::console_ramfb::Ramfb;
+#[cfg(target_arch = "x86_64")]
 use crate::devices::display::Vga;
 #[cfg(all(target_arch = "x86_64", test))]
 use crate::devices::legacy::I8042Device;
@@ -56,7 +59,10 @@ pub struct ConsoleServer {
     registration: Result<(), String>,
     timer: TimerFd,
     clients: HashMap<RawFd, Client>,
+    #[cfg(target_arch = "x86_64")]
     vga: Arc<Mutex<Vga>>,
+    #[cfg(target_arch = "aarch64")]
+    ramfb: Arc<Mutex<Ramfb>>,
     #[cfg(target_arch = "x86_64")]
     gpu: Option<Arc<Mutex<crate::devices::virtio::gpu::renderer::Renderer>>>,
     #[cfg(target_arch = "x86_64")]
@@ -73,7 +79,8 @@ pub struct ConsoleServer {
 impl ConsoleServer {
     pub(super) fn new(
         path: &Path,
-        vga: Arc<Mutex<Vga>>,
+        #[cfg(target_arch = "x86_64")] vga: Arc<Mutex<Vga>>,
+        #[cfg(target_arch = "aarch64")] ramfb: Arc<Mutex<Ramfb>>,
         input: ConsoleInput,
         #[cfg(target_arch = "x86_64")] optical: Option<Arc<Mutex<OpticalDevice>>>,
     ) -> io::Result<Self> {
@@ -89,7 +96,10 @@ impl ConsoleServer {
             registration: Err("console event subscriber is not registered".to_owned()),
             timer,
             clients: HashMap::new(),
+            #[cfg(target_arch = "x86_64")]
             vga,
+            #[cfg(target_arch = "aarch64")]
+            ramfb,
             #[cfg(target_arch = "x86_64")]
             gpu: None,
             #[cfg(target_arch = "x86_64")]
@@ -131,7 +141,14 @@ impl ConsoleServer {
                 });
             }
         }
-        self.vga.lock().unwrap().render()
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.vga.lock().unwrap().render()
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            self.ramfb.lock().unwrap().render()
+        }
     }
 
     #[cfg(target_arch = "x86_64")]
