@@ -179,7 +179,7 @@ pub enum FcExitCode {
     GenericError = 1,
     /// Generic exit code error; not possible to occur if the program logic is sound.
     UnexpectedError = 2,
-    /// A configured PC guest requested a reboot; a supervisor may cold-start it.
+    /// The guest requested a reboot; a supervisor may cold-start it.
     GuestReboot = 3,
     /// Firecracker was shut down after intercepting a restricted system call.
     BadSyscall = 148,
