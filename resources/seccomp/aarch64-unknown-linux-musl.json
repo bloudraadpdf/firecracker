@@ -962,6 +962,25 @@
                         "val": 0
                     }
                 ]
+            },
+            {
+                "syscall": "unlinkat",
+                "comment": "Remove the graphical console socket during shutdown",
+                "args": [
+                    {
+                        "index": 0,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 4294967196,
+                        "comment": "AT_FDCWD"
+                    },
+                    {
+                        "index": 2,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 0
+                    }
+                ]
             }
         ]
     },
@@ -1636,6 +1655,18 @@
                         "op": "eq",
                         "val": 1075883638,
                         "comment": "KVM_IRQFD"
+                    }
+                ]
+            },
+            {
+                "syscall": "ioctl",
+                "args": [
+                    {
+                        "index": 1,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 1075883590,
+                        "comment": "KVM_SET_USER_MEMORY_REGION for framebuffer BAR relocation and decode"
                     }
                 ]
             }
