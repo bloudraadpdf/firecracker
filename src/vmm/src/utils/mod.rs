@@ -8,13 +8,13 @@ pub mod net;
 /// Module with external libc functions
 pub mod signal;
 
-use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::num::Wrapping;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use libc::O_NONBLOCK;
+use serde::{Deserialize, Serialize};
 
 /// How many bits to left-shift by to convert MiB to bytes
 const MIB_TO_BYTES_SHIFT: usize = 20;
@@ -99,7 +99,7 @@ macro_rules! align_down {
     }};
 }
 
-/// Create and open a file for both reading and writing to it with a O_NONBLOCK flag.
+/// Create and open a file for reading and appending with an O_NONBLOCK flag.
 /// In case we open a FIFO, we need all READ, WRITE and O_NONBLOCK in order to not block the process
 /// if nobody is consuming the message. Otherwise opening the FIFO with only WRITE and O_NONBLOCK
 /// will fail with ENXIO if there is no readier already attached to it.
@@ -109,7 +109,7 @@ pub fn open_file_nonblock(path: &Path) -> Result<File, std::io::Error> {
         .custom_flags(O_NONBLOCK)
         .create(true)
         .read(true)
-        .write(true)
+        .append(true)
         .open(path)
 }
 
@@ -149,6 +149,22 @@ impl std::fmt::Display for Version {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nonblocking_output_preserves_previous_runs() {
+        use std::io::Write;
+
+        let file = vmm_sys_util::tempfile::TempFile::new().unwrap();
+        std::fs::write(file.as_path(), b"previous run\n").unwrap();
+        let mut first = open_file_nonblock(file.as_path()).unwrap();
+        let mut second = open_file_nonblock(file.as_path()).unwrap();
+        first.write_all(b"first\n").unwrap();
+        second.write_all(b"second\n").unwrap();
+        assert_eq!(
+            std::fs::read(file.as_path()).unwrap(),
+            b"previous run\nfirst\nsecond\n"
+        );
+    }
 
     #[test]
     fn test_u32_mib_to_bytes_does_not_wrap() {
