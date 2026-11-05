@@ -542,6 +542,19 @@ impl Vmm {
                 .inner
                 .clone();
 
+            #[cfg(feature = "windows")]
+            if self.boot_source_config.firmware.is_some() {
+                // Firmware exposes this interrupt as a GED, without a GPIO driver.
+                return gpio
+                    .lock()
+                    .expect("PL061 lock was poisoned")
+                    .interrupt_evt
+                    .write(1)
+                    .map_err(|error| {
+                        VmmError::PL061Error(devices::legacy::PL061Error::TriggerInterrupt(error))
+                    });
+            }
+
             // Press the virtual power button. The device holds the line asserted until the
             // guest reads it back and then releases it itself, so there is nothing to time
             // out here: the press survives a paused vCPU and is delivered on resume, and it

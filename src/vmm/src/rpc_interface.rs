@@ -134,7 +134,7 @@ pub enum VmmAction {
     /// Send an external graceful shutdown input to the microVM.
     ///
     /// On x86_64 this injects CTRL+ALT+DEL through the i8042 keyboard device. On aarch64 this
-    /// injects a virtual power-button press through the PL061 GPIO device.
+    /// signals the ACPI power button for firmware guests or the PL061 GPIO button for Linux.
     SendCtrlAltDel,
     /// Signal the ACPI fixed power button; the guest chooses its shutdown policy.
     #[cfg(all(feature = "windows", target_arch = "x86_64"))]

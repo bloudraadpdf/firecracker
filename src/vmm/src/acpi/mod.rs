@@ -83,6 +83,8 @@ pub(crate) fn append_ged(
     target: aml::Path,
     v: &mut Vec<u8>,
 ) -> Result<(), aml::AmlError> {
+    #[cfg(target_arch = "aarch64")]
+    let gsi = gsi + crate::arch::SPI_START;
     aml::Device::new(
         path,
         vec![

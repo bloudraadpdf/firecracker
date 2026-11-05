@@ -164,6 +164,20 @@ impl ACPIDeviceManager {
 mod tests {
     use acpi_tables::Aml;
 
+    #[test]
+    #[cfg(target_arch = "aarch64")]
+    fn generation_event_uses_architectural_spi_number() {
+        let devices = crate::device_manager::tests::default_device_manager();
+        assert_eq!(devices.acpi_devices.vmgenid().gsi(), 0);
+        let mut bytes = Vec::new();
+        devices.acpi_devices.append_aml_bytes(&mut bytes).unwrap();
+        assert!(
+            bytes
+                .windows(9)
+                .any(|value| value == [0x89, 6, 0, 3, 1, 32, 0, 0, 0])
+        );
+    }
+
     fn aml_with_clock(mut manager: crate::device_manager::DeviceManager, present: bool) -> Vec<u8> {
         if !present {
             manager.acpi_devices.vmclock = None;

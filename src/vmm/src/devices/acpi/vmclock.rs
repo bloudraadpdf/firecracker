@@ -214,10 +214,6 @@ impl VmClock {
         scope: crate::acpi::DeviceScope,
         v: &mut Vec<u8>,
     ) -> Result<(), aml::AmlError> {
-        #[cfg(target_arch = "x86_64")]
-        let interrupt = self.gsi;
-        #[cfg(target_arch = "aarch64")]
-        let interrupt = self.gsi + crate::arch::SPI_START;
         aml::Device::new(
             scope.device_path("VCLK")?,
             vec![
@@ -245,7 +241,7 @@ impl VmClock {
         crate::acpi::append_ged(
             scope.device_path("GCLK")?,
             1,
-            interrupt,
+            self.gsi,
             scope.absolute_device_path("VCLK")?,
             v,
         )
