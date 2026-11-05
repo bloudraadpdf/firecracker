@@ -30,7 +30,7 @@
       <UserData><AcceptEula>true</AcceptEula><FullName>Firecracker test</FullName><Organization>Bloudraad</Organization></UserData>
     </component>
   </settings>
-  <settings pass="specialize">
+@OFFLINE_DRIVERS@  <settings pass="specialize">
     <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="@ARCH@" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS"><ComputerName>FCWINDOWS</ComputerName><TimeZone>UTC</TimeZone></component>
     <component name="Microsoft-Windows-Deployment" processorArchitecture="@ARCH@" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
       <RunSynchronous>

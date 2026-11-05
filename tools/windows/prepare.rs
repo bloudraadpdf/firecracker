@@ -17,7 +17,26 @@ enum Profile {
 impl Profile {
     fn answer(&self, index: u32, password: &str) -> String {
         let arm64 = matches!(self, Self::Arm64Client);
+        let offline = if arm64 {
+            let paths: String = (b'C'..=b'J')
+                .enumerate()
+                .map(|(index, drive)| {
+                    format!(
+                        "<PathAndCredentials wcm:action=\"add\" \
+                         wcm:keyValue=\"{}\"><Path>{}:\\Drivers</Path></PathAndCredentials>\n",
+                        index + 1,
+                        char::from(drive)
+                    )
+                })
+                .collect();
+            format!(
+                "  <settings pass=\"offlineServicing\"><component name=\"Microsoft-Windows-PnpCustomizationsNonWinPE\" processorArchitecture=\"arm64\" publicKeyToken=\"31bf3856ad364e35\" language=\"neutral\" versionScope=\"nonSxS\" xmlns:wcm=\"http://schemas.microsoft.com/WMIConfig/2002/State\"><DriverPaths>{paths}</DriverPaths></component></settings>\n"
+            )
+        } else {
+            String::new()
+        };
         include_str!("Autounattend.xml.in")
+            .replace("@OFFLINE_DRIVERS@", &offline)
             .replace("@ARCH@", if arm64 { "arm64" } else { "amd64" })
             .replace("@EMS_PORT_COMMAND@", if arm64 { "" } else {
                 "        <RunSynchronousCommand xmlns:wcm=\"http://schemas.microsoft.com/WMIConfig/2002/State\" wcm:action=\"add\"><Order>2</Order><Path>cmd /c bcdedit /emssettings emsport:1 emsbaudrate:115200</Path></RunSynchronousCommand>\n"
@@ -120,7 +139,10 @@ mod tests {
     #[test]
     fn arm64_answer_uses_firmware_serial_settings_and_native_components() {
         let answer = Profile::Arm64Client.answer(2, "Fc1!fixture");
-        assert_eq!(answer.matches("processorArchitecture=\"arm64\"").count(), 6);
+        assert_eq!(answer.matches("processorArchitecture=\"arm64\"").count(), 7);
+        assert!(answer.contains("<settings pass=\"offlineServicing\">"));
+        assert!(answer.contains("Microsoft-Windows-PnpCustomizationsNonWinPE"));
+        assert_eq!(answer.matches(":\\Drivers</Path>").count(), 8);
         assert!(!answer.contains("amd64") && !answer.contains("/emssettings"));
         assert!(answer.contains("bcdedit /ems {default} on"));
         assert!(answer.contains("bcdedit /bootems {bootmgr} on"));

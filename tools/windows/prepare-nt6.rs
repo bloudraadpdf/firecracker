@@ -252,7 +252,10 @@ fn prepare_install_files(
     tree: &Path,
     answer: Option<Vec<u8>>,
 ) -> Result<()> {
-    let automatic = tree.join("$WinPEDriver$");
+    let automatic = tree.join(match architecture {
+        Architecture::Amd64 => "$WinPEDriver$",
+        Architecture::Arm64 => "Drivers",
+    });
     fs::create_dir(&automatic)?;
     let driver_tree = output.join("driver-tree");
     let driver_path = format!("viostor/{driver}/{}", architecture.directory());
@@ -643,18 +646,19 @@ mod tests {
         .unwrap();
         let answer = with_answer.then(|| b"<unattend/>".to_vec());
         prepare_install_files(&archive, "w11", architecture, &root, &tree, answer.clone()).unwrap();
-        let automatic = tree.join("$WinPEDriver$");
-        assert!(
-            automatic.is_dir(),
-            "Setup automatic driver directory absent"
-        );
+        let (directory, absent) = match architecture {
+            Architecture::Amd64 => ("$WinPEDriver$", "Drivers"),
+            Architecture::Arm64 => ("Drivers", "$WinPEDriver$"),
+        };
+        let automatic = tree.join(directory);
+        assert!(automatic.is_dir());
         let mut actual = BTreeMap::new();
         manifest(&automatic, &automatic, &mut actual).unwrap();
         assert_eq!(actual.len(), selected.len());
         for (path, bytes) in selected {
             assert_eq!(fs::read(automatic.join(path)).unwrap(), bytes);
         }
-        assert!(!tree.join("Drivers").exists());
+        assert!(!tree.join(absent).exists());
         assert_eq!(fs::read(tree.join("Autounattend.xml")).ok(), answer);
     }
 
