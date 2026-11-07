@@ -6,7 +6,7 @@ use vmm::logger::{IncMetric, METRICS};
 use vmm::rpc_interface::VmmAction;
 use vmm::vmm_config::snapshot::{
     CreateSnapshotParams, LoadSnapshotConfig, LoadSnapshotParams, MemBackendConfig, MemBackendType,
-    Vm, VmState,
+    Vm, VmState, WorkingSet,
 };
 
 use super::super::parsed_request::{ParsedRequest, RequestError};
@@ -22,6 +22,9 @@ pub const MISSING_FIELD: &str =
 /// Only specifying one of them is allowed.
 pub const TOO_MANY_FIELDS: &str =
     "too many fields: either `mem_backend` or `mem_file_path` exclusively is required";
+/// A working-set range is empty or not page-aligned.
+pub const INVALID_PAGE_RANGE: &str = "working-set ranges must be non-empty and page-aligned";
+const PAGE_SIZE: u64 = 4096;
 
 pub(crate) fn parse_put_snapshot(
     body: &Body,
@@ -117,6 +120,10 @@ fn parse_put_snapshot_load(body: &Body) -> Result<ParsedRequest, RequestError> {
         huge_pages: snapshot_config.huge_pages,
         vmclock_restore_notification: snapshot_config.vmclock_restore_notification,
         vmgenid_restore_notification: snapshot_config.vmgenid_restore_notification,
+        working_set: WorkingSet {
+            write: page_ranges(&snapshot_config.write_set)?,
+            read: page_ranges(&snapshot_config.read_set)?,
+        },
     };
 
     // Construct the `ParsedRequest` object.
@@ -128,6 +135,19 @@ fn parse_put_snapshot_load(body: &Body) -> Result<ParsedRequest, RequestError> {
     }
 
     Ok(parsed_req)
+}
+
+fn page_ranges(ranges: &[[u64; 2]]) -> Result<Vec<std::ops::Range<u64>>, RequestError> {
+    ranges
+        .iter()
+        .map(|&[start, end]| {
+            (start < end && start % PAGE_SIZE == 0 && end % PAGE_SIZE == 0)
+                .then_some(start..end)
+                .ok_or_else(|| {
+                    RequestError::SerdeJson(serde_json::Error::custom(INVALID_PAGE_RANGE))
+                })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -278,6 +298,7 @@ mod tests {
             huge_pages: SnapshotLoadHugePageConfig::Hugetlbfs2M,
             vmclock_restore_notification: VmClockRestoreNotification::Disabled,
             vmgenid_restore_notification: VmGenIdRestoreNotification::Disabled,
+            working_set: WorkingSet::default(),
         };
         let mut parsed_request = parse_put_snapshot(&Body::new(body), Some("load")).unwrap();
         assert!(
@@ -315,6 +336,7 @@ mod tests {
             huge_pages: SnapshotLoadHugePageConfig::Snapshot,
             vmclock_restore_notification: Default::default(),
             vmgenid_restore_notification: Default::default(),
+            working_set: WorkingSet::default(),
         };
         let mut parsed_request = parse_put_snapshot(&Body::new(body), Some("load")).unwrap();
         assert!(
@@ -353,6 +375,7 @@ mod tests {
             huge_pages: SnapshotLoadHugePageConfig::Snapshot,
             vmclock_restore_notification: Default::default(),
             vmgenid_restore_notification: Default::default(),
+            working_set: WorkingSet::default(),
         };
         let mut parsed_request = parse_put_snapshot(&Body::new(body), Some("load")).unwrap();
         assert!(
@@ -399,6 +422,7 @@ mod tests {
             huge_pages: SnapshotLoadHugePageConfig::Snapshot,
             vmclock_restore_notification: Default::default(),
             vmgenid_restore_notification: Default::default(),
+            working_set: WorkingSet::default(),
         };
         let mut parsed_request = parse_put_snapshot(&Body::new(body), Some("load")).unwrap();
         assert!(
@@ -433,6 +457,7 @@ mod tests {
             huge_pages: SnapshotLoadHugePageConfig::Snapshot,
             vmclock_restore_notification: Default::default(),
             vmgenid_restore_notification: Default::default(),
+            working_set: WorkingSet::default(),
         };
         let parsed_request = parse_put_snapshot(&Body::new(body), Some("load")).unwrap();
         assert_eq!(
@@ -558,5 +583,36 @@ mod tests {
             "invalid": "Paused"
         }"#;
         parse_patch_vm_state(&Body::new(invalid_body)).unwrap_err();
+    }
+
+    #[test]
+    fn snapshot_load_parses_a_working_set() {
+        let load = |sets: serde_json::Value| {
+            let mut body = serde_json::json!({
+                "snapshot_path": "vm.state",
+                "mem_backend": {"backend_type": "File", "backend_path": "vm.memory"}
+            });
+            body.as_object_mut()
+                .unwrap()
+                .extend(sets.as_object().unwrap().clone());
+            parse_put_snapshot(&Body::new(body.to_string()), Some("load"))
+        };
+        let request =
+            load(serde_json::json!({"write_set": [[4096, 16384]], "read_set": [[65536, 69632]]}))
+                .unwrap();
+        let VmmAction::LoadSnapshot(params) = vmm_action_from_request(request) else {
+            panic!("snapshot load expected");
+        };
+        assert_eq!(
+            params.working_set,
+            WorkingSet {
+                write: vec![4096..16384],
+                read: vec![65536..69632],
+            }
+        );
+        for range in [[4096, 4096], [8192, 4096], [1, 4096], [4096, 4097]] {
+            load(serde_json::json!({"read_set": [range]})).unwrap_err();
+            load(serde_json::json!({"write_set": [range]})).unwrap_err();
+        }
     }
 }

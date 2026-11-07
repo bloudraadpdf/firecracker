@@ -1454,6 +1454,7 @@ mod tests {
                 huge_pages: SnapshotLoadHugePageConfig::Snapshot,
                 vmclock_restore_notification: Default::default(),
                 vmgenid_restore_notification: Default::default(),
+                working_set: Default::default(),
             },
         )));
         check_unsupported(runtime_request(VmmAction::SetEntropyDevice(

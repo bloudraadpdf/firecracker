@@ -618,6 +618,8 @@ pub fn build_microvm_from_snapshot(
     clock_realtime: bool,
     vmgenid_notification: crate::devices::acpi::vmgenid::VmGenIdRestoreNotification,
     vmclock_notification: crate::devices::acpi::vmclock::VmClockRestoreNotification,
+    #[cfg_attr(target_arch = "aarch64", expect(unused_variables))]
+    working_set: &crate::vmm_config::snapshot::WorkingSet,
 ) -> Result<Arc<Mutex<Vmm>>, BuildMicrovmFromSnapshotError> {
     microvm_state.validate_windows_support()?;
     microvm_state.vm_info.boot_source.validate()?;
@@ -710,6 +712,9 @@ pub fn build_microvm_from_snapshot(
             vm.guest_memory(),
             &microvm_state.vm_info.kernel_prefault_ranges,
         )
+        .and_then(|()| {
+            crate::vstate::prefault::populate(&vcpus[0].kvm_vcpu.fd, vm.guest_memory(), working_set)
+        })
     {
         if error.raw_os_error() != Some(libc::EOPNOTSUPP) {
             return Err(BuildMicrovmFromSnapshotError::PrefaultMemory(error));

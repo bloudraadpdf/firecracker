@@ -18,6 +18,7 @@ use vmm_sys_util::ioctl_iowr_nr;
 use vmm_sys_util::seek_hole::SeekHole;
 
 use super::memory::GuestMemoryMmap;
+use crate::vmm_config::snapshot::WorkingSet;
 
 ioctl_iowr_nr!(KVM_PRE_FAULT_MEMORY, KVMIO, 0xd5, kvm_pre_fault_memory);
 
@@ -94,22 +95,78 @@ pub(crate) fn prepare(
                 for_data_range(&mut file, file_start..file_end, |range| {
                     let start = start + range.start - file_start;
                     let size = range.end - range.start;
-                    prefault_range(start..start + size, |request| {
-                        // SAFETY: The vCPU descriptor is live, the request number
-                        // matches its fully initialised, writable 64-byte ABI buffer.
-                        let result =
-                            unsafe { ioctl_with_mut_ref(vcpu, KVM_PRE_FAULT_MEMORY(), request) };
-                        if result < 0 {
-                            Err(io::Error::last_os_error())
-                        } else {
-                            Ok(())
-                        }
-                    })
+                    prefault_range(start..start + size, |request| pre_fault(vcpu, request))
                 })?;
             }
         }
     }
     Ok(())
+}
+
+/// Copies and maps the write set, then maps the read set read-only, before the guest runs.
+pub(crate) fn populate(
+    vcpu: &VcpuFd,
+    memory: &GuestMemoryMmap,
+    working_set: &WorkingSet,
+) -> io::Result<()> {
+    for_file_ranges(memory, &working_set.write, |host, size, guest| {
+        // SAFETY: The range lies in one live guest mapping, and no vCPU runs before restore
+        // completes.
+        if unsafe { libc::madvise(host.cast(), size, libc::MADV_POPULATE_WRITE) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        prefault_range(guest, |request| pre_fault(vcpu, request))
+    })?;
+    for_file_ranges(memory, &working_set.read, |_, _, guest| {
+        prefault_range(guest, |request| pre_fault(vcpu, request))
+    })
+}
+
+fn for_file_ranges(
+    memory: &GuestMemoryMmap,
+    ranges: &[Range<u64>],
+    mut prepare: impl FnMut(*mut u8, usize, Range<u64>) -> io::Result<()>,
+) -> io::Result<()> {
+    for region in memory.iter() {
+        let Some(backing) = region.file_offset() else {
+            continue;
+        };
+        for range in ranges {
+            let Some(window) = file_window(backing.start(), region.len(), range) else {
+                continue;
+            };
+            let size = usize::try_from(window.end - window.start).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "working-set range overflow")
+            })?;
+            let offset = window.start - backing.start();
+            let host = region
+                .get_host_address(vm_memory::MemoryRegionAddress(offset))
+                .map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidData, "working-set range is unmapped")
+                })?;
+            let guest = region.start_addr().raw_value() + offset;
+            prepare(host, size, guest..guest + (window.end - window.start))?;
+        }
+    }
+    Ok(())
+}
+
+/// Returns the part of the memory file `range` that a region backed from `file_start` maps.
+fn file_window(file_start: u64, len: u64, range: &Range<u64>) -> Option<Range<u64>> {
+    let start = range.start.max(file_start);
+    let end = range.end.min(file_start.checked_add(len)?);
+    (start < end).then_some(start..end)
+}
+
+fn pre_fault(vcpu: &VcpuFd, request: &mut kvm_pre_fault_memory) -> io::Result<()> {
+    // SAFETY: The vCPU descriptor is live, the request number
+    // matches its fully initialised, writable 64-byte ABI buffer.
+    let result = unsafe { ioctl_with_mut_ref(vcpu, KVM_PRE_FAULT_MEMORY(), request) };
+    if result < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 fn is_tmpfs(file: &File) -> io::Result<bool> {
@@ -168,6 +225,15 @@ fn prefault_range(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_windows_clip_ranges_to_the_region_backing() {
+        assert_eq!(file_window(8192, 8192, &(0..4096)), None);
+        assert_eq!(file_window(8192, 8192, &(4096..12288)), Some(8192..12288));
+        assert_eq!(file_window(8192, 8192, &(12288..20480)), Some(12288..16384));
+        assert_eq!(file_window(8192, 8192, &(16384..20480)), None);
+        assert_eq!(file_window(u64::MAX - 4095, 8192, &(0..u64::MAX)), None);
+    }
 
     fn sparse_file() -> File {
         let file = memfd::MemfdOptions::default()

@@ -582,6 +582,7 @@ pub fn restore_from_snapshot(
         params.clock_realtime,
         params.vmgenid_restore_notification,
         params.vmclock_restore_notification,
+        &params.working_set,
     )
     .map_err(RestoreFromSnapshotError::Build)
 }

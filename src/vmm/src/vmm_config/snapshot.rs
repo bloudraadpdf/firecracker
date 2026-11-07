@@ -106,6 +106,15 @@ impl SnapshotLoadHugePageConfig {
     }
 }
 
+/// Memory file byte ranges to prepare before a restored guest runs.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct WorkingSet {
+    /// Page-aligned ranges that the guest writes. Restore copies and maps them.
+    pub write: Vec<std::ops::Range<u64>>,
+    /// Page-aligned ranges that the guest reads. Restore maps them read-only.
+    pub read: Vec<std::ops::Range<u64>>,
+}
+
 /// Stores the configuration that will be used for loading a snapshot.
 #[derive(Debug, PartialEq, Eq)]
 pub struct LoadSnapshotParams {
@@ -137,6 +146,8 @@ pub struct LoadSnapshotParams {
     pub vmclock_restore_notification: VmClockRestoreNotification,
     /// Selects whether VMGenID raises its post-restore guest notification.
     pub vmgenid_restore_notification: VmGenIdRestoreNotification,
+    /// Recorded working set to prepare before the guest runs.
+    pub working_set: WorkingSet,
 }
 
 /// Stores the configuration for loading a snapshot that is provided by the user.
@@ -185,6 +196,12 @@ pub struct LoadSnapshotConfig {
     /// Selects whether VMGenID raises its post-restore guest notification.
     #[serde(default)]
     pub vmgenid_restore_notification: VmGenIdRestoreNotification,
+    /// Page-aligned memory file byte ranges `[start, end)` that the guest writes.
+    #[serde(default)]
+    pub write_set: Vec<[u64; 2]>,
+    /// Page-aligned memory file byte ranges `[start, end)` that the guest reads.
+    #[serde(default)]
+    pub read_set: Vec<[u64; 2]>,
 }
 
 /// Stores the configuration used for managing snapshot memory.

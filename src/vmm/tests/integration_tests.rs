@@ -407,6 +407,7 @@ fn verify_load_snapshot(
             huge_pages,
             vmclock_restore_notification: Default::default(),
             vmgenid_restore_notification: Default::default(),
+            working_set: Default::default(),
         }))
         .unwrap();
 
@@ -483,6 +484,7 @@ fn test_load_snapshot_rejects_hugetlbfs_with_file_backend() {
             huge_pages: SnapshotLoadHugePageConfig::Hugetlbfs2M,
             vmclock_restore_notification: Default::default(),
             vmgenid_restore_notification: Default::default(),
+            working_set: Default::default(),
         }))
         .unwrap_err();
 
@@ -560,6 +562,7 @@ fn verify_load_snap_disallowed_after_boot_resources(res: VmmAction, res_name: &s
         huge_pages: SnapshotLoadHugePageConfig::Snapshot,
         vmclock_restore_notification: Default::default(),
         vmgenid_restore_notification: Default::default(),
+        working_set: Default::default(),
     });
     let err = preboot_api_controller.handle_preboot_request(req);
     assert!(

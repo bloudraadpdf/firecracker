@@ -2188,6 +2188,32 @@ definitions:
           Interrupt is the default. Disabled still writes a new generation ID
           but does not raise the interrupt; guests must explicitly process the
           changed ID before consuming randomness or publishing readiness.
+      write_set:
+        type: array
+        items:
+          $ref: "#/definitions/MemoryFileRange"
+        description:
+          Memory file byte ranges that the guest writes after restore. Firecracker
+          copies and maps them before the guest runs. Requires the File memory
+          backend and KVM_CAP_PRE_FAULT_MEMORY; otherwise it is not used.
+      read_set:
+        type: array
+        items:
+          $ref: "#/definitions/MemoryFileRange"
+        description:
+          Memory file byte ranges that the guest reads after restore. Firecracker
+          maps them read-only before the guest runs. Requires the File memory
+          backend and KVM_CAP_PRE_FAULT_MEMORY; otherwise it is not used.
+
+  MemoryFileRange:
+    type: array
+    description:
+      A page-aligned, non-empty memory file byte range [start, end).
+    minItems: 2
+    maxItems: 2
+    items:
+      type: integer
+      format: uint64
 
 
   TokenBucket:
