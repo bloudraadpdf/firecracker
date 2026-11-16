@@ -136,9 +136,10 @@ pub struct LoadSnapshotParams {
     pub tpm: Option<super::tpm::TpmConfig>,
     /// Destination variable-service store and its explicit current generation.
     pub uefi_vars: Option<super::uefi_vars::UefiVarsRestoreConfig>,
-    /// [x86_64 only] When set to true, passes `KVM_CLOCK_REALTIME` to `KVM_SET_CLOCK` on restore,
-    /// advancing kvmclock by the wall-clock time elapsed since the snapshot was taken. When false
-    /// (default), kvmclock resumes from where it was at snapshot time.
+    /// When set to true, advances the guest clock on restore by the wall-clock time elapsed since
+    /// the snapshot was taken. On x86_64 it passes `KVM_CLOCK_REALTIME` to `KVM_SET_CLOCK`, which
+    /// advances kvmclock. On aarch64 it adds that time to the guest counters. When false (default),
+    /// the clock resumes from where it was at snapshot time.
     pub clock_realtime: bool,
     /// Selects the huge-page configuration to use for the restored microVM.
     pub huge_pages: SnapshotLoadHugePageConfig,
@@ -184,7 +185,8 @@ pub struct LoadSnapshotConfig {
     pub tpm: Option<super::tpm::TpmConfig>,
     /// Destination variable-service store and its explicit current generation.
     pub uefi_vars: Option<super::uefi_vars::UefiVarsRestoreConfig>,
-    /// [x86_64 only] When set to true, passes `KVM_CLOCK_REALTIME` to `KVM_SET_CLOCK` on restore.
+    /// When set to true, advances the guest clock on restore by the wall-clock time elapsed since
+    /// the snapshot was taken: kvmclock on x86_64, the guest counters on aarch64.
     #[serde(default)]
     pub clock_realtime: bool,
     /// Selects the huge-page configuration to use for the restored microVM.

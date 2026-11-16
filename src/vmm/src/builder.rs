@@ -563,8 +563,6 @@ pub enum BuildMicrovmFromSnapshotError {
     #[cfg(target_arch = "x86_64")]
     /// Failed to prepare restored snapshot memory: {0}
     PrefaultMemory(io::Error),
-    /// clock_realtime is not supported on aarch64.
-    UnsupportedClockRealtime,
 }
 
 /// Align restored TSC offsets before starting any vCPU threads.
@@ -686,8 +684,18 @@ pub fn build_microvm_from_snapshot(
 
     #[cfg(target_arch = "aarch64")]
     {
+        // The guest reads the counters directly: there is no clock that KVM can move, as kvmclock on
+        // x86_64. Add the time since the snapshot to the restored counters.
         if clock_realtime {
-            return Err(BuildMicrovmFromSnapshotError::UnsupportedClockRealtime);
+            let elapsed = std::time::Duration::from_nanos(
+                utils::time::get_time_ns(utils::time::ClockType::Real)
+                    .saturating_sub(microvm_state.vm_state.realtime_ns),
+            );
+            vcpus[0]
+                .kvm_vcpu
+                .advance_counters(&microvm_state.vcpu_states[0], elapsed)
+                .map_err(VcpuError::VcpuResponse)
+                .map_err(BuildMicrovmFromSnapshotError::RestoreVcpus)?;
         }
         let mpidrs = construct_kvm_mpidrs(&microvm_state.vcpu_states);
         // Restore kvm vm state.

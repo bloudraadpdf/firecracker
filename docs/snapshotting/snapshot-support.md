@@ -583,6 +583,15 @@ TSC-based clock source (for example `tsc`). Otherwise KVM does not save the
 realtime clock in the snapshot, and loading it with `clock_realtime: true` fails
 with `clock_realtime requested but not present in the snapshot state`.
 
+On `aarch64`, the guest reads the system counter of the CPU and KVM has no clock
+to advance. A snapshot keeps the host wall-clock time of its creation. With
+`clock_realtime: true`, Firecracker adds the time since then to the virtual
+counter of the guest, and to the physical counter when the snapshot has it,
+before the vCPUs run. `CLOCK_MONOTONIC` and `CLOCK_BOOTTIME` of the guest then
+include that time, and each timer of the guest that it passed expires at once.
+The same note applies: the clock appears to jump. A host wall clock that went
+back since the snapshot gives no change.
+
 ## Provisioning host disk space for snapshots
 
 Depending on VM memory size, snapshots can consume a lot of disk space.

@@ -6,6 +6,7 @@ use std::sync::Mutex;
 use kvm_bindings::{KVM_CAP_ARM_WRITABLE_IMP_ID_REGS, KVMIO, kvm_enable_cap};
 use kvm_ioctls::VmFd;
 use serde::{Deserialize, Serialize};
+use utils::time::{ClockType, get_time_ns};
 use vmm_sys_util::errno;
 use vmm_sys_util::ioctl::ioctl_with_ref;
 use vmm_sys_util::ioctl_iow_nr;
@@ -146,6 +147,7 @@ impl KvmVm {
                 .save_device(mpidrs)
                 .map_err(KvmVmError::SaveGic)?,
             resource_allocator: self.resource_allocator().save(),
+            realtime_ns: get_time_ns(ClockType::Real),
         })
     }
 
@@ -174,4 +176,7 @@ pub struct VmState {
     pub gic: GicState,
     /// resource allocator
     pub resource_allocator: ResourceAllocatorState,
+    /// Host `CLOCK_REALTIME` in nanoseconds at the save of this state. A load with `clock_realtime`
+    /// adds the time since then to the guest counters.
+    pub realtime_ns: u64,
 }

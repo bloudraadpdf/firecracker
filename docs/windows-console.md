@@ -625,10 +625,11 @@ full installed-reference matrix covers the legacy VGA profile.
 AMD64 console snapshots contain display memory and registers, keyboard/mouse
 queues, held input, pending releases, keyboard LEDs and pending lock updates,
 USB controller/HID state, PCI state, optical transfer state and media identity.
-The current snapshot format is 47.0.0. It includes the kernel prefault ranges
+The current snapshot format is 48.0.0. It includes the kernel prefault ranges
 and inherited block-backing requirements from `patch/v1.17.0-dev`, with the
 Windows device and CET state, plus the upstream queue and PCI root-port state.
-Formats 46 and earlier require their original
+Format 48 adds the host wall-clock time to the `aarch64` VM state. Formats 47
+and earlier require their original
 binary. Basic VGA state adds about 16 MiB; QXL also saves 48 MiB of private
 RAM/VRAM, its protocol ROM, control state and validated secondary-surface
 descriptors. The bounded snapshot reader accepts at most 128 MiB, including GPU

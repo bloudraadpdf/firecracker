@@ -2150,11 +2150,11 @@ definitions:
       clock_realtime:
         type: boolean
         description:
-          "[x86_64 only] When set to true, passes KVM_CLOCK_REALTIME to
-          KVM_SET_CLOCK on restore, advancing kvmclock by the wall-clock time
-          elapsed since the snapshot was taken. When false (default), kvmclock resumes
-          from where it was at snapshot time. This option may be extended to other clock
-          sources and CPU architectures in the future."
+          "When set to true, advances the guest clock on restore by the wall-clock
+          time elapsed since the snapshot was taken. On x86_64 it passes
+          KVM_CLOCK_REALTIME to KVM_SET_CLOCK, which advances kvmclock. On aarch64 it
+          adds that time to the guest counters. When false (default), the clock resumes
+          from where it was at snapshot time."
       huge_pages:
         type: string
         enum:

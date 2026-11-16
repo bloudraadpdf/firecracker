@@ -840,9 +840,13 @@ def test_clocksource_snapshot_restore(
     """Measure CLOCK_MONOTONIC before snapshot and after restore to determine
     whether the clocksource jumps forward or resumes from where it left off."""
 
-    if clock_realtime and clocksource != "kvm-clock":
+    if clock_realtime and clocksource not in ("kvm-clock", "arch_sys_counter"):
         pytest.skip(f"Clocksource {clocksource} doesn't support clock_realtime flag")
-    if clock_realtime and global_props.host_linux_version_tpl < (5, 16):
+    if (
+        clock_realtime
+        and clocksource == "kvm-clock"
+        and global_props.host_linux_version_tpl < (5, 16)
+    ):
         pytest.skip("clock_realtime is not supported on Linux < 5.16")
 
     boot_args = (

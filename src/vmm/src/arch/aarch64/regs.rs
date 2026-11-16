@@ -114,6 +114,12 @@ arm64_sys_reg!(SYS_CNTV_CVAL_EL0, 3, 3, 14, 3, 2);
 // https://elixir.bootlin.com/linux/v6.8/source/arch/arm64/include/asm/sysreg.h#L459
 arm64_sys_reg!(SYS_CNTPCT_EL0, 3, 3, 14, 0, 1);
 
+// Virtual Timer EL0 count Register
+// KVM gives the virtual counter the encoding of CNTV_CVAL_EL0, and the compare value that of CNTVCT_EL0.
+// That exchange is part of its API.
+// https://elixir.bootlin.com/linux/v6.12.6/source/arch/arm64/include/uapi/asm/kvm.h#L250
+arm64_sys_reg!(KVM_REG_ARM_TIMER_CNT, 3, 3, 14, 3, 2);
+
 // Physical Timer EL0 count Register
 // The id of this register is same as SYS_CNTPCT_EL0, but KVM defines it
 // separately, so we do as well.

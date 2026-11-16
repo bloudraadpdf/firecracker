@@ -10,6 +10,10 @@ and this project adheres to
 
 ### Added
 
+- The `clock_realtime` flag of the `LoadSnapshot` API is now supported on
+  aarch64. A snapshot keeps the host wall-clock time of its creation, and a load
+  with the flag adds the time since then to the guest counters. This bumps the
+  snapshot version to `48.0.0`.
 - Added the `Anonymous` snapshot memory backend. It copies snapshot RAM into
   anonymous memory before resume and supports transparent or explicit huge pages
   for guest writes without a separate UFFD handler.

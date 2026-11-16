@@ -8,6 +8,7 @@
 use std::fmt::{Debug, Write};
 use std::mem::offset_of;
 use std::sync::Arc;
+use std::time::Duration;
 
 use kvm_bindings::*;
 use kvm_ioctls::{VcpuExit, VcpuFd, VmFd};
@@ -274,6 +275,27 @@ impl KvmVcpu {
         state.pvtime_ipa = self.pvtime_ipa.map(|guest_addr| guest_addr.0);
 
         Ok(state)
+    }
+
+    /// Adds `elapsed` to the guest counters of `state`: the virtual counter and, when the snapshot has it,
+    /// the physical counter. KVM keeps one offset for each counter for all vCPUs of the VM, thus a call
+    /// for one vCPU is enough. Call it after `restore_state` of each vCPU.
+    pub fn advance_counters(
+        &self,
+        state: &VcpuState,
+        elapsed: Duration,
+    ) -> Result<(), KvmVcpuError> {
+        let ticks = counter_ticks(elapsed, counter_frequency());
+        for id in [KVM_REG_ARM_TIMER_CNT, KVM_REG_ARM_PTIMER_CNT] {
+            if let Some(reg) = state.regs.iter().find(|reg| reg.id == id) {
+                let value = reg.value::<u64, 8>().wrapping_add(ticks);
+                self.fd
+                    .set_one_reg(id, &value.to_le_bytes())
+                    .map_err(|err| VcpuArchError::SetOneReg(id, format!("{value:#x}"), err))
+                    .map_err(KvmVcpuError::RestoreState)?;
+            }
+        }
+        Ok(())
     }
 
     /// Use provided state to populate KVM internal state.
@@ -558,6 +580,26 @@ impl Peripherals {
         error!("Unexpected exit reason on vcpu run: {:?}", exit);
         Err(VcpuError::UnhandledKvmExit(format!("{:?}", exit)))
     }
+}
+
+/// Returns the frequency of the system counter in Hz. The guest counters have the same frequency.
+fn counter_frequency() -> u64 {
+    let frequency: u64;
+    // SAFETY: The instruction reads CNTFRQ_EL0 into a register. Linux lets EL0 read it. It uses no
+    // memory and no stack, and it does not change the flags.
+    unsafe {
+        std::arch::asm!(
+            "mrs {frequency}, cntfrq_el0",
+            frequency = out(reg) frequency,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    frequency
+}
+
+/// Returns the count of counter ticks in `elapsed` at `frequency` Hz, with `u64::MAX` as the limit.
+fn counter_ticks(elapsed: Duration, frequency: u64) -> u64 {
+    u64::try_from(elapsed.as_nanos() * u128::from(frequency) / 1_000_000_000).unwrap_or(u64::MAX)
 }
 
 /// Structure holding VCPU kvm state.
@@ -870,6 +912,48 @@ pub(crate) mod tests {
         assert!(!state.regs.is_empty());
         vcpu.restore_state(&state)
             .expect("Cannot restore state of vcpu");
+    }
+
+    #[test]
+    fn test_counter_ticks() {
+        assert_eq!(counter_ticks(Duration::ZERO, 24_000_000), 0);
+        assert_eq!(
+            counter_ticks(Duration::from_secs(1), 24_000_000),
+            24_000_000
+        );
+        assert_eq!(
+            counter_ticks(Duration::from_millis(1500), 1_000_000_000),
+            1_500_000_000
+        );
+        assert_eq!(counter_ticks(Duration::MAX, 1_000_000_000), u64::MAX);
+    }
+
+    #[test]
+    fn test_advance_counters() {
+        let (_vm, vcpu) = setup_vcpu(0x10000);
+        let state = vcpu.save_state().unwrap();
+        let frequency = counter_frequency();
+        assert_ne!(frequency, 0);
+        let saved = state
+            .regs
+            .iter()
+            .find(|reg| reg.id == KVM_REG_ARM_TIMER_CNT)
+            .unwrap()
+            .value::<u64, 8>();
+
+        vcpu.advance_counters(&state, Duration::from_secs(100))
+            .unwrap();
+
+        let mut bytes = [0_u8; 8];
+        vcpu.fd
+            .get_one_reg(KVM_REG_ARM_TIMER_CNT, &mut bytes)
+            .unwrap();
+        // The counter runs after the write: the read comes later. One second is the limit for that.
+        let advanced = u64::from_le_bytes(bytes) - saved;
+        assert!(
+            (100 * frequency..101 * frequency).contains(&advanced),
+            "{advanced} ticks at {frequency} Hz"
+        );
     }
 
     #[test]
