@@ -597,17 +597,19 @@ mod tests {
                 .extend(sets.as_object().unwrap().clone());
             parse_put_snapshot(&Body::new(body.to_string()), Some("load"))
         };
-        let request =
-            load(serde_json::json!({"write_set": [[4096, 16384]], "read_set": [[65536, 69632]]}))
-                .unwrap();
+        let request = load(serde_json::json!({
+            "write_set": [[4096, 16384], [20480, 24576]],
+            "read_set": [[65536, 69632], [73728, 81920]]
+        }))
+        .unwrap();
         let VmmAction::LoadSnapshot(params) = vmm_action_from_request(request) else {
             panic!("snapshot load expected");
         };
         assert_eq!(
             params.working_set,
             WorkingSet {
-                write: vec![4096..16384],
-                read: vec![65536..69632],
+                write: vec![4096..16384, 20480..24576],
+                read: vec![65536..69632, 73728..81920],
             }
         );
         for range in [[4096, 4096], [8192, 4096], [1, 4096], [4096, 4097]] {
